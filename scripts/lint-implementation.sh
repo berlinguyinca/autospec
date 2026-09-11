@@ -91,6 +91,14 @@ RULE_IDs enforced (deterministic detectors):
   NEW_DEP_UNJUSTIFIED  Dependency added to a manifest (requirements.txt, package.json,
                     go.mod, Cargo.toml, pyproject.toml, Gemfile) without a 'why:' marker
                     in the same hunk. Opt-out: # linter:allow-NEW_DEP_UNJUSTIFIED <reason>.
+  GATE_PROMOTION_UNEVIDENCED  A CI gate promotion in a modified workflow file
+                    (*.yml/*.yaml): a job added to another job's needs: list, or a
+                    removed continue-on-error: true — promoting a check from advisory
+                    to blocking — without the issue or PR body citing a green run of
+                    the promoted job (a GitHub Actions run/job URL or a captured exit
+                    status 0). Brand-new workflow files are exempt: none of their jobs
+                    has ever run, so no citation could exist (#3990).
+                    Opt-out: # linter:allow-GATE_PROMOTION_UNEVIDENCED <reason>.
   NEW_ABSTRACTION_SINGLE_CALLER  New *manager*|*factory*|*adapter*|*wrapper*|*base*|*abstract*
                     file with ≤1 external call site found by rg. Opt-out:
                     # linter:allow-NEW_ABSTRACTION_SINGLE_CALLER <reason>.
@@ -323,9 +331,10 @@ is_line_allowed() {
 
 TMP_DIFF="$(mktemp -t lint-impl-diff.XXXXXX)"
 TMP_ISSUE="$(mktemp -t lint-impl-issue.XXXXXX)"
+TMP_PR_BODY="$(mktemp -t lint-impl-prbody.XXXXXX)"
 TMP_CONTRACT_OUT="$(mktemp -t lint-impl-contract-out.XXXXXX)"
 TMP_CONTRACT_ERR="$(mktemp -t lint-impl-contract-err.XXXXXX)"
-trap 'rm -f "$TMP_DIFF" "$TMP_ISSUE" "$TMP_CONTRACT_OUT" "$TMP_CONTRACT_ERR"' EXIT INT TERM
+trap 'rm -f "$TMP_DIFF" "$TMP_ISSUE" "$TMP_PR_BODY" "$TMP_CONTRACT_OUT" "$TMP_CONTRACT_ERR"' EXIT INT TERM
 
 # Validate operator-supplied offline evidence before any successful early return.
 OFFLINE_ISSUE_BODY=0
@@ -372,6 +381,12 @@ if [ -n "$ISSUE_NUMBER" ]; then
         gh issue view "$ISSUE_NUMBER" --json body --jq '.body' > "$TMP_ISSUE" 2>/dev/null || true
     fi
     parse_skip_directives "$TMP_ISSUE"
+fi
+
+# Fetch the PR body in PR mode: a green-run citation may live in the PR body as
+# well as the issue body (GATE_PROMOTION_UNEVIDENCED evidence check, #3990).
+if [ -z "$DIFF_FILE" ] && [ "$PRE_COMMIT" -ne 1 ] && [ -n "$PR_NUMBER" ]; then
+    gh pr view "$PR_NUMBER" --json body --jq '.body' > "$TMP_PR_BODY" 2>/dev/null || true
 fi
 
 # ── per-RULE_ID emit cap tracking ─────────────────────────────────────────────
@@ -2003,6 +2018,193 @@ EOF
     rm -f "$_ndj_tmp"
 }
 
+# ── GATE_PROMOTION_UNEVIDENCED detector (issue #3990) ────────────────────────
+# A CI gate that has never run green is a claim, not evidence: this rule rejects
+# a promotion of a check from advisory/non-gating to blocking unless the issue
+# or PR body cites a green run of the promoted job.
+#
+# A promotion is one of (detected in modified — not newly created — workflow
+# files, since a brand-new workflow's jobs have never run and no citation could
+# exist for them):
+#   * a job name added to another job's needs: list (inline [a, b] or block
+#     - a form) where the name is not already present on that job's removed
+#     needs: line; or
+#   * a removed continue-on-error: true that is not re-added in the same job
+#     (the job now fails the workflow: advisory → blocking).
+#
+# A promotion is evidenced when a line in the issue body (or, in PR mode, the
+# PR body) names the job AND carries a green-run citation: a GitHub Actions
+# run/job URL or a captured exit status 0.
+#
+# The finding names the workflow file and the job (#3990 AC1). Escape hatches:
+# per-issue `Guardian: skip-GATE_PROMOTION_UNEVIDENCED # <reason>` (honored by
+# emit_capped) and inline `# linter:allow-GATE_PROMOTION_UNEVIDENCED <reason>`.
+
+# gate_promotion_scan — one awk pass over the diff. Emits, per promotion:
+#   PATH<TAB>JOB<TAB>LINENO<TAB>REASON
+# where JOB is the promoted job (the job newly added to a needs: list, or the
+# job whose continue-on-error: true was removed).
+gate_promotion_scan() {
+    awk '
+        function indent(s,   k) { k = 0; while (k < length(s) && substr(s, k + 1, 1) == " ") k++; return k }
+        function strip_comment(s) { sub(/[[:space:]]+#.*$/, "", s); sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+        function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+        function unquote(s) { gsub(/["\047]/, "", s); return s }
+        function reset_jobs() { in_jobs = 0; job = ""; needs_blk = 0; needs_indent = 0 }
+        function clear_state() {
+            reset_jobs()
+            delete added_names; delete added_lno
+            delete removed_names
+            delete co_removed; delete co_readded; delete co_lno; delete job_seen
+        }
+        function record_added_name(name) {
+            name = unquote(trim(name))
+            if (name == "" || job == "") return
+            key = job SUBSEP name
+            if (!added_names[key]) { added_names[key] = 1; added_lno[key] = cur }
+        }
+        function record_removed_name(name) {
+            name = unquote(trim(name))
+            if (name == "" || job == "") return
+            removed_names[job SUBSEP name] = 1
+        }
+        function flush(   key, parts, j, name) {
+            if (path == "" || is_new || !in_file) return
+            for (key in added_names) {
+                split(key, parts, SUBSEP); j = parts[1]; name = parts[2]
+                if (!removed_names[key]) {
+                    printf "%s\t%s\t%d\tjob %s added to %s needs: — job now blocks %s\n", path, name, added_lno[key], name, j, j
+                }
+            }
+            for (j in co_removed) {
+                if (job_seen[j] && !co_readded[j]) {
+                    printf "%s\t%s\t%d\tjob %s promoted from advisory to blocking (continue-on-error: true removed)\n", path, j, co_lno[j], j
+                }
+            }
+        }
+        /^diff --git / {
+            flush()
+            in_file = 0; path = ""; is_new = 0
+            p = $NF; sub(/^b\//, "", p)
+            if (p ~ /\.(yml|yaml)$/) { path = p; in_file = 1; clear_state() }
+            next
+        }
+        !in_file { next }
+        /^new file mode/ { is_new = 1; next }
+        /^--- / { if ($0 ~ /\/dev\/null/) is_new = 1; next }
+        /^\+\+\+ / { next }
+        /^\\ / { next }
+        /^@@ / {
+            hdr = $0; sub(/.*\+/, "", hdr); sub(/[^0-9].*/, "", hdr)
+            cur = hdr + 0
+            next
+        }
+        {
+            prefix = substr($0, 1, 1)
+            if (prefix != " " && prefix != "+" && prefix != "-") next
+            c = substr($0, 2)
+            if (prefix == "-" || prefix == " ") {
+                if (prefix == " ") cur++
+            } else {
+                cur++
+            }
+            tc = strip_comment(c)
+            # Top-level YAML key: enter/leave the jobs: section.
+            if (indent(c) == 0 && tc ~ /^[A-Za-z_][A-Za-z0-9_-]*:/) {
+                if (tc ~ /^jobs:/) { in_jobs = 1; job = ""; needs_blk = 0 }
+                else reset_jobs()
+                next
+            }
+            if (!in_jobs) next
+            # Job header: 2-space-indented key under jobs: (tc is stripped,
+            # so test indent on c and the bare key on tc).
+            if (indent(c) == 2 && tc ~ /^[A-Za-z0-9_-]+:[[:space:]]*$/) {
+                job = tc
+                sub(/:.*$/, "", job)
+                needs_blk = 0
+                job_seen[job] = 1
+            }
+            if (job == "") next
+            # Block-form needs: list items.
+            if (needs_blk) {
+                if (indent(c) > needs_indent && tc ~ /^[[:space:]]*-[[:space:]]*/) {
+                    item = tc; sub(/^[[:space:]]*-[[:space:]]*/, "", item)
+                    if (prefix == "+") record_added_name(item)
+                    else if (prefix == "-") record_removed_name(item)
+                    next
+                }
+                needs_blk = 0
+            }
+            # Inline / scalar / block-form needs: key.
+            if (tc ~ /^[[:space:]]*needs:[[:space:]]*\[[^]]*\]/) {
+                inner = tc; sub(/^[[:space:]]*needs:[[:space:]]*\[/, "", inner); sub(/\].*$/, "", inner)
+                m = split(inner, names, ",")
+                for (i = 1; i <= m; i++) {
+                    if (prefix == "+") record_added_name(names[i])
+                    else if (prefix == "-") record_removed_name(names[i])
+                }
+                next
+            }
+            if (tc ~ /^[[:space:]]*needs:[[:space:]]*$/) {
+                needs_blk = 1
+                needs_indent = indent(c)
+                next
+            }
+            if (tc ~ /^[[:space:]]*needs:[[:space:]]*[A-Za-z0-9_-]+$/) {
+                nm = tc; sub(/^[[:space:]]*needs:[[:space:]]*/, "", nm)
+                if (prefix == "+") record_added_name(nm)
+                else if (prefix == "-") record_removed_name(nm)
+                next
+            }
+            # continue-on-error: true removed without re-adding (advisory → blocking).
+            if (tc ~ /^[[:space:]]*continue-on-error:[[:space:]]*true[[:space:]]*$/) {
+                if (prefix == "-") { co_removed[job] = 1; co_lno[job] = cur }
+                else if (prefix == "+") co_readded[job] = 1
+                next
+            }
+        }
+        END { flush() }
+    ' "$TMP_DIFF"
+}
+
+# gate_promotion_cited JOB — returns 0 if the issue body (always) or the PR
+# body (PR mode) has a line naming JOB that carries a green-run citation: a
+# GitHub Actions run/job URL or a captured zero exit status.
+gate_promotion_cited() {
+    local job="$1"
+    local job_pat="(^|[^A-Za-z0-9_-])${job}([^A-Za-z0-9_-]|$)"
+    local url_pat="github\\.com/[^[:space:]'\"<>)|]*actions/(runs|job)/[0-9]+"
+    local exit_pat="exit[-_[:space:]]*(code|status)?[-_[:space:]]*[:=]?[[:space:]]*0([^0-9]|$)|(^|[^A-Za-z0-9])rc[[:space:]]*[:=][[:space:]]*0([^0-9]|$)"
+    grep -hE "$job_pat" "$TMP_ISSUE" "$TMP_PR_BODY" 2>/dev/null \
+        | grep -Eq "$url_pat|$exit_pat"
+}
+
+detect_gate_promotion() {
+    local _gpe_tmp
+    _gpe_tmp="$(mktemp -t lint-gate-promo.XXXXXX)"
+    gate_promotion_scan > "$_gpe_tmp"
+
+    if [ ! -s "$_gpe_tmp" ]; then
+        rm -f "$_gpe_tmp"
+        return 0
+    fi
+
+    local path job lno rest
+    while IFS=$'\t' read -r path job lno rest; do
+        [ -z "$path" ] && continue
+        if gate_promotion_cited "$job"; then
+            continue
+        fi
+        if is_line_allowed "GATE_PROMOTION_UNEVIDENCED" "$path" "$lno"; then
+            continue
+        fi
+        emit_capped "GATE_PROMOTION_UNEVIDENCED" "$path" "$lno" \
+            "${rest} — no green run of job '${job}' cited in the issue or PR body (cite a GitHub Actions run/job URL or a captured exit status 0)"
+    done < "$_gpe_tmp"
+
+    rm -f "$_gpe_tmp"
+}
+
 # ── directives output mode ────────────────────────────────────────────────────
 # Maps each RULE_ID to a short imperative directive line.
 
@@ -2034,6 +2236,7 @@ rule_directive() {
         BATS_SUITE_UNREGISTERED) printf 'Register the new bats suite as a typed ExternalCheck::BatsSuite owner in crates/autospec-core/src/validation/catalog.rs, or add its path to BATS_REGISTRATION_BASELINE in crates/autospec-core/src/validation/external/bats_registration_baseline.rs; suites at tests/ root need no registration.' ;;
         COMMAND_NOT_REGISTERED) printf 'Visit every registration site the finding names for the new command: the COMMANDS table entry and the dispatch match arm in crates/autospec-cli/src/commands/mod.rs, plus the | `autospec <name> ...` | row in docs/cli-reference.md — all in this commit.' ;;
         CATALOG_ENTRY_INCOMPLETE) printf 'Keep the two catalog sites in lockstep: the id must appear in STANDARD_CHECK_IDS (crates/autospec-core/src/validation/catalog/catalog_ids.rs) and have a match arm in ValidationCheck::catalog_entry (crates/autospec-core/src/validation/catalog.rs) — add the missing one in this commit.' ;;
+        GATE_PROMOTION_UNEVIDENCED) printf 'Cite a green run of the promoted job in the issue or PR body (a GitHub Actions run/job URL or a captured exit status 0) before promoting it to a blocking gate, or revert the promotion.' ;;
         *)               printf 'Fix the flagged %s violation before re-pushing.' "$rule_id" ;;
     esac
 }
@@ -2043,7 +2246,7 @@ rule_directive() {
 if [ "$DIRECTIVES" -eq 1 ]; then
     # Capture findings to a temp file, then reformat as directives
     TMP_FINDINGS="$(mktemp -t lint-impl-findings.XXXXXX)"
-    trap 'rm -f "$TMP_DIFF" "$TMP_ISSUE" "$TMP_CONTRACT_OUT" "$TMP_CONTRACT_ERR" "$TMP_FINDINGS"' EXIT INT TERM
+    trap 'rm -f "$TMP_DIFF" "$TMP_ISSUE" "$TMP_PR_BODY" "$TMP_CONTRACT_OUT" "$TMP_CONTRACT_ERR" "$TMP_FINDINGS"' EXIT INT TERM
 
     # Run detectors with stdout going to TMP_FINDINGS
     {
@@ -2061,6 +2264,7 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         detect_bats_suite_registration
         detect_command_registration
         detect_catalog_entry_completeness
+        detect_gate_promotion
         if [ "$VACUOUS_ASSERTIONS" -eq 1 ]; then
             detect_vacuous_assertions
         fi
@@ -2106,6 +2310,7 @@ else
     detect_bats_suite_registration
     detect_command_registration
     detect_catalog_entry_completeness
+    detect_gate_promotion
     if [ "$VACUOUS_ASSERTIONS" -eq 1 ]; then
         detect_vacuous_assertions
     fi
