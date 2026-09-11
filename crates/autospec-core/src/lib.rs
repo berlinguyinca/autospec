@@ -123,6 +123,7 @@ pub mod unfed_pass;
 pub mod untested_public_items;
 pub mod validation;
 pub mod verification;
+pub mod weight_acquisition;
 pub mod wire_fixture;
 pub mod work_selection;
 pub mod workload_validation;
