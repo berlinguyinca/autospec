@@ -26,6 +26,7 @@
 //! The caller runs its checks, reports each as a [`CheckReport`], and
 //! [`decide`] renders the verdict.
 
+use crate::run_status::Status;
 use serde::{Deserialize, Serialize};
 
 /// The checks a guard can run before an issue is dispatched.
@@ -126,12 +127,17 @@ impl CheckReport {
 /// (tolerant to growth). Only the statuses enumerated here — where the run
 /// failed in a way no amount of re-dispatch can fix without a fresh run —
 /// are archived.
+///
+/// Entries are derived from the shared [`Status`] enum (backed by
+/// `config/run-status-vocabulary.tsv`) rather than restating wire strings.
+/// The legacy spelling `BUILD-FAILED` is an alias in the vocabulary that
+/// resolves to `Status::BuildFail` via [`crate::run_status::canonical_status`] before the
+/// membership check, so it need not be listed here (#4206).
 pub const FAILED_RUN_STATUSES: &[&str] = &[
-    "BUILD-FAIL",
-    "BUILD-FAILED",
-    "TIMEOUT",
-    "TIMEOUT-NO-OUTPUT",
-    "TEST-TIMEOUT",
+    Status::BuildFail.as_str(),
+    Status::Timeout.as_str(),
+    Status::TimeoutNoOutput.as_str(),
+    Status::TestTimeout.as_str(),
 ];
 
 /// The classified outcome of an unconverted artifact.
@@ -157,9 +163,12 @@ pub enum ArtifactOutcome {
 /// the outcome is [`ArtifactOutcome::Unrecorded`]: the guard holds and
 /// never archives.
 ///
-/// A status in [`FAILED_RUN_STATUSES`] means the run failed irrecoverably;
-/// the artifact is [`ArtifactOutcome::FailedRun`] and the guard archives it
-/// to free the dispatch slot.
+/// A status whose canonical form is in [`FAILED_RUN_STATUSES`] means the run
+/// failed irrecoverably; the artifact is [`ArtifactOutcome::FailedRun`] and
+/// the guard archives it to free the dispatch slot.
+///
+/// Legacy spellings (`BUILD-FAILED`, `TESTS-DO-NOT-COMPILE`) reach this rule
+/// through the vocabulary alias table, not through a second literal here.
 ///
 /// Any other status is [`ArtifactOutcome::Convertible`]: the conversion pass
 /// can still act on the patch, so the guard holds with the status named.
@@ -170,11 +179,13 @@ pub fn classify_artifact_outcome(status: Option<&str>) -> ArtifactOutcome {
         None => ArtifactOutcome::Unrecorded {
             detail: "no terminal status recorded next to the patch".to_string(),
         },
-        Some(s) if FAILED_RUN_STATUSES.contains(&s) => ArtifactOutcome::FailedRun {
-            status: s.to_string(),
-        },
-        Some(s) => ArtifactOutcome::Convertible {
-            status: s.to_string(),
+        Some(s) => match crate::run_status::canonical_status(s) {
+            Some(c) if FAILED_RUN_STATUSES.contains(&c.as_str()) => ArtifactOutcome::FailedRun {
+                status: s.to_string(),
+            },
+            _ => ArtifactOutcome::Convertible {
+                status: s.to_string(),
+            },
         },
     }
 }
