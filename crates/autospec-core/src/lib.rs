@@ -31,6 +31,7 @@ pub mod claim;
 pub mod code_intel;
 pub mod config_fidelity;
 pub mod conflict_resolution;
+pub mod construction_sites;
 pub mod context;
 pub mod conversion_gate;
 pub mod coordination;
