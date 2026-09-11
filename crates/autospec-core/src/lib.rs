@@ -45,6 +45,7 @@ pub mod dispatch_guard;
 pub mod dispatch_outcomes;
 pub mod dispatch_pipeline;
 pub mod dispatch_recheck;
+pub mod entity_binding;
 pub mod env_preconditions;
 pub mod error;
 pub mod evaluation;
