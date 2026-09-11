@@ -429,6 +429,7 @@ fn autonomous_executor_bridge_recovery_rejects_replaced_foreign_repository() {
         umbrella: None,
         current_child: None,
         implementation_repair_attempt: 0,
+        closes_authorized: true,
     };
     write_invocation_atomic(&state_path, &invocation).expect("persist invocation");
     git(
