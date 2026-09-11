@@ -5,6 +5,7 @@ pub mod benchmark;
 pub mod claim;
 pub mod cost;
 pub mod dispatch;
+pub mod dispatch_outcomes;
 pub mod dispatch_spec;
 pub mod doctor;
 pub mod explore;
@@ -110,6 +111,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "Gate dispatch on queue freshness and per-hop liveness",
     ),
     (
+        "dispatch-outcomes",
+        "Attribute dispatch outcomes to model and spec size band (append-only ledger report)",
+    ),
+    (
         "resources",
         "List and show resource ledger rows (read-only)",
     ),
@@ -173,6 +178,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "parent" => parent::run(rest),
             "queue" => queue::run(rest),
             "dispatch" => dispatch::run(rest),
+            "dispatch-outcomes" => dispatch_outcomes::run(rest).map_err(CommandFailure::diagnostic),
             "resources" => resources::run(rest),
             "doctor" => doctor::run(rest).map_err(CommandFailure::diagnostic),
             "explore" => explore::run(rest),
