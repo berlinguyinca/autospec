@@ -10,6 +10,7 @@
 #   <RULE_ID>: <1-line description>
 # where RULE_ID is GOAL_VAGUE | GOAL_HEDGE | GOAL_NOT_ONE_SENTENCE
 #                | AC_PROSE | AC_SUBJECTIVE | AC_TOO_LONG | AC_EMPTY | AC_VACUOUS
+#                | SCOPE_HEDGE
 #                | SMOKE_MULTI_LINE | SMOKE_PLACEHOLDER | SMOKE_NOT_FENCED
 #                | MISSING_SECTION_FILES_TO_READ | MISSING_SECTION_IMPL_OUTLINE
 #                | MISSING_SECTION_TESTS | DEPS_MALFORMED
@@ -47,6 +48,10 @@ Rules enforced (§3 quality contract):
   AC_VACUOUS            AC item asserts 0 occurrences or absence of a literal without a
                         positive post-condition in the same item (such a criterion cannot
                         fail once the literal changes for unrelated reasons).
+  SCOPE_HEDGE           Scope section (Goal, Acceptance criteria, Implementation
+                        outline) contains a hedged word (interim|for now|at minimum|
+                        ideally|conservative): an agent implements the smallest thing
+                        the spec can be read as permitting (#4275).
   SMOKE_MULTI_LINE      Primary smoke test block does not have exactly one executable line.
   SMOKE_PLACEHOLDER     Primary smoke test block contains ... <TODO> TBD or XXX.
   SMOKE_NOT_FENCED      No fenced code block found under Primary smoke test heading.
@@ -404,6 +409,26 @@ check_ac() {
     done <<EOF
 $ac_lines
 EOF
+}
+
+# ── §3.2b Scope-hedge rule (issue #4275) ─────────────────────────────────────
+# An agent implements the smallest thing the spec can be read as permitting.
+# A scope section (Goal, Acceptance criteria, Implementation outline) must
+# contain nothing optional: a hedged phrase ("interim", "for now", "at
+# minimum", "ideally", "conservative") names an alternative acceptable outcome,
+# so it belongs in a rationale section, or the smaller thing becomes its own
+# issue with its own acceptance criteria.
+check_scope_hedge() {
+    local hedge_re='\b(interim|for now|at minimum|ideally|conservative)\b'
+    local section section_content phrase
+    for section in '## Goal' '## Acceptance criteria' '## Acceptance Criteria' '## Implementation outline'; do
+        section_content="$(extract_section "$section" "$BODY_FILE" | sed '/^[[:space:]]*$/d')"
+        [ -n "$section_content" ] || continue
+        if printf '%s\n' "$section_content" | grep -qiE "$hedge_re"; then
+            phrase="$(printf '%s\n' "$section_content" | grep -oiE "$hedge_re" | head -1 | tr '[:upper:]' '[:lower:]')"
+            add_finding "SCOPE_HEDGE" "Scope section '$section' contains hedged wording '$phrase' — an agent implements the smallest thing the spec can be read as permitting; move it to a rationale section or file the smaller thing as its own issue (#4275)"
+        fi
+    done
 }
 
 # ── §3.3 Primary smoke test shape rules ──────────────────────────────────────
@@ -830,6 +855,7 @@ EOF_DAG2
 
 check_goal
 check_ac
+check_scope_hedge
 check_smoke
 check_sections
 check_files_touched
