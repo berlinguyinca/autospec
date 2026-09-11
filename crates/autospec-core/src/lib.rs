@@ -73,6 +73,7 @@ pub mod integration;
 pub mod issue_lock;
 pub mod item_sweep;
 pub mod lint;
+pub mod log_freshness;
 pub mod managed_project;
 pub mod name_scope;
 pub mod not_reproducible;
