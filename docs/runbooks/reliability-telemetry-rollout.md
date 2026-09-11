@@ -74,6 +74,54 @@ it the only one exercising the multi-GPU path. Both are plausible and neither is
 evidence. Until one of them is confirmed, rotation is mitigation, not a fix, and
 the runbook should be read that way.
 
+## SUPERSEDED (2026-09-11): do not re-enable `worker-rotate.sh`
+
+The shell watchdog described in the next section was **disabled the same day
+it was documented**, and its cron entry must not be restored. Detection moved
+into the Go gateway.
+
+**Why.** A generation probe queues behind the work it is trying to measure. On
+a worker with a single slot it therefore times out on the *busiest* worker,
+not the broken one. Measured: job `22999745` was marked `UNRESPONSIVE` at
+`45030ms` by this watchdog while it was generating at **48.8 tok/s with 11,080
+tokens in flight**. It was the healthiest worker in the fleet. Nine workers
+were lost this way in one afternoon, and because rotation returns the
+allocation to Slurm — where a replacement can queue for hours — every false
+positive cost real capacity.
+
+The parameters below make this worse rather than better: raising
+`GEN_TIMEOUT` delays detection of genuinely dead workers without fixing the
+false positives, because the probe's queueing delay is unbounded.
+
+**What replaced it.** The gateway now separates *busy* from *stuck* by
+**progress**, not response time. `llama-server`'s `/metrics` is answered off
+the work queue, so it responds while the worker is mid-request:
+
+```
+job 23001707 (wedged):  prompt 8501 -> 8501,     predicted 261 -> 261,   processing 1
+job 23005257 (busy):    prompt 144634 -> 155736, predicted 31835,        processing 1
+```
+
+A worker is removed only after consecutive samples showing **no token
+movement**. Idle is not stuck, progress resets the count, and the first
+sample concludes nothing. A busy worker cannot be caught by it, because busy
+workers move tokens.
+
+Two further corrections this class of fault taught us, both of which apply to
+anything reading these counters:
+
+- `requests_processing` is **not** a valid guard. A wedged worker reports `0`
+  once the client queued behind it gives up — job 23001707 sat frozen for
+  hours reporting nothing in flight.
+- Read the metrics body with `io.Copy` over a `LimitReader`, never
+  `io.CopyN`: `CopyN` returns `io.EOF` when the body is shorter than the
+  limit, which a metrics page always is. That bug silently disabled the
+  detector on every worker.
+
+The sections below are retained as the **incident record** — what was
+observed, and what was tried. Treat the operational instructions in them as
+history, not as procedure.
+
 ## The watchdog: `worker-rotate.sh`
 
 `/quobyte/metabolomicsgrp/it/llm/worker-rotate.sh` runs from cron every five
