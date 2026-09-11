@@ -19,6 +19,11 @@
 use std::fmt;
 use std::fs;
 use std::io::Write;
+// Gated to match the only code that uses it: both `.dev()`/`.ino()` call
+// sites live inside `#[cfg(target_os = "linux")]` blocks, and `std::os::unix`
+// does not exist on Windows, so an unconditional import failed to resolve
+// (E0433) in a job that has been red long enough for nobody to read it.
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -15,6 +15,9 @@
 //! * a concurrent refresh with 10 job start-ups leaves all 10 jobs alive;
 //! * no write lands in any directory a running job can be reading.
 
+// The module under test is `#[cfg(unix)]`; this suite follows it.
+#![cfg(unix)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

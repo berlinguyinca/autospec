@@ -60,6 +60,12 @@ pub mod graph;
 pub mod growth;
 pub mod heartbeat;
 pub mod host_set;
+// Unix-only by design: the module's core abstraction is the `current`
+// symlink it swaps atomically, and `std::os::unix::fs::symlink` does not
+// exist on Windows. Rather than invent Windows symlink semantics nobody
+// has asked for, the module is simply absent there. autospec-cli does not
+// reference it, so the Windows CLI check loses nothing.
+#[cfg(unix)]
 pub mod immutable_base;
 pub mod initiative;
 pub mod insights;
