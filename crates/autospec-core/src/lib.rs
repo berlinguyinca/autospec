@@ -82,6 +82,7 @@ pub mod merge_gate;
 pub mod name_scope;
 pub mod not_reproducible;
 pub mod planning;
+pub mod platform_gate;
 pub mod post_merge;
 pub mod procedure;
 pub mod prompt_blocks;
