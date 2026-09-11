@@ -64,6 +64,7 @@ pub mod graph;
 pub mod growth;
 pub mod guard_extraction;
 pub mod heartbeat;
+pub mod held_backlog;
 pub mod host_set;
 // Unix-only by design: the module's core abstraction is the `current`
 // symlink it swaps atomically, and `std::os::unix::fs::symlink` does not
