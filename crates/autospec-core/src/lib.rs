@@ -34,6 +34,7 @@ pub mod coordination;
 pub mod cost;
 pub mod deadline_ratchet;
 pub mod dispatch_guard;
+pub mod dispatch_outcomes;
 pub mod dispatch_pipeline;
 pub mod error;
 pub mod evaluation;
