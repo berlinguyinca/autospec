@@ -82,6 +82,7 @@ fn portable_supervision_state(fixture: &DirectFixture) -> PersistedInvocation {
         umbrella: None,
         current_child: None,
         implementation_repair_attempt: 0,
+        closes_authorized: true,
     }
 }
 
