@@ -193,7 +193,13 @@ use std::collections::BTreeMap;
 /// ([`Patch::ordering_key`]). Ordering decides which work a pass spends
 /// its compute on; results recorded under version 3 are hypotheses the
 /// version-4 logic re-verifies, not decisions.
-pub const CONVERSION_LOGIC_VERSION: u32 = 4;
+/// Bumped to 5 in #4279: the stale-base hold reason
+/// ([`HoldReason::StaleBase`], [`classify_build_failure`]) joins the
+/// retirement decision — a stale-base hold is retired on re-dispatch
+/// (the drift resolves when the patch is rebased onto the new tip), so
+/// results recorded under version 4 are hypotheses the version-5 logic
+/// re-verifies, not decisions.
+pub const CONVERSION_LOGIC_VERSION: u32 = 5;
 
 /// A conversion outcome class, ordered cheapest first.
 ///
@@ -1261,6 +1267,11 @@ pub enum HoldReason {
     /// reproduces the failure, so it is retired only like a
     /// [`BuildFailure`]: it is not.
     AgentReportedUnbuilt,
+    /// The build failed because the patch's base has drifted from the
+    /// trunk tip: the patch compiles at its own base but not at the
+    /// current tip (#4279). A re-dispatch at a fresh base differs — the
+    /// new trunk code resolves the conflict — so this hold is retirable.
+    StaleBase,
 }
 
 impl HoldReason {
@@ -1269,13 +1280,18 @@ impl HoldReason {
     /// patch was held, not about the hold itself: a deterministic rule
     /// the agent has learned since, yes — a re-run meets the fixed rule;
     /// an agent-reported unformatted hold, yes — a fresh agent formats
-    /// its submission; a genuine build failure the agent reproduces, no
-    /// — a re-run reproduces it, and retiring would discard paid-for
-    /// work with no chance of a different outcome (the same applies to
-    /// an agent-reported unbuilt hold: the failure is a property of the
-    /// submission, not of the run).
+    /// its submission; a stale-base hold (#4279), yes — the build failed
+    /// because the trunk moved past the patch's base, and a re-dispatch
+    /// at the new base compiles; a genuine build failure the agent
+    /// reproduces, no — a re-run reproduces it, and retiring would
+    /// discard paid-for work with no chance of a different outcome (the
+    /// same applies to an agent-reported unbuilt hold: the failure is a
+    /// property of the submission, not of the run).
     pub fn rerun_plausibly_differs(self) -> bool {
-        matches!(self, Self::RuleFixed | Self::AgentReportedUnformatted)
+        matches!(
+            self,
+            Self::RuleFixed | Self::AgentReportedUnformatted | Self::StaleBase
+        )
     }
 }
 
@@ -1343,6 +1359,50 @@ pub fn plan_retirement(
         destination: format!("{}/{}", retirement_root(root), patch.identity),
         reason,
     })
+}
+
+/// Classify a build failure by drift (#4279): attribute before accusing.
+///
+/// When the build gate fails, the first question is not *whether the
+/// patch is broken* but *whether the trunk moved past the patch's base
+/// in a way that broke the build*. The caller has already measured
+/// `commits_behind` (the `git rev-list --count` result) and re-run the
+/// build at the patch's own base. This function is the pure decision:
+///
+/// - **No drift** (`commits_behind == 0`): the base is the tip, so the
+///   failure is the patch's own. [`HoldReason::BuildFailure`].
+/// - **Drift, base compiles** (`commits_behind > 0` and
+///   `base_compiles_clean`): the patch is fine at its own base; the
+///   trunk moved underneath it. [`HoldReason::StaleBase`] — retirable,
+///   fed into re-dispatch.
+/// - **Drift, base also fails** (`commits_behind > 0` and
+///   `!base_compiles_clean`): the failure reproduces at the base, so it
+///   is the patch's own, not the drift's. [`HoldReason::BuildFailure`].
+#[must_use]
+pub fn classify_build_failure(commits_behind: usize, base_compiles_clean: bool) -> HoldReason {
+    if commits_behind > 0 && base_compiles_clean {
+        HoldReason::StaleBase
+    } else {
+        HoldReason::BuildFailure
+    }
+}
+
+/// The drift clause for a build-failure outcome line (#4279): the
+/// `"(patch is N commit(s) behind base {sha})"` parenthetical that makes
+/// the drift visible next to the build error. Returns an empty string
+/// when `commits_behind == 0` (no drift to report), so the caller can
+/// unconditionally concatenate it.
+#[must_use]
+pub fn drift_clause(commits_behind: usize, base_sha: &str) -> String {
+    if commits_behind == 0 {
+        return String::new();
+    }
+    let unit = if commits_behind == 1 {
+        "commit"
+    } else {
+        "commits"
+    };
+    format!("(patch is {commits_behind} {unit} behind base {base_sha})")
 }
 
 /// The health of a conversion queue, as the operator should see it
@@ -4760,17 +4820,19 @@ mod tests {
     }
 
     #[test]
-    fn only_rule_fixed_and_agent_unformatted_holds_rerun_plausibly_differ() {
+    fn retirable_holds_rerun_plausibly_differ() {
         // A deterministic rule the agent has learned since: a re-run
         // differs. A genuine build failure the agent reproduces: it does
         // not. An agent-reported unformatted hold (#3715): a fresh agent
         // formats its submission, so it differs. An agent-reported
         // unbuilt hold: the failure is a property of the submission, so
-        // it does not.
+        // it does not. A stale-base hold (#4279): the trunk moved past
+        // the patch's base, so a re-dispatch at the new base differs.
         assert!(HoldReason::RuleFixed.rerun_plausibly_differs());
         assert!(!HoldReason::BuildFailure.rerun_plausibly_differs());
         assert!(HoldReason::AgentReportedUnformatted.rerun_plausibly_differs());
         assert!(!HoldReason::AgentReportedUnbuilt.rerun_plausibly_differs());
+        assert!(HoldReason::StaleBase.rerun_plausibly_differs());
     }
 
     #[test]
@@ -4792,6 +4854,11 @@ mod tests {
             plan_retirement(&held, HoldReason::AgentReportedUnformatted, "/scratch/out").unwrap();
         assert_eq!(plan.reason, HoldReason::AgentReportedUnformatted);
 
+        // A stale-base hold (#4279) is retired like a rule-fixed one:
+        // the drift resolves when the patch is rebased onto the new tip.
+        let plan = plan_retirement(&held, HoldReason::StaleBase, "/scratch/out").unwrap();
+        assert_eq!(plan.reason, HoldReason::StaleBase);
+
         // A build-failure hold is not retired: a re-run would reproduce
         // it, so retiring discards paid-for work for nothing.
         let error = plan_retirement(&held, HoldReason::BuildFailure, "/scratch/out").unwrap_err();
@@ -4807,6 +4874,41 @@ mod tests {
         assert!(error.contains("only held"));
         // An empty root is a configuration error.
         assert!(plan_retirement(&held, HoldReason::RuleFixed, "  ").is_err());
+    }
+
+    #[test]
+    fn classify_build_failure_attributes_stale_base() {
+        // No drift: the base is the tip, so the failure is the patch's
+        // own regardless of what the base build did.
+        assert_eq!(classify_build_failure(0, false), HoldReason::BuildFailure);
+        assert_eq!(classify_build_failure(0, true), HoldReason::BuildFailure);
+
+        // Drift, base compiles: the trunk moved underneath the patch.
+        assert_eq!(classify_build_failure(71, true), HoldReason::StaleBase);
+        assert_eq!(classify_build_failure(1, true), HoldReason::StaleBase);
+
+        // Drift, base also fails: the failure is the patch's own, not
+        // the drift's.
+        assert_eq!(classify_build_failure(71, false), HoldReason::BuildFailure);
+        assert_eq!(classify_build_failure(1, false), HoldReason::BuildFailure);
+    }
+
+    #[test]
+    fn drift_clause_formats_the_outcome_line() {
+        // No drift: no clause.
+        assert_eq!(drift_clause(0, "8f3a21c"), "");
+
+        // Singular.
+        assert_eq!(
+            drift_clause(1, "8f3a21c"),
+            "(patch is 1 commit behind base 8f3a21c)"
+        );
+
+        // Plural.
+        assert_eq!(
+            drift_clause(71, "8f3a21c"),
+            "(patch is 71 commits behind base 8f3a21c)"
+        );
     }
 
     #[test]
@@ -4860,7 +4962,11 @@ mod tests {
         // the baseline-relative key diagnostic: results recorded under
         // version 3 are hypotheses the version-4 logic re-verifies, not
         // decisions.
-        assert_eq!(CONVERSION_LOGIC_VERSION, 4);
+        // #4279 added the stale-base hold reason (a build failure on a
+        // drifted patch that compiles cleanly at its base is retirable,
+        // not a genuine defect): results recorded under version 4 are
+        // hypotheses the version-5 logic re-verifies, not decisions.
+        assert_eq!(CONVERSION_LOGIC_VERSION, 5);
     }
 
     // ---- #3793: base self-check and dry-run ----
