@@ -29,6 +29,7 @@ pub mod ci_gate_promotion;
 pub mod ci_name_drift;
 pub mod circuit_breaker;
 pub mod claim;
+pub mod claim_lifecycle;
 pub mod code_intel;
 pub mod config_fidelity;
 pub mod conflict_resolution;
