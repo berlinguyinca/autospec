@@ -84,6 +84,7 @@ pub mod runtime_env;
 pub mod runtime_policy;
 pub mod safe_publish;
 pub mod safety;
+pub mod self_gate;
 pub mod semantic_integration;
 pub mod service_address;
 pub mod service_timeout;
