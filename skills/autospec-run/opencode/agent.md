@@ -169,6 +169,7 @@ profiles:
     model: qwen3:32b   # original runtime tag — what a dispatch sends
     ctx: 64k           # one of: 32k | 64k | 120k
     reasoning: medium  # one of: shallow | medium | deep
+    roles: [implementer]  # local profiles serve the implementer only (Guardrail R2)
   claude-haiku-cloud:
     model: claude-haiku-4-5
     ctx: 64k

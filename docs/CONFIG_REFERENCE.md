@@ -549,6 +549,27 @@ fallback — never another local attempt. The retry count and final outcome
 via `routing-ledger.sh`. The wrapper refuses to run a local dispatch for a
 schema-bearing kind with no resolvable validator (exit 4). The gate and its
 mapping are pinned by `tests/local-structured-output-gate.bats`.
+**Roles (`roles`).** The allowlist above is per-*kind* — it says which kinds the
+scorer *may* re-route at all. The `roles:` key is the complementary per-*profile*
+mechanism (Guardrail R2): a profile may list the dispatch kinds it is cleared to
+serve, and `select-model-profile.sh --kind <dispatch_kind>` refuses to resolve a
+profile whose `roles:` omits the kind. This lets the cost ledger's "use a local
+profile" decision be blocked at the profile level — e.g. the local profile carries
+`roles: [implementer]`, so a `lgtm-reviewer` or `verify-voter` dispatch that tries
+to ride it is rejected and the caller keeps its cloud tier. The contract:
+
+- **Absent `roles:`** means unconstrained. A profile with no `roles:` key routes
+  byte-identically to today for every kind — the key is purely additive, so an
+  existing `~/.autospec/model-profiles.yml` needs no edit.
+- **`roles:` present and the kind is in the list** → the profile resolves normally.
+- **`roles:` present and the kind is NOT in the list** → `select-model-profile.sh`
+  prints nothing and **exits 3**, the same fail-closed code it uses for a missing
+  model id, so the caller falls back to its own cloud tier.
+- `roles:` accepts either a flow list (`roles: [implementer, lgtm-reviewer]`) or a
+  block list; only the *resolved* profile's list is checked, never an adjacent one.
+- Auto-init writes `roles: [implementer]` for **local** profiles, so a local model
+  serves the implementer dispatch only. Cloud profiles stay unconstrained unless
+  you opt them in.
 
 ### Cross-vendor verify voters
 `scripts/verify-voter-vendor.sh --proposer <vendor>` names the vendor for the next
