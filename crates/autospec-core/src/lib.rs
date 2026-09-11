@@ -91,6 +91,7 @@ pub mod prompt_blocks;
 pub mod prose_closure;
 pub mod rag;
 pub mod rebaseline;
+pub mod refresh_queue_contract;
 pub mod repair_loop;
 pub mod repairs;
 pub mod resources;
