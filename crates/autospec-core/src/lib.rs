@@ -76,6 +76,7 @@ pub mod issue_lock;
 pub mod item_sweep;
 pub mod lint;
 pub mod log_freshness;
+pub mod loop_actuation;
 pub mod managed_project;
 pub mod memo_key;
 pub mod merge_gate;
