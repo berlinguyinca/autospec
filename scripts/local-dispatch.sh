@@ -29,6 +29,20 @@
 # the lock descriptor), and the lock records its holder (pid + start time) so a
 # refusal names who holds it and since when instead of dead-ending.
 #
+# Runtime adapter mode (issue #3173, spec §16/§17): `--runtime <ollama|
+# lmstudio|vllm|llamacpp>` dispatches through a direct OpenAI-compatible
+# adapter instead of Codex — the runtimes Codex's --local-provider does not
+# cover (vllm, llamacpp) speak the same /v1/chat/completions shape. The
+# endpoint comes from the model-supply probe (probe_runtimes), never from a
+# name or a hardcoded address; an unreachable endpoint exits 3 so the caller
+# keeps its cloud tier. The three preconditions above and the capacity-1 host
+# lock apply to this mode unchanged. stdout is the §16 result envelope — the
+# same keys as scripts/executor-dispatch.sh, validated by
+# schemas/autospec-dispatch-result.schema.json — and any metric the response
+# did not report is "unknown", never 0. Token counts are read from the
+# response's usage block; prompt_tok_s and decode_tok_s are measured from
+# those counters and the request timing, never a constant.
+#
 # Post-dispatch check (R8, tracker #3344) — verbatim-anchor verification:
 # a local model can silently substitute one word in the source text it
 # paraphrases ("persistent agent" written as "persistence agent") with no
@@ -48,14 +62,19 @@
 #   local-dispatch.sh --model <tag> --prompt-file <path>
 #                     [--provider ollama|lmstudio] [--cwd <dir>]
 #                     [--timeout-secs N] [--skip-capability-check] [--dry-run]
+#   local-dispatch.sh --runtime <ollama|lmstudio|vllm|llamacpp> --model <tag>
+#                     --prompt-file <path> [--timeout-secs N]
+#                     [--skip-capability-check] [--dry-run]
 #   local-dispatch.sh --verify-anchors <claims.json|-> [--root <dir>]
 #
 # Exit codes:
-#   0  dispatch completed (stdout is the executor's output)
+#   0  dispatch completed (codex path: stdout is the executor's output;
+#      runtime path: stdout is the §16 result envelope)
 #   1  bad arguments
-#   2  --verify-anchors: jq missing (fail-closed)
+#   2  jq missing (fail-closed; --verify-anchors and the runtime path need it)
 #   3  precondition failed — caller MUST fall back to its cloud tier
 #   4  dispatch exceeded the wall-clock ceiling
+#   5  runtime path: the endpoint or the model failed (failure_class=harness_error)
 #   >4 the executor's own non-zero status
 #
 # Environment:
@@ -77,16 +96,28 @@ CAPABILITY="${AUTOSPEC_MODEL_CAPABILITY:-$HOME/.autospec/model-capability.json}"
 LOCK_DIR="${AUTOSPEC_LOCAL_LOCK_DIR:-$HOME/.autospec/locks}"
 VERIFY_CLAIMS=""
 ROOT_DIR="."
+RUNTIME=""
+PROVIDER_SET=0
 
 _die() { printf 'local-dispatch: %s\n' "$1" >&2; exit "${2:-1}"; }
-_refuse() { printf 'local-dispatch: %s\n' "$1" >&2; exit 3; }
+_refuse() {
+    printf 'local-dispatch: %s\n' "$1" >&2
+    # Runtime mode speaks the §16 contract: a refusal is still a result, so the
+    # envelope carries the diagnostic instead of leaving the caller to guess.
+    if [ -n "$RUNTIME" ]; then
+        R_OUTPUT="$1"
+        _finish failure precondition_failed 3
+    fi
+    exit 3
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --model)        MODEL="${2:-}"; shift 2 ;;
         --prompt-file)  PROMPT_FILE="${2:-}"; shift 2 ;;
-        --provider)     PROVIDER="${2:-}"; shift 2 ;;
+        --provider)     PROVIDER="${2:-}"; PROVIDER_SET=1; shift 2 ;;
+        --runtime)      RUNTIME="${2:-}"; shift 2 ;;
         --cwd)          WORKDIR="${2:-}"; shift 2 ;;
         --timeout-secs) TIMEOUT_SECS="${2:-}"; shift 2 ;;
         --capability-file) CAPABILITY="${2:-}"; shift 2 ;;
@@ -105,10 +136,24 @@ if [ -z "$VERIFY_CLAIMS" ]; then
     if [ -z "$PROMPT_FILE" ]; then _die '--prompt-file is required'; fi
     if [ ! -f "$PROMPT_FILE" ]; then _die "prompt file not found: $PROMPT_FILE"; fi
 fi
-case "$PROVIDER" in
-    ollama|lmstudio) ;;
-    *) _die "unsupported provider: $PROVIDER (ollama|lmstudio)" ;;
+# The four runtime spellings are exactly what probe_runtimes() emits —
+# llamacpp, never llama.cpp. A name the probe cannot know about is a usage
+# error, not a guess: a misspelling that reached a hardcoded address would
+# dispatch to the wrong endpoint.
+if [ -n "$RUNTIME" ] && [ "$PROVIDER_SET" -eq 1 ]; then
+    _die '--runtime and --provider are mutually exclusive'
+fi
+case "$RUNTIME" in
+    '') ;;
+    ollama|lmstudio|vllm|llamacpp) ;;
+    *) _die "unsupported runtime: $RUNTIME (ollama|lmstudio|vllm|llamacpp)" ;;
 esac
+if [ -z "$RUNTIME" ]; then
+    case "$PROVIDER" in
+        ollama|lmstudio) ;;
+        *) _die "unsupported provider: $PROVIDER (ollama|lmstudio)" ;;
+    esac
+fi
 case "$TIMEOUT_SECS" in
     ''|*[!0-9]*) _die "--timeout-secs must be an integer: $TIMEOUT_SECS" ;;
 esac
@@ -224,6 +269,187 @@ if [ -n "$VERIFY_CLAIMS" ]; then
     exit $?
 fi
 
+# ── runtime adapter mode (#3173): the §16 result envelope ─────────────────────
+# Every metric starts at "unknown" and is only ever overwritten by a value the
+# response actually reported — a fabricated zero is indistinguishable from a
+# measured zero once it reaches the routing ledger.
+if [ -n "$RUNTIME" ]; then
+    # The envelope has no serializer but jq; refuse before any other check.
+    if ! command -v jq >/dev/null 2>&1; then
+        _die 'jq is required for the runtime adapter result envelope' 2
+    fi
+    R_OUTPUT=""
+    R_PATCH="unknown"
+    R_INPUT_TOKENS="unknown"
+    R_OUTPUT_TOKENS="unknown"
+    R_CACHED_TOKENS="unknown"
+    R_PROMPT_TOK_S="unknown"
+    R_DECODE_TOK_S="unknown"
+    R_TTFT_MS="unknown"
+    R_TOOL_CALLS="unknown"
+    _HTTP_CODE=""
+    START_MS="$(perl -MTime::HiRes -e 'printf("%.0f", Time::HiRes::time()*1000)' 2>/dev/null)"
+    case "${START_MS:-}" in
+        ''|*[!0-9]*) START_MS="$(( $(date +%s) * 1000 ))" ;;
+    esac
+fi
+
+# _resp_num <response-file> <jq-expr> — a metric the response reported as a
+# number, or "unknown". There is no path here that yields a default 0.
+_resp_num() {
+    _v="$(jq -r "($2) as \\$_m | if (\$_m | type) == \"number\" then (\$_m | tostring) else \"unknown\" end" "$1" 2>/dev/null)"
+    case "${_v:-}" in
+        ''|unknown) printf 'unknown' ;;
+        *)          printf '%s' "$_v" ;;
+    esac
+}
+
+# §17: the endpoint comes from the probe, never from a name. Source the same
+# probe library discover-model-supply.sh uses and take the endpoint
+# probe_runtimes() reports for the requested runtime. The probe endpoints are
+# discovery URLs (/api/tags, /v1/models); the chat URL is derived from its
+# base instead of hardcoding a per-runtime address.
+_resolve_runtime_endpoint() {
+    _probe_lib=""
+    for _cand in "$SCRIPT_DIR/lib/model-supply-probe.sh" \
+                 "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lib/model-supply-probe.sh"; do
+        if [ -f "$_cand" ]; then _probe_lib="$_cand"; break; fi
+    done
+    if [ -z "$_probe_lib" ]; then
+        _refuse 'probe library not found (lib/model-supply-probe.sh); no endpoint to dispatch to'
+    fi
+    # shellcheck source=scripts/lib/model-supply-probe.sh
+    . "$_probe_lib"
+    if ! command -v curl >/dev/null 2>&1; then
+        _refuse 'curl is required to reach the runtime endpoint; refusing'
+    fi
+    # probe_runtimes references $CURL_TIMEOUT unguarded; the library is written
+    # for callers that set it (discover-model-supply.sh does).
+    CURL_TIMEOUT="${CURL_TIMEOUT:-5}"
+    _runtimes="$(probe_runtimes)"
+    _entry="$(printf '%s' "$_runtimes" | jq -c --arg n "$RUNTIME" \
+        'first(.[] | select(.name == $n))')"
+    if [ -z "$_entry" ]; then
+        _refuse "runtime $RUNTIME not reported by the probe; no endpoint to dispatch to"
+    fi
+    _ep="$(printf '%s' "$_entry" | jq -r '.endpoint')"
+    if [ "$(printf '%s' "$_entry" | jq -r '.reachable')" != "true" ]; then
+        _refuse "runtime $RUNTIME endpoint unreachable at $_ep; the caller keeps its cloud tier"
+    fi
+    _base="${_ep%/*}"
+    case "$_base" in
+        */api) _base="${_base%/api}" ;;
+    esac
+    CHAT_URL="$_base/v1/chat/completions"
+}
+
+# _run_dispatch_http — one OpenAI-compatible chat completion through the
+# probe-derived endpoint. Sets R_* from the response and returns curl's exit
+# status; _HTTP_CODE carries the response status for the outcome mapping.
+_run_dispatch_http() {
+    _work="$(mktemp -d "${TMPDIR:-/tmp}/local-dispatch-http-XXXXXX")" || return 3
+    _req="$_work/req.json"
+    _resp="$_work/resp.json"
+    if ! jq -n --arg model "$MODEL" --arg prompt "$(cat "$PROMPT_FILE")" \
+        '{model: $model, messages: [{role: "user", content: $prompt}]}' > "$_req"; then
+        rm -rf "$_work"
+        return 3
+    fi
+    # 9>&-: the lock's file description must not survive into curl's children,
+    # for the same reason as on the codex path.
+    _w="$(timeout --preserve-status "$TIMEOUT_SECS" \
+        curl -sS --max-time "$TIMEOUT_SECS" \
+            -o "$_resp" \
+            -w '%{time_starttransfer} %{time_total} %{http_code}' \
+            -X POST "$CHAT_URL" -H 'Content-Type: application/json' \
+            --data "@$_req" 9>&-)"
+    _rc=$?
+    _HTTP_CODE=""
+    read -r _ttft_s _total_s _HTTP_CODE <<< "$_w"
+    R_INPUT_TOKENS="unknown"
+    R_OUTPUT_TOKENS="unknown"
+    R_CACHED_TOKENS="unknown"
+    R_PROMPT_TOK_S="unknown"
+    R_DECODE_TOK_S="unknown"
+    R_TTFT_MS="unknown"
+    R_OUTPUT=""
+    if jq -e 'type == "object"' "$_resp" >/dev/null 2>&1; then
+        R_OUTPUT="$(jq -r '(.choices[0].message.content // "") | tostring' "$_resp" 2>/dev/null)"
+        R_INPUT_TOKENS="$(_resp_num "$_resp" '.usage.prompt_tokens')"
+        R_OUTPUT_TOKENS="$(_resp_num "$_resp" '.usage.completion_tokens')"
+        R_CACHED_TOKENS="$(_resp_num "$_resp" '.usage.prompt_tokens_details.cached_tokens')"
+    else
+        R_OUTPUT="$(cat "$_resp" 2>/dev/null || true)"
+    fi
+    case "${_ttft_s:-}" in
+        ''|.|*[!0-9.]*|*.*.*) : ;;
+        *) R_TTFT_MS="$(awk -v s "$_ttft_s" 'BEGIN { printf "%d", s * 1000 + 0.5 }')" ;;
+    esac
+    if [ -n "${_ttft_s:-}" ] && [ -n "${_total_s:-}" ]; then
+        # Decode window is generation after first byte. A server that buffers
+        # the whole non-streaming body reports ttft ≈ total; then the whole
+        # request window is the only measured window, and the rate is still a
+        # measured ratio of observed counters — never a constant.
+        _dec_s="$(awk -v t "$_total_s" -v f "$_ttft_s" \
+            'BEGIN { d = t - f; if (d > 0) printf "%.3f", d; else if (t > 0) printf "%.3f", t; }')"
+        if [ -n "$_dec_s" ] && [ "$R_OUTPUT_TOKENS" != "unknown" ]; then
+            R_DECODE_TOK_S="$(awk -v n "$R_OUTPUT_TOKENS" -v s "$_dec_s" 'BEGIN { printf "%.2f", n / s }')"
+        fi
+        _pf_s="$(awk -v f "$_ttft_s" 'BEGIN { if (f > 0) printf "%.3f", f; }')"
+        if [ -n "$_pf_s" ] && [ "$R_INPUT_TOKENS" != "unknown" ]; then
+            R_PROMPT_TOK_S="$(awk -v n "$R_INPUT_TOKENS" -v s "$_pf_s" 'BEGIN { printf "%.2f", n / s }')"
+        fi
+    fi
+    rm -rf "$_work"
+    return "$_rc"
+}
+
+# stdout is the §16 envelope — the same key set as executor-dispatch.sh, so
+# orchestration never special-cases which adapter ran. wall_clock_ms is the
+# one metric this script measures itself, so it is the only one always numeric.
+_emit() {
+    # GNU `date +%s%3N` is unavailable on macOS, so prefer perl's Time::HiRes
+    # and degrade to whole seconds, mirroring executor-dispatch.sh.
+    _now="$(perl -MTime::HiRes -e 'printf("%.0f", Time::HiRes::time()*1000)' 2>/dev/null)"
+    case "${_now:-}" in
+        ''|*[!0-9]*) _now="$(( $(date +%s) * 1000 ))" ;;
+    esac
+    _wall=$(( _now - START_MS ))
+    if [ "$_wall" -lt 0 ]; then _wall=0; fi
+    jq -n \
+        --arg schema        'autospec.dispatch-result.v1' \
+        --arg status        "$1" \
+        --arg failure_class "$2" \
+        --arg output        "$R_OUTPUT" \
+        --arg patch         "$R_PATCH" \
+        --arg input_tokens  "$R_INPUT_TOKENS" \
+        --arg output_tokens "$R_OUTPUT_TOKENS" \
+        --arg cached_tokens "$R_CACHED_TOKENS" \
+        --arg prompt_tok_s  "$R_PROMPT_TOK_S" \
+        --arg decode_tok_s  "$R_DECODE_TOK_S" \
+        --arg ttft_ms       "$R_TTFT_MS" \
+        --arg tool_calls    "$R_TOOL_CALLS" \
+        --argjson wall_clock_ms "$_wall" \
+        'def metric: if . == "unknown" then . else tonumber end;
+         {
+           schema:         $schema,
+           status:         $status,
+           output:         $output,
+           patch:          $patch,
+           input_tokens:   ($input_tokens  | metric),
+           output_tokens:  ($output_tokens | metric),
+           cached_tokens:  ($cached_tokens | metric),
+           prompt_tok_s:   ($prompt_tok_s  | metric),
+           decode_tok_s:   ($decode_tok_s  | metric),
+           ttft_ms:        ($ttft_ms       | metric),
+           wall_clock_ms:  $wall_clock_ms,
+           tool_calls:     ($tool_calls    | metric),
+           failure_class:  $failure_class
+         }'
+}
+
+_finish() { _emit "$1" "$2" "$3"; exit "$3"; }
+
 # ── precondition 1: an executor that really supports local models ─────────────
 if ! command -v codex >/dev/null 2>&1; then
     _refuse 'codex CLI not found; local dispatch unavailable'
@@ -269,18 +495,33 @@ if ! command -v timeout >/dev/null 2>&1; then
     _refuse 'timeout(1) not found; refusing an unbounded local dispatch'
 fi
 
-CODEX_ARGS="exec --oss --local-provider $PROVIDER --model $MODEL"
+if [ -n "$RUNTIME" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || SCRIPT_DIR=""
+    _resolve_runtime_endpoint
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf 'POST %s\n' "$CHAT_URL"
+        printf 'runtime=%s model=%s timeout_secs=%s cwd=%s prompt_file=%s\n' \
+            "$RUNTIME" "$MODEL" "$TIMEOUT_SECS" "$WORKDIR" "$PROMPT_FILE"
+        exit 0
+    fi
+else
+    CODEX_ARGS="exec --oss --local-provider $PROVIDER --model $MODEL"
 
-if [ "$DRY_RUN" -eq 1 ]; then
-    printf 'codex %s\n' "$CODEX_ARGS"
-    printf 'timeout_secs=%s cwd=%s prompt_file=%s\n' "$TIMEOUT_SECS" "$WORKDIR" "$PROMPT_FILE"
-    exit 0
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf 'codex %s\n' "$CODEX_ARGS"
+        printf 'timeout_secs=%s cwd=%s prompt_file=%s\n' "$TIMEOUT_SECS" "$WORKDIR" "$PROMPT_FILE"
+        exit 0
+    fi
 fi
 
 if [ ! -d "$LOCK_DIR" ]; then mkdir -p "$LOCK_DIR"; fi
 LOCK="$LOCK_DIR/local-model.lock"
 
 _run_dispatch() {
+    if [ -n "$RUNTIME" ]; then
+        _run_dispatch_http
+        return $?
+    fi
     # 9>&-: the lock lives on the open file description, and every child
     # inherits fd 9 across fork. A long-lived descendant of the executor
     # (a preview server, an agent subprocess) would otherwise keep the lock
@@ -346,6 +587,16 @@ else
     _rc=$?
 fi
 
+if [ -n "$RUNTIME" ]; then
+    # Runtime mode: the envelope IS the result, on success and failure alike.
+    if [ "$_rc" -eq 124 ] || [ "$_rc" -eq 143 ]; then
+        _finish timeout timeout 4
+    elif [ "$_rc" -eq 0 ] && [[ "${_HTTP_CODE:-}" =~ ^2[0-9][0-9]$ ]]; then
+        _finish success none 0
+    else
+        _finish failure harness_error 5
+    fi
+fi
 if [ "$_rc" -eq 124 ] || [ "$_rc" -eq 143 ]; then
     printf 'local-dispatch: exceeded %ss ceiling\n' "$TIMEOUT_SECS" >&2
     exit 4
