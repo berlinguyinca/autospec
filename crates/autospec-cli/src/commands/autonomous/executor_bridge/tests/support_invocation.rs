@@ -173,6 +173,7 @@ pub(crate) fn persisted_invocation() -> PersistedInvocation {
         umbrella: None,
         current_child: None,
         implementation_repair_attempt: 0,
+        closes_authorized: true,
     }
 }
 

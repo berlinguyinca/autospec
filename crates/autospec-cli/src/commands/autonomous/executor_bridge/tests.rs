@@ -23,6 +23,7 @@ mod branch_predecessor;
 mod cleanup_reap;
 #[cfg(target_os = "linux")]
 mod cleanup_restart;
+mod closes_authorized_roundtrip;
 mod closeout_harness;
 mod closeout_remote;
 mod closeout_repairs;

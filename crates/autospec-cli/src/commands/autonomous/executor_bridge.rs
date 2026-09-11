@@ -45,6 +45,7 @@ use autospec_core::claim::{
     RemoteComment,
 };
 use autospec_core::coordination::ConductorOutcome;
+use autospec_core::execution::acceptance_gate::parse_acceptance_criteria;
 use autospec_core::execution::ProducedWork;
 use autospec_core::lint::implementation::parse_blocking_hook_failure;
 use autospec_core::lint::implementation::{directive_for, ImplementationLintRule};
@@ -1354,6 +1355,7 @@ fn run_executor_bridge_with_codex_probe_observed(
             umbrella: None,
             current_child: None,
             implementation_repair_attempt: 0,
+            closes_authorized: true,
         };
         (state, runtime)
     };
@@ -9506,6 +9508,7 @@ pub(crate) struct PersistedInvocation {
     pub(crate) umbrella: Option<u64>,
     pub(crate) current_child: Option<u64>,
     pub(crate) implementation_repair_attempt: u32,
+    pub(crate) closes_authorized: bool,
 }
 
 impl PersistedInvocation {
@@ -9596,6 +9599,7 @@ fn invocation_to_value(invocation: &PersistedInvocation) -> serde_json::Value {
         "umbrella": invocation.umbrella,
         "current_child": invocation.current_child,
         "implementation_repair_attempt": invocation.implementation_repair_attempt,
+        "closes_authorized": invocation.closes_authorized,
     })
 }
 
@@ -9608,6 +9612,9 @@ fn invocation_from_value(mut value: serde_json::Value) -> Result<PersistedInvoca
         object
             .entry("implementation_repair_attempt")
             .or_insert(serde_json::json!(0));
+        object
+            .entry("closes_authorized")
+            .or_insert(serde_json::json!(true));
     }
     let object = strict_object(
         value,
@@ -9629,6 +9636,7 @@ fn invocation_from_value(mut value: serde_json::Value) -> Result<PersistedInvoca
             "umbrella",
             "current_child",
             "implementation_repair_attempt",
+            "closes_authorized",
         ],
         "invocation",
     )?;
@@ -9710,6 +9718,10 @@ fn invocation_from_value(mut value: serde_json::Value) -> Result<PersistedInvoca
         umbrella,
         current_child,
         implementation_repair_attempt,
+        closes_authorized: object
+            .get("closes_authorized")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
     })
 }
 
@@ -12561,6 +12573,18 @@ where
         return Err("executor draft transaction requires exact proven implementation state".into());
     }
     verify_proven_local_state(state, proof)?;
+    state.closes_authorized = {
+        let criteria = parse_acceptance_criteria(issue_body);
+        if criteria.is_empty() {
+            true
+        } else {
+            let closeout_criteria = parse_closeout_criteria(&proof.closeout_body)?;
+            match closeout_criteria {
+                Some((_, unmet)) => unmet.is_empty(),
+                None => false,
+            }
+        }
+    };
     if let Some(failure) = latest_premerge_command_failure(state_path, state)? {
         return update_repaired_draft_pull_request(
             state_path,
@@ -17140,7 +17164,14 @@ fn canonical_pull_request_body(
         (Some(umbrella), Some(child)) if umbrella != child => Ok(format!(
             "Part of #{umbrella}\n\nCloses #{child}\n\n{closeout}"
         )),
-        (None, None) => Ok(format!("Closes #{}\n\n{closeout}", state.identity.issue)),
+        (None, None) => {
+            let keyword = if state.closes_authorized {
+                "Closes"
+            } else {
+                "Refs"
+            };
+            Ok(format!("{keyword} #{}\n\n{closeout}", state.identity.issue))
+        }
         _ => Err("executor continuation part binding is invalid".to_string()),
     }
 }

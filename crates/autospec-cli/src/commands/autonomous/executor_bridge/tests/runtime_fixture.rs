@@ -399,6 +399,7 @@ fn autonomous_executor_bridge_persists_nonterminal_recovery_atomically() {
         umbrella: None,
         current_child: None,
         implementation_repair_attempt: 0,
+        closes_authorized: true,
     };
     write_invocation_atomic(&state_path, &invocation).expect("persist invocation");
     let recovered = recover_invocation(&state_path, &invocation.identity)
