@@ -89,6 +89,7 @@ pub mod spec;
 pub mod staged_spec;
 pub mod state;
 pub mod stored_output;
+pub mod symptom_attribution;
 pub mod threshold_calibration;
 pub mod tractability;
 pub mod validation;
