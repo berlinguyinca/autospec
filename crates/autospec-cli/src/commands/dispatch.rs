@@ -37,6 +37,13 @@
 //!   entry is blocked), or `release` (clear the hold; a released produced
 //!   entry re-enters the next tick as a conversion, not a fresh dispatch).
 //!   Exit 0 accepted, 1 refused, 2 usage error.
+//! - `schedule` — audit the refresh-queue schedule as a first-class
+//!   component (#4320): the critical-path manifest covers every step it
+//!   declares (or explicitly monitors as manual), the queue artifact is
+//!   fresh against the limit its producer's mode implies, and every
+//!   credential-bearing step is admitted to run unattended — a refusal names
+//!   the step and where the credential belongs. Exit 0 healthy, 1 any
+//!   finding.
 //!
 //! A cron line for the refresh step is the intended deployment:
 //!
@@ -55,6 +62,10 @@ use autospec_core::dispatch_pipeline::{
     DispatchPipeline, DispatchTick, EntryState, FreshnessPolicy, LifecycleLedger, LivenessLedger,
     PipelineReport, PipelineTopology, QueueFile, SchedulingReconciliation, DEFAULT_INTERVAL_SECS,
     DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
+};
+use autospec_core::refresh_queue_contract::{
+    admit_schedule, assess_artifact, ArtifactStaleness, ScheduleManifest, SchedulingVerdict,
+    WalkSummary,
 };
 use autospec_core::fleet_dispatch::{
     classify_run, idle_subfleet_lines, summarize_batch, BatchSummary, FleetDispatchPolicy,
@@ -109,6 +120,10 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
         "mark",
         "Move one queue entry through its lifecycle: produced / converted / hold / release (#3911)",
     ),
+    (
+        "schedule",
+        "Audit the refresh-queue schedule: manifest coverage, artifact staleness, credential admission (#4320)",
+    ),
 ];
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -132,6 +147,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         "runs" => runs(rest),
         "tick" => tick(rest),
         "mark" => mark(rest),
+        "schedule" => schedule(rest),
         other => Err(CommandFailure::diagnostic(format!(
             "unknown dispatch subcommand: {other} (expected one of: {})",
             SUBCOMMANDS
@@ -657,12 +673,130 @@ fn tick(args: &[String]) -> Result<(), CommandFailure> {
     if super::is_json(args) {
         println!("{}", report.to_json());
     } else {
+        // The walk summary explains the walk's outcome — required exactly
+        // when a non-empty queue yields nothing eligible (#4320): a zero
+        // without the partition is silence, and silence is the defect.
+        let walk = WalkSummary::from_tick(&queue, &report);
+        println!("{}", walk.line());
         for line in report.lines() {
             println!("{line}");
         }
     }
 
     verdict_exit(!report.dispatched_anything() && !report.skipped().is_empty())
+}
+
+/// `schedule` — audit the refresh-queue schedule as a first-class component
+/// (#4320).
+///
+/// Three checks, each with a named finding: the critical-path manifest
+/// covers every step it declares (`ScheduleManifest::coverage_audit`), the
+/// queue artifact is fresh against the limit its producer's mode implies
+/// (`assess_artifact` on the filesystem's `mtime`), and every
+/// credential-bearing step is admitted to run unattended (`admit_schedule`) —
+/// a refusal names the step and the explicit answer about where the
+/// credential lives. A non-empty queue whose artifact is stale and whose
+/// walk yields nothing eligible is the incident this exists to name. Exit 0
+/// healthy, 1 any finding.
+fn schedule(args: &[String]) -> Result<(), CommandFailure> {
+    let pipeline = build_pipeline(args)?;
+    let now = eval_now(args)?;
+    let max_intervals =
+        opt_u64(args, "--max-intervals")?.unwrap_or(DEFAULT_MAX_STALE_INTERVALS);
+
+    let manifest: ScheduleManifest = match opt_string(args, "--manifest")? {
+        Some(path) => {
+            let text = fs::read_to_string(&path).map_err(|err| {
+                CommandFailure::diagnostic(format!("cannot read --manifest {path}: {err}"))
+            })?;
+            serde_json::from_str(&text).map_err(|err| {
+                CommandFailure::diagnostic(format!("cannot parse --manifest {path}: {err}"))
+            })?
+        }
+        None => ScheduleManifest::from_topology(&pipeline.topology),
+    };
+
+    let mut findings: Vec<String> = manifest.lines();
+
+    // Staleness: the queue artifact's mtime against the limit its producer's
+    // mode implies — scheduled: interval x max_intervals; manual: the
+    // declared limit.
+    let queue_path = queue_path(args)?;
+    let mtime = fs::metadata(&queue_path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    let producer = pipeline.queue_producer();
+    let limit = manifest
+        .max_stale_secs_for(QUEUE_ARTIFACT, max_intervals)
+        .unwrap_or_else(|| pipeline.policy.threshold_for(producer));
+    let staleness = assess_artifact(mtime, now, limit);
+    if staleness.is_stale() {
+        findings.push(staleness.line());
+    }
+
+    // Admission: every credential-bearing step must be admitted to run
+    // unattended; a refusal carries the gap and the location answer.
+    let present = credential_present();
+    let verdicts: Vec<SchedulingVerdict> = pipeline
+        .topology
+        .steps()
+        .iter()
+        .map(|step| admit_schedule(step, present))
+        .collect();
+    for verdict in &verdicts {
+        if let SchedulingVerdict::Rejected { gap } = verdict {
+            findings.push(gap.line());
+        }
+    }
+
+    if super::is_json(args) {
+        #[derive(Serialize)]
+        struct ScheduleJson<'a> {
+            healthy: bool,
+            findings: Vec<String>,
+            manifest: &'a ScheduleManifest,
+            queue_artifact: ArtifactStaleness,
+            admission: Vec<SchedulingVerdict>,
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ScheduleJson {
+                healthy: findings.is_empty(),
+                findings: findings.clone(),
+                manifest: &manifest,
+                queue_artifact: staleness,
+                admission: verdicts.clone(),
+            })
+            .unwrap_or_else(|err| panic!("cannot serialize schedule report: {err}"))
+        );
+    } else if findings.is_empty() {
+        println!("SCHEDULE AUDIT: healthy — {} steps declared, queue fresh, credentials admitted", manifest.steps.len());
+    } else {
+        println!("SCHEDULE AUDIT: {} findings", findings.len());
+        for line in &findings {
+            println!("{line}");
+        }
+    }
+
+    verdict_exit(!findings.is_empty())
+}
+
+/// Probe for the GitHub credential the refresh step needs: a non-empty
+/// `GH_TOKEN` environment variable, or the `gh` CLI's hosts file in the
+/// operator's private home. Neither is a cluster-shared location: that is
+/// the point — the probe answers "is the credential where it belongs",
+/// which is what [`admit_schedule`] needs.
+fn credential_present() -> bool {
+    if std::env::var("GH_TOKEN")
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    std::env::var("HOME")
+        .is_ok_and(|home| Path::new(&home).join(".config/gh/hosts.yml").is_file())
 }
 
 /// `mark` — move one queue entry through its lifecycle (#3911).
