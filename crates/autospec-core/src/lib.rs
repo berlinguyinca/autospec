@@ -59,6 +59,7 @@ pub mod gate_verdict;
 pub mod grading;
 pub mod graph;
 pub mod growth;
+pub mod guard_extraction;
 pub mod heartbeat;
 pub mod host_set;
 // Unix-only by design: the module's core abstraction is the `current`
