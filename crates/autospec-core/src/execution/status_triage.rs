@@ -74,6 +74,8 @@
 //!    rc, the file count, the status: `HELD: agent reported
 //!    fmt_rc=1 (32 files), status=TIMEOUT`.
 
+use crate::run_status::Status;
+
 /// One agent run's gate report, as read from the patch's `status.txt`.
 ///
 /// Every field is `Option` because the file is written by a process
@@ -275,6 +277,12 @@ pub enum GateBasis {
 /// given report (#3715). Pure: no I/O, no gate execution — the caller
 /// reads the file, calls this, and executes the decision.
 ///
+/// Every status name is resolved through
+/// [`crate::run_status::canonical_status`] first, so this match names each
+/// status once and in its canonical spelling; a legacy spelling means what
+/// the vocabulary says it means (#4206). A name the vocabulary does not
+/// declare resolves to `None` and is handled by the last rule.
+///
 /// The precedence is the contract, most decisive evidence first:
 ///
 /// 1. `TIMEOUT` → [`TriageDecision::Redispatch`]. The run never reached
@@ -285,21 +293,28 @@ pub enum GateBasis {
 ///    reproduces the same emptiness, so the run is raised for review
 ///    rather than re-queued. It outranks every other signal just as the
 ///    plain timeout does.
-/// 2. `fmt_rc != 0` → [`TriageDecision::Hold`] as
+/// 2. `fmt_rc != 0` or `FMT-DIRTY` → [`TriageDecision::Hold`] as
 ///    [`AgentHoldReason::Unformatted`]. Deterministic; a local re-run
-///    reproduces it.
-/// 3. `build_rc != 0` or `BUILD-FAILED` / `TESTS-DO-NOT-COMPILE` →
-///    [`TriageDecision::Hold`] as [`AgentHoldReason::Unbuilt`].
-///    Deterministic; same reason.
-/// 4. `UNKNOWN-NO-BASELINE` → [`TriageDecision::GateLocally`] as
+///    reproduces it. The status counts on its own because a fleet run
+///    that stops at formatting records the name and no `fmt_rc`.
+/// 3. `build_rc != 0` or `BUILD-FAIL` → [`TriageDecision::Hold`] as
+///    [`AgentHoldReason::Unbuilt`]. Deterministic; same reason. The
+///    legacy spellings `BUILD-FAILED` and `TESTS-DO-NOT-COMPILE` reach
+///    this rule through the vocabulary, not through a second literal.
+/// 4. `NO-OUTPUT` / `NO-TEST-DB` → [`TriageDecision::RaiseForReview`].
+///    Nothing was measured, so neither re-dispatch nor a local gate can
+///    say anything the harness did not already say.
+/// 5. `UNKNOWN-NO-BASELINE` → [`TriageDecision::GateLocally`] as
 ///    [`GateBasis::NoBaseline`]. The converter's real job is to
 ///    compare against the current main, and there is no baseline to do
 ///    it with until this pass runs.
-/// 5. `test_rc != 0` or `NEW-TEST-FAILURES` →
+/// 6. `test_rc != 0`, `NEW-TEST-FAILURES` or `TEST-TIMEOUT` →
 ///    [`TriageDecision::GateLocally`] as
 ///    [`GateBasis::AgentReportedTestFailure`]. Tests are flaky and the
-///    agent ran against its own base; re-verify, never hold.
-/// 6. Everything else — green, or a status this triage does not
+///    agent ran against its own base; re-verify, never hold. The exit
+///    code outranks the label: a report that says `VERIFIED` and carries
+///    `test_rc=101` is triaged on the code, not the word (#4206).
+/// 7. Everything else — green, or a status this triage does not
 ///    consume — → [`TriageDecision::GateLocally`] as
 ///    [`GateBasis::AgentGreen`]. The agent's result was against the
 ///    base the agent ran on; confirming against the current main is the
@@ -307,6 +322,10 @@ pub enum GateBasis {
 ///
 /// An empty report (nothing recorded) is not a green report: it gates
 /// locally as [`GateBasis::ReportUnreadable`] (rule 6 of the module).
+///
+/// The last match is exhaustive over [`Status`], so adding a status to
+/// the vocabulary without saying what triage does with it is a compile
+/// error rather than a rule that quietly stops matching (#4206).
 pub fn triage(report: &AgentReport) -> TriageDecision {
     if report.is_empty() {
         return TriageDecision::GateLocally {
@@ -315,55 +334,82 @@ pub fn triage(report: &AgentReport) -> TriageDecision {
             },
         };
     }
-    let status = report.status.as_deref();
+    // Resolve the recorded name through the shared vocabulary once. Every
+    // rule below compares against a canonical `Status`, never against a
+    // spelling this file invented (#4206: a match list written beside the
+    // vocabulary, rather than against it, silently stops matching).
+    let recorded = report.status.as_deref();
+    let canonical = recorded.and_then(crate::run_status::canonical_status);
     // 1. The timeout outranks everything: the run never reached the
     //    gate, so no local gate can speak about the patch. A plain
     //    timeout re-dispatches; a timeout with no output raises for
     //    review instead, because re-dispatch would reproduce the same
     //    emptiness (#3936).
-    if status == Some("TIMEOUT") {
+    if canonical == Some(Status::Timeout) {
         return TriageDecision::Redispatch {
-            status: "TIMEOUT".to_string(),
+            status: Status::Timeout.as_str().to_string(),
         };
     }
-    if status == Some("TIMEOUT-NO-OUTPUT") {
+    if canonical == Some(Status::TimeoutNoOutput) {
         return TriageDecision::RaiseForReview {
-            status: "TIMEOUT-NO-OUTPUT".to_string(),
+            status: Status::TimeoutNoOutput.as_str().to_string(),
         };
     }
-    // 2. fmt: a deterministic negative; trust the agent's.
-    if matches!(report.fmt_rc, Some(rc) if rc != 0) {
+    // 2. fmt: a deterministic negative; trust the agent's exit code, and
+    //    trust the name when the run recorded only the name.
+    if matches!(report.fmt_rc, Some(rc) if rc != 0) || canonical == Some(Status::FmtDirty) {
         return TriageDecision::Hold {
             reason: AgentHoldReason::Unformatted,
         };
     }
     // 3. build: a deterministic negative; trust the agent's.
-    if matches!(report.build_rc, Some(rc) if rc != 0)
-        || status == Some("BUILD-FAILED")
-        || status == Some("TESTS-DO-NOT-COMPILE")
-    {
+    if matches!(report.build_rc, Some(rc) if rc != 0) || canonical == Some(Status::BuildFail) {
         return TriageDecision::Hold {
             reason: AgentHoldReason::Unbuilt,
         };
     }
-    // 4. No baseline: the converter's real job is to supply one.
-    if status == Some("UNKNOWN-NO-BASELINE") {
-        return TriageDecision::GateLocally {
+    // 4-7. The label decides, and the match is exhaustive over the
+    //      vocabulary so a new status cannot be added without saying what
+    //      triage does with it. The failing `test_rc` is folded into the
+    //      green arm, so a `VERIFIED` written over a failing run is
+    //      triaged on the failure and not the word (#4206: 183 reports,
+    //      every one `status=VERIFIED test_rc=101`), while a status that
+    //      already explains itself (`UNKNOWN-NO-BASELINE`) keeps the
+    //      precedence its own rule has.
+    let test_rc_failed = matches!(report.test_rc, Some(rc) if rc != 0);
+    match canonical {
+        // 1-3. Unreachable by construction: the same `canonical` value was
+        //      matched by the early returns above. The arm exists so this
+        //      match stays exhaustive over `Status`.
+        Some(Status::Timeout | Status::TimeoutNoOutput | Status::FmtDirty | Status::BuildFail) => {
+            unreachable!("the timeout, fmt and build rules above return first")
+        }
+        // 4. Nothing was measured: no gate, local or remote, has evidence
+        //    to work with, and re-dispatch reproduces the emptiness.
+        Some(Status::NoOutput | Status::NoTestDb) => TriageDecision::RaiseForReview {
+            status: recorded.unwrap_or_default().to_string(),
+        },
+        // 5. No baseline: the converter's real job is to supply one.
+        Some(Status::UnknownNoBaseline) => TriageDecision::GateLocally {
             basis: GateBasis::NoBaseline,
-        };
-    }
-    // 5. Test negatives: a trigger, never a hold.
-    if matches!(report.test_rc, Some(rc) if rc != 0) || status == Some("NEW-TEST-FAILURES") {
-        return TriageDecision::GateLocally {
+        },
+        // 6. Test negatives: a trigger, never a hold.
+        Some(Status::NewTestFailures | Status::TestTimeout) => TriageDecision::GateLocally {
             basis: GateBasis::AgentReportedTestFailure {
                 status: report.status.clone(),
             },
-        };
-    }
-    // 6. Green, or a status this triage does not consume: confirm
-    //    against the current main.
-    TriageDecision::GateLocally {
-        basis: GateBasis::AgentGreen,
+        },
+        // 6a. Green by label, failing by exit code: the code wins.
+        Some(Status::Verified) | None if test_rc_failed => TriageDecision::GateLocally {
+            basis: GateBasis::AgentReportedTestFailure {
+                status: report.status.clone(),
+            },
+        },
+        // 7. Green, or a status this triage does not consume: confirm
+        //    against the current main.
+        Some(Status::Verified) | None => TriageDecision::GateLocally {
+            basis: GateBasis::AgentGreen,
+        },
     }
 }
 

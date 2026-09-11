@@ -1,0 +1,29 @@
+# The run-status vocabulary: one definition for the name every component writes
+# into an artifact's `status=` field, and for the names that mean the same thing
+# under a different spelling (issue #4206).
+#
+# Columns (tab-separated): name, kind, canonical, meaning.
+#   kind=emitted  the runner writes this name.
+#   kind=alias    some other component writes this name; `canonical` names the
+#                 emitted status it means. `canonical` is `-` for a gate-only
+#                 status: a name the conversion gate writes about its own verdict
+#                 and the runner never emits.
+# `#` lines and blank lines are comments. Parse and assert in
+# crates/autospec-core/src/run_status.rs; the vocabulary is read from this file by
+# `include_str!`, so a consumer's list cannot silently disagree with it.
+name	kind	canonical	meaning
+VERIFIED	emitted	-	build, test and fmt stages all returned 0
+NEW-TEST-FAILURES	emitted	-	tests ran and at least one failed against the baseline
+TEST-TIMEOUT	emitted	-	the test stage hit its wall clock; no test verdict exists
+NO-OUTPUT	emitted	-	the run produced no artifact at all
+TIMEOUT	emitted	-	the run hit its wall clock before the gate
+FMT-DIRTY	emitted	-	cargo fmt --check reported unformatted files
+BUILD-FAIL	emitted	-	cargo build did not return 0
+TIMEOUT-NO-OUTPUT	emitted	-	timed out and produced no artifact either
+BUILD-FAILED	alias	BUILD-FAIL	legacy spelling of BUILD-FAIL; the runner's own name carries no D
+TESTS-DO-NOT-COMPILE	alias	BUILD-FAIL	the build stage failed inside the test targets
+UNKNOWN-NO-FMT-BASELINE	alias	UNKNOWN-NO-BASELINE	legacy spelling of UNKNOWN-NO-BASELINE
+PASS	alias	VERIFIED	conversion-gate name for a green run
+VERIFIED-ABSOLUTE	alias	VERIFIED	conversion-gate name for green against an absolute baseline
+UNKNOWN-NO-BASELINE	gate	-	no baseline existed to attribute the failures against
+NO-TEST-DB	gate	-	test targets did not run: the database was unreachable
