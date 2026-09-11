@@ -50,12 +50,48 @@ Source it (`. scripts/lib/autospec-log-status.sh`), then:
 | `autospec_log_count <logfile> <pattern>` | A computed count (fixed-string, whole log) of `<pattern>`. A judgement expressible as a number is computed, not estimated from the visible tail. Prints the count — a computed 0 is a result, so it returns 0 too; 1 when the log is unreadable, 2 on usage. |
 | `autospec_log_terminal <logfile> [marker]` | Append the terminal completion marker (default: `######## complete ########`) so a reader can ask the log whether the pass is finished instead of inferring it from silence. |
 | `autospec_log_heartbeat <logfile> [step]` | Append a heartbeat line (`heartbeat: <step> <UTC timestamp>`), so "no output yet" stays distinguishable from "stopped" between writes. |
+| `autospec_log_sweep [-w window_seconds] <pattern> <logfile> [logfile...]` | Error sweep over a **set** of logs that prints each file's mtime alongside its matches (issue #4246). Per file: `<file> mtime=<RFC3339Z> age=<seconds> freshness=<fresh\|stale\|unknown\|unreadable> matches=<N>` — files with no matches included, because a clean result needs a freshness too. Any match from a file older than the investigation window (default 3600s, `-w` to override) is preceded by a plain `STALE:` line naming the age, the window, and the fact that the matches are history rather than current state. Verdict `clean` / `incomplete` (nothing matched but a file could not be read — a gap, not a clean result) / `history-only` / `live`; returns 0 on the first three, 1 on `live`, 2 on usage. |
 
 Status tooling that needs a running / complete / stalled verdict calls
 `autospec_log_status` (or `autospec_log_gate` when the verdict authorises
 a destructive step). It does not derive state from log mtime or tail
 recency: those describe when the log was last touched, not whether the
 pass is still advancing.
+
+## A log's last line is only "now" if its mtime says so (issue #4246)
+
+`tail` and `grep` answer *what was written last*, which is a different
+question from *what is happening*, and the two diverge exactly when a
+component has stopped — the case under investigation. A supervisor error
+log that is appended to only on failure shows its last failure,
+arbitrarily far in the past, with the same visual weight as a line
+written a second ago, and a reader who does not know the difference
+reports an outage that ended days ago.
+
+So the sweep helper does not let the two be confused:
+
+- **Every file gets a header line with its mtime, age and freshness**,
+  including the files that matched nothing. A clean result whose mtime is
+  four days old is not clean, it is *unobserved*.
+- **A match from outside the investigation window is labelled `STALE`
+  before the match lines**, saying in plain words that the matches are
+  history and that live state has to be queried before an outage is
+  declared. The verdict distinguishes `history-only` (nothing current is
+  wrong) from `live` (something in the window matched) and from
+  `incomplete` (a file could not be read, so the sweep does not know).
+- **Freshness the sweep cannot prove is freshness it may not claim.** A
+  file whose mtime cannot be read is `freshness=unknown` and its matches
+  count as stale; it never escalates on unverifiable freshness.
+- **The mtime travels with the matches**, on the same stream. An mtime on
+  stderr next to matches on stdout is an mtime that disappears the first
+  time someone pipes the sweep into `grep`.
+
+This is the same invariant as §1 and §5 applied to a *set* of logs rather
+than one log, and it is deliberately narrower than a liveness verdict.
+`autospec_log_status` still decides running / complete / stalled from
+markers and two samples, and `docs/runbooks/refresh-queue-sweep.md` still
+holds that queue state is never read from a log's mtime: mtime here says
+*how much weight a line deserves*, not *whether the process is alive*.
 
 ## Heartbeat liveness (issue #3995)
 
@@ -101,6 +137,16 @@ observation/inference split in the report, the destructive-action gate
 (refusing while running, allowing on a marker or a double-observed
 verdict), and the whole-log count behind the 86-PRs-behind-two-hold-lines
 case.
+
+`tests/autospec-log-sweep.bats` pins the sweep: a stale log's error match
+is labelled history and exits 0 (`history-only`), a match inside the
+window exits 1 (`live`), the case that misread an outage — a stale error
+log and a fresh health log swept together — keeps the two verdicts apart,
+a file with no matches still prints its mtime, an unreadable file yields
+`incomplete` rather than `clean`, the window is a parameter, the printed
+mtime equals the file's real mtime rather than a formatted "now", a
+future mtime is fresh and never a negative age, and the pattern is a
+fixed string.
 
 Related: issue #3939 (a record read as history when it holds only
 current state — the same moment/state confusion, in storage rather than
