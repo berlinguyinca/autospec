@@ -67,6 +67,7 @@ pub mod issue_lock;
 pub mod item_sweep;
 pub mod lint;
 pub mod managed_project;
+pub mod name_scope;
 pub mod not_reproducible;
 pub mod planning;
 pub mod post_merge;
