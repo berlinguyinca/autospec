@@ -9830,7 +9830,7 @@ pub(crate) fn build_implementer_prompt_assembly(
         )
         .with_block(
             prompt_blocks::PromptBlock::Implementation,
-            "Implement the issue and run its required local tests. Leave the verified diff in the worktree.".to_string(),
+            build_implementation_block(identity, issue_body)?,
         )
         .with_block(
             prompt_blocks::PromptBlock::Closeout,
@@ -9863,6 +9863,37 @@ pub(crate) fn build_implementer_prompt_assembly(
             ),
         )
         .build())
+}
+
+/// Builds the Implementation prompt block, resolving the grading gate set at
+/// prompt-assembly time so the agent is told the exact commands the verifier
+/// will run (issue #4065).
+fn build_implementation_block(
+    identity: &BridgeIdentity,
+    issue_body: &str,
+) -> Result<String, String> {
+    let mut block = String::from(
+        "Implement the issue and run its required local tests. Leave the verified diff in the worktree.\n",
+    );
+    match resolve_full_suite(&identity.worktree, issue_body, &[], &BTreeMap::new()) {
+        Ok(suite) => {
+            block.push_str(
+                "Grading gates (must all pass; these are the exact commands the verifier runs):\n",
+            );
+            for (i, cmd) in suite.plan.commands.iter().enumerate() {
+                let display = cmd.argv.join(" ");
+                block.push_str(&format!("  {}. `{}`\n", i + 1, display));
+            }
+            block.push_str(
+                "Any cheaper subset mentioned in the issue body is for iteration only; the grading standard is the list above.\n",
+            );
+        }
+        Err(_) => {
+            // Resolution failed (e.g., no manifest found); the verifier will
+            // handle the error at verification time. Leave generic guidance.
+        }
+    }
+    Ok(block)
 }
 
 pub(crate) fn build_implementer_prompt(
