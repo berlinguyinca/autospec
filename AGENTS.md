@@ -435,6 +435,21 @@ token, a backtick-quoted span, an integer, or a regex literal. Each item must NO
 use subjective adjectives (`looks`, `feels`, `seems`, `clean`, `elegant`). Each
 item ≤120 characters. Section must contain ≥1 item.
 
+### Scope-hedge rule (issue #4275)
+
+The scope sections — `## Goal`, `## Acceptance criteria`, `## Implementation
+outline` — must contain nothing optional. An agent implements the smallest
+thing a spec can be read as permitting: a hedged or interim phrase names an
+alternative acceptable outcome and becomes the delivered scope. Hedged
+phrasing — `interim`, `for now`, `at minimum`, `ideally`, `conservative` —
+belongs in a rationale section, or the smaller thing becomes its own issue
+with its own acceptance criteria. Enforced by `scripts/lint-issue.sh` as
+`SCOPE_HEDGE` (one finding per scope section, first matched phrase cited).
+
+FAIL: `A conservative interim: gate ScaleDown now and leave the other 3 signals for later.`
+
+PASS: `Gate ScaleDown, Rebalance, ScaleUp and Recreate behind the four signals in scripts/scale-policy.sh.`
+
 ### Primary smoke test shape
 
 The first fenced code block under `### Primary smoke test (inner loop)` must contain

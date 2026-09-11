@@ -149,6 +149,38 @@ autospec:
   rm -f "$body"
 }
 
+# ── SCOPE_HEDGE checks (issue #4275) ─────────────────────────────────────────
+# An agent implements the smallest thing the spec can be read as permitting;
+# hedged wording in a scope section names an alternative acceptable outcome.
+
+@test "the SCOPE_HEDGE rule id appears in the documentation block" {
+  run grep -F 'SCOPE_HEDGE' "$LINTER"
+  [ "$status" -eq 0 ]
+  run bash "$LINTER" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SCOPE_HEDGE"* ]]
+}
+
+@test "a hedged AC emits SCOPE_HEDGE citing the phrase" {
+  run bash "$LINTER" "$FIXTURES/scope-hedge.md"
+  [ "$status" -gt 0 ]
+  [[ "$output" == *SCOPE_HEDGE* ]]
+  [[ "$output" == *"for now"* ]]
+}
+
+@test "a hedged Implementation outline emits SCOPE_HEDGE citing the phrase" {
+  run bash "$LINTER" "$FIXTURES/scope-hedge.md"
+  [ "$status" -gt 0 ]
+  [[ "$output" == *"## Implementation outline"* ]]
+  [[ "$output" == *"conservative"* ]]
+}
+
+@test "a body with clean scope wording emits no SCOPE_HEDGE" {
+  run bash "$LINTER" "$FIXTURES/paired-positive.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *SCOPE_HEDGE* ]]
+}
+
 @test "AS-DAG warnings carry severity in --json output" {
   body="$(mktemp)"
   write_dag_body "$body" 'Depends on issue #42' "$DAG_MISMATCH_META"
