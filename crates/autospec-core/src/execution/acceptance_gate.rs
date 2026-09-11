@@ -16,7 +16,8 @@
 //!    [`assess_report`] reads the issue body and the agent's report and
 //!    returns the [`Verdict`]; a spec with an acceptance section and a
 //!    report with no per-criterion statuses is [`Verdict::Unassessed`],
-//!    and [`closure_body`] rejects it. A green build never substitutes
+//!    and [`closure_body`] gives it the held-for-review body — the patch
+//!    converts but the issue stays open. A green build never substitutes
 //!    for an assessment.
 //! 2. **A partially-met issue closes with its remainder filed, or does
 //!    not close.** [`Verdict::PartiallyMet`] carries the remainder (the
@@ -47,7 +48,10 @@
 //! caller that performs the I/O.
 
 use crate::evidence_fidelity::closure_authorized;
-use crate::execution::closure::{conversion_pr_body, has_partial_fix_marker, partial_fix_pr_body};
+use crate::execution::closure::{
+    conversion_pr_body, has_held_for_review_marker, has_partial_fix_marker,
+    held_for_review_pr_body, partial_fix_pr_body,
+};
 
 /// Parse the issue body's `## Acceptance criteria` section into its
 /// individual criteria, one per `- [ ]` line, in order (invariant 3).
@@ -329,25 +333,22 @@ pub fn assess_report(issue_body: &str, status_txt: &str) -> Result<Verdict, Stri
 /// - [`Verdict::PartiallyMet`] gets the partial-fix body: `Refs #N
 ///   (does not close it)` — the close keyword is not in the body, and the
 ///   remainder goes out through [`follow_up_body`] instead.
-/// - [`Verdict::Unassessed`] refuses: the conversion holds with a message
-///   naming the unassessed criteria. A patch that has not been checked
-///   against the acceptance list does not close the issue, no matter what
-///   the gate says.
+/// - [`Verdict::Unassessed`] gets the held-for-review body: `Refs #N
+///   (NOT closing: held for supervisor review; ...)` — the patch
+///   converts but the issue stays open until the criteria are verified.
 pub fn closure_body(verdict: &Verdict, issue_number: u64, summary: &str) -> Result<String, String> {
     match verdict {
         Verdict::NotRequired | Verdict::Complete => Ok(conversion_pr_body(issue_number, summary)),
         Verdict::PartiallyMet { .. } => Ok(partial_fix_pr_body(issue_number, summary)),
-        Verdict::Unassessed { missing } => Err(format!(
-            "hold: no close keyword for #{issue_number} — unassessed criteria: {}",
-            indexes_line(missing)
-        )),
+        Verdict::Unassessed { .. } => Ok(held_for_review_pr_body(issue_number, summary)),
     }
 }
 
-/// Whether the body [`closure_body`] would write for this verdict carries
-/// a close keyword the tracker will honor. The partial-fix body's marker
-/// is checked, not assumed: a regression that swapped the two bodies
-/// turns this check red before it closes a partially-met issue.
+/// Whether the body [`closure_body`] would write for this verdict is an
+/// authorized form — either a close keyword the tracker will honor, or
+/// an explicit non-closure marker (partial-fix or held-for-review). The
+/// markers are checked, not assumed: a regression that swapped the
+/// bodies turns this check red before it closes an issue it should not.
 pub fn closes_authorized(verdict: &Verdict, issue_number: u64) -> bool {
     let Ok(body) = closure_body(verdict, issue_number, "gate check") else {
         return false;
@@ -356,6 +357,7 @@ pub fn closes_authorized(verdict: &Verdict, issue_number: u64) -> bool {
         closure_authorized(&body, issue_number),
         crate::evidence_fidelity::ClosureVerdict::Authorized { .. }
     ) || has_partial_fix_marker(&body, issue_number)
+        || has_held_for_review_marker(&body, issue_number)
 }
 
 /// The follow-up issue's body carrying the remainder of a partially-met
@@ -660,13 +662,15 @@ mod tests {
     }
 
     #[test]
-    fn an_unassessed_verdict_refuses_the_body_naming_the_criteria() {
+    fn an_unassessed_verdict_gets_the_held_for_review_body() {
         let verdict = Verdict::Unassessed {
             missing: vec![3, 4],
         };
-        let error = closure_body(&verdict, 42, "converted the patch").unwrap_err();
-        assert!(error.contains("#42"), "{error}");
-        assert!(error.contains("3, 4"), "{error}");
+        let body = closure_body(&verdict, 42, "converted the patch").unwrap();
+        assert!(has_held_for_review_marker(&body, 42), "{body:?}");
+        assert!(!body.contains("Closes #42"), "{body:?}");
+        assert!(!body.contains("Fixes #42"), "{body:?}");
+        assert!(!body.contains("Resolves #42"), "{body:?}");
     }
 
     #[test]
@@ -679,7 +683,10 @@ mod tests {
             &Verdict::PartiallyMet { remainder: vec![1] },
             7
         ));
-        assert!(!closes_authorized(
+        // The held-for-review marker is the authorized alternative for
+        // unassessed verdicts: the issue stays open but the body is an
+        // explicit, detectable decision.
+        assert!(closes_authorized(
             &Verdict::Unassessed { missing: vec![1] },
             7
         ));
