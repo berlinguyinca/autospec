@@ -320,7 +320,7 @@ fn rust_commit_runs_trusted_validation_hook_inside_containment() {
     // hand-rolled `xcode-select -p` path stat, which can reject a host the
     // supported query would accept.
     #[cfg(target_os = "macos")]
-    fn probe_developer_tool(name: &str, command: Command) -> Option<String> {
+    fn probe_developer_tool(name: &str, command: &mut Command) -> Option<String> {
         match command.output() {
             Err(error) => Some(format!("{name}: spawn failed: {error:?}")),
             Ok(output) if !output.status.success() => Some(format!(
