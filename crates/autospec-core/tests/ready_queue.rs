@@ -9,10 +9,19 @@ use autospec_core::coordination::{
 const SAFETY_REVIEW: &str = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n";
 
 fn issue(number: u64, body: impl Into<String>, labels: &[&str]) -> RemoteIssue {
+    issue_titled(number, format!("issue-{number}"), body, labels)
+}
+
+fn issue_titled(
+    number: u64,
+    title: impl Into<String>,
+    body: impl Into<String>,
+    labels: &[&str],
+) -> RemoteIssue {
     let body = body.into();
     RemoteIssue::open(
         number,
-        format!("issue-{number}"),
+        title,
         format!("{SAFETY_REVIEW}{body}"),
         labels.iter().map(|label| (*label).to_string()).collect(),
         "agent",
@@ -380,6 +389,107 @@ fn blocks_classification_drafts_and_requires_the_implementation_label() {
     assert_eq!(
         plan.blocked[1].reason.as_deref(),
         Some("missing_auto_implement")
+    );
+}
+
+#[test]
+fn blocks_question_titled_issues_even_when_labeled_for_dispatch() {
+    // Invariant 3: a question-form title is a decision request, not dispatchable
+    // work. The positive label alone cannot carry state about that; the
+    // structural title gate must catch it even when every label says "go".
+    let input = ready_input(vec![
+        issue_titled(
+            720,
+            "Which of these two schedulers should we keep?",
+            "## Implementation outline\n\n- edit `src/scheduler.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue_titled(
+            721,
+            "Use `autospec queue ready` rationale to log dispatch decisions?",
+            "## Implementation outline\n\n- edit `src/log.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            722,
+            "## Implementation outline\n\n- edit `src/plain.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![722]);
+    assert_eq!(plan.batch_numbers(), vec![722]);
+    assert_eq!(plan.blocked.len(), 2);
+    assert_eq!(plan.blocked[0].issue.number, 720);
+    assert_eq!(plan.blocked[0].reason.as_deref(), Some("decision_request"));
+    assert_eq!(plan.blocked[1].issue.number, 721);
+    assert_eq!(plan.blocked[1].reason.as_deref(), Some("decision_request"));
+}
+
+#[test]
+fn question_title_without_label_reports_the_label_gate_first() {
+    // Gate order: absence of the positive label is the coarser failure and is
+    // reported as such; a question title is never read as readiness on its own.
+    let input = ready_input(vec![issue_titled(
+        723,
+        "Should we adopt the frontier tool here?",
+        "## Implementation outline\n\n- edit `src/x.rs`\n",
+        &[],
+    )]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert!(plan.ready.is_empty());
+    assert_eq!(
+        plan.blocked[0].reason.as_deref(),
+        Some("missing_auto_implement")
+    );
+}
+
+#[test]
+fn ready_views_carry_the_dispatch_rationale() {
+    // Invariant 4: a dispatched issue is logged with WHY it was considered
+    // ready — the positive label, no blockers, open deps, unblocks — so the
+    // dispatch line is auditable on its own.
+    let input = ready_input(vec![
+        issue(
+            730,
+            "## Implementation outline\n\n- edit `src/foundation.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            731,
+            "## Dependencies\n\nDepends on issue #730\n\n## Implementation outline\n\n- edit `src/leaf.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![730]);
+    assert_eq!(
+        plan.ready[0].readiness.as_deref(),
+        Some("auto-implement label, no blocker label, 0 open deps, unblocks 1")
+    );
+    // The withheld dependent carries its hold as a reason, not a rationale.
+    assert_eq!(plan.blocked[0].readiness.as_deref(), None);
+}
+
+#[test]
+fn ready_views_without_downstream_work_report_zero_unblocks_in_the_rationale() {
+    let input = ready_input(vec![issue(
+        740,
+        "## Implementation outline\n\n- edit `src/leaf.rs`\n",
+        &["auto-implement", "safety:reviewed"],
+    )]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(
+        plan.ready[0].readiness.as_deref(),
+        Some("auto-implement label, no blocker label, 0 open deps, unblocks 0")
     );
 }
 

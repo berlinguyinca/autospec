@@ -1072,6 +1072,7 @@ const VIEW_FIELD_DISPATCHERS: &[ViewFieldDispatcher] = &[
     append_blocked_capabilities_field,
     append_zero_output_streak_field,
     append_unblocks_field,
+    append_readiness_field,
 ];
 
 fn view_json(view: &QueueIssueView) -> String {
@@ -1175,6 +1176,16 @@ fn append_zero_output_streak_field(view: &QueueIssueView, fields: &mut Vec<Strin
 fn append_unblocks_field(view: &QueueIssueView, fields: &mut Vec<String>) {
     if view.unblocks > 0 {
         fields.push(json_field("unblocks", view.unblocks.to_string()));
+    }
+}
+
+/// The dispatch rationale for ready views (issue #4152 invariant 4): the
+/// dispatcher logs why the issue was considered ready, so a dispatch line is
+/// auditable on its own. Blocked views carry `reason` instead; they never
+/// carry `readiness`.
+fn append_readiness_field(view: &QueueIssueView, fields: &mut Vec<String>) {
+    if let Some(readiness) = &view.readiness {
+        fields.push(json_field("readiness", json_string(readiness)));
     }
 }
 

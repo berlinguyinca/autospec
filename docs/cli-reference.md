@@ -323,7 +323,10 @@ pipeline-fixing foundation issue (dispatcher, gates, runner) is dispatched befor
 lower-numbered leaf work it unblocks instead of after it. Selection of which issues are ready stays
 in issue-number order; only the dispatch order of the already-ready set changes. A ready issue
 that unblocks at least one other reports its count in a top-level `unblocks` field (omitted when
-zero). `scan_scope` is `repository` for a full scan and `slice` when
+zero). Each ready view also carries a `readiness` field with the dispatch rationale the
+dispatcher logs when it dispatches (issue #4152), so a dispatch is auditable from the line
+alone. A question-form title (ending in `?`) is a decision request, not a task: it is blocked
+with reason `decision_request` even when it carries the positive readiness label. `scan_scope` is `repository` for a full scan and `slice` when
 `AUTOSPEC_RUN_ONLY_ISSUES` constrains the result, so callers cannot mistake a completed slice for
 whole-queue completion.
 

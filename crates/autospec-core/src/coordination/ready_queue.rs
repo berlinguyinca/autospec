@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::claim::{evaluate_claim_safety_with_trusted_actors, ClaimSafetyInput};
 use crate::coordination::capabilities::{unmet_capabilities, CapabilityState};
-use crate::coordination::dispatch_eligibility::{is_dispatch_eligible, DispatchEligibilityPolicy};
+use crate::coordination::dispatch_eligibility::{
+    is_dispatch_eligible, DispatchEligibilityPolicy, DISPATCH_ELIGIBILITY_LABEL,
+};
 use crate::coordination::withdrawal::WithdrawalDecision;
 use crate::state::json::{JsonParser, JsonValue};
 
@@ -345,6 +347,12 @@ pub struct QueueIssueView {
     /// descending (ties by issue number) so foundation/pipeline work runs before
     /// the leaf work that waits on it (#3728).
     pub unblocks: usize,
+    /// Why this issue is ready — the rationale the dispatcher logs when it
+    /// dispatches, so a dispatch is auditable from the line alone (issue #4152
+    /// invariant 4: "dispatched #271 — no blocker label, 0 open deps, unblocks 0").
+    /// `Some` only for ready views; blocked and conflict views carry a `reason`
+    /// instead.
+    pub readiness: Option<String>,
 }
 
 impl QueueIssueView {
@@ -367,6 +375,7 @@ impl QueueIssueView {
             blocked_capabilities: Vec::new(),
             zero_output_streak: None,
             unblocks: 0,
+            readiness: None,
         }
     }
 }
@@ -500,6 +509,17 @@ pub fn plan_ready_queue_with_trusted_actors(
             blocked.push(view);
             continue;
         }
+        // Second gate (issue #4152 invariant 3): a question-form title is a
+        // decision request, not dispatchable work — it asks the reader to pick
+        // among alternatives, so an agent running it would be answering a
+        // question nobody asked it to. The positive label gate above covers the
+        // prose case; this cheap structural check costs nothing and catches the
+        // title case even when the label is present.
+        if is_question_title(&view.issue.title) {
+            view.reason = Some("decision_request".to_string());
+            blocked.push(view);
+            continue;
+        }
         if let Some(owner) = duplicate_owner(&view.issue, &signature_owners) {
             view.reason = Some("duplicate_issue".to_string());
             view.duplicate_of = Some(owner);
@@ -625,6 +645,7 @@ pub fn plan_ready_queue_with_trusted_actors(
         .collect();
     for view in &mut ready {
         view.unblocks = unblocking[&view.issue.number];
+        view.readiness = Some(readiness_rationale(view));
     }
     ready.sort_by(|a, b| {
         unblocking[&b.issue.number]
@@ -658,6 +679,25 @@ pub fn plan_ready_queue_with_trusted_actors(
     };
     plan.gate_counts = queue_gate_counts(&plan, open_count, candidate_count, reviewed_count);
     plan
+}
+
+/// A question-form title is a decision request, not a task: it ends in `?`
+/// (issue #4152 invariant 3). Cheap and structural — no prose reading — so the
+/// dispatcher never reads a "which of these?" title as ready work.
+fn is_question_title(title: &str) -> bool {
+    title.trim_end().ends_with('?')
+}
+
+/// The rationale the dispatcher logs for a ready view (issue #4152 invariant
+/// 4): the positive label that carries the readiness state (invariant 2 —
+/// absence of a blocker label is NOT readiness), the absence of blockers, open
+/// dependencies, and unblocking value. Blocked views never reach this; they
+/// carry a `reason` instead.
+fn readiness_rationale(view: &QueueIssueView) -> String {
+    format!(
+        "{DISPATCH_ELIGIBILITY_LABEL} label, no blocker label, 0 open deps, unblocks {}",
+        view.unblocks
+    )
 }
 
 fn deduplicate_issues(issues: &[RemoteIssue]) -> Vec<RemoteIssue> {
