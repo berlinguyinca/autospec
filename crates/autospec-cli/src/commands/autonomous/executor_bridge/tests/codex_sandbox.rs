@@ -430,7 +430,10 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_skips_faili
         .env("AUTOSPEC_TEST_RECOVERY_RELEASE", &release)
         .spawn()
         .expect("spawn recovery fixture launcher");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Coordination deadline, not a performance budget: the child must spawn,
+    // snapshot and persist a live identity before the parent adopts it. 60s
+    // keeps the bound above any realistic host load (issue #4330).
+    let deadline = Instant::now() + Duration::from_secs(60);
     let durable = loop {
         if let Ok(body) = fs::read_to_string(&state_path) {
             if let Ok(candidate) = bridge::PersistedInvocation::from_json(&body) {
@@ -443,10 +446,14 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_skips_faili
                 }
             }
         }
-        assert!(
-            Instant::now() < deadline,
-            "fixture did not persist a live implementing identity"
-        );
+        if Instant::now() >= deadline {
+            // Reap the launcher before failing so a timed-out parent never
+            // orphans the child; the orphan would print its own libtest
+            // failure into this same test stream (issue #4330).
+            launcher.kill().expect("crash fixture launcher");
+            launcher.wait().expect("reap fixture launcher");
+            panic!("fixture did not persist a live implementing identity");
+        }
         std::thread::sleep(Duration::from_millis(10));
     };
     launcher.kill().expect("crash fixture launcher");

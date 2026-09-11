@@ -19,10 +19,13 @@ use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_helper() {
-    let _environment = test_environment();
+    // Standalone runs are no-ops: bail before taking the cross-process
+    // supervision-family lock, which this test only needs when it is the
+    // spawned recovery child (issue #4330).
     let Some(state_path) = std::env::var_os("AUTOSPEC_TEST_RECOVERY_STATE") else {
         return;
     };
+    let _environment = test_environment();
     let state_path = PathBuf::from(state_path);
     let event_log =
         PathBuf::from(std::env::var_os("AUTOSPEC_TEST_RECOVERY_EVENTS").expect("event log"));
