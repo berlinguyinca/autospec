@@ -19,6 +19,12 @@
 //!   both a terminal `status` and an `agent_secs` value. Runs that died
 //!   before recording either are surfaced as `incomplete` (or `no_record` /
 //!   `malformed`), never silently dropped from the denominator.
+//! - **Observed, not potential.** Every GPU-hour figure in the report is
+//!   *observed* — measured from a costed run record — and is labelled as such.
+//!   Queue exposure (the runs with no costed record: `incomplete`,
+//!   `no_record`, or `malformed`) is *potential* cost: it is rendered as a
+//!   count with the condition that would realise it (the run finishes and
+//!   records a terminal status plus `agent_secs`), never in GPU-hours.
 //! - **Deterministic.** Records are scanned in directory order and the
 //!   report renders in fixed order (buckets by GPU-hours descending, status
 //!   name as the tie-break), so two runs of the command over the same
