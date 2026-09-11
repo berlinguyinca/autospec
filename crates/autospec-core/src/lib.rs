@@ -109,6 +109,7 @@ pub mod threshold_calibration;
 pub mod tractability;
 pub mod validation;
 pub mod verification;
+pub mod wire_fixture;
 pub mod work_selection;
 pub mod workload_validation;
 
