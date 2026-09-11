@@ -21,6 +21,24 @@
 #   4. of what remains, the one this repo's routing ledger shows the LEAST spend
 #      against, so alternation is self-balancing without a quota API
 #
+# Reviewer mode (R4, issue #3347): a PR's reviewer must not share a vendor
+# with its author. A cheap model reviewing its own tier's output degrades
+# quality invisibly, and the routing ledger records that as a first-pass
+# success — route-decide.sh names it as the reason lgtm-reviewer is not
+# overridable. --author applies this script's independence invariant to that
+# lane, with the added rules below. Steps 1-3 are shared with voter mode;
+# --author replaces step 4 with a fixed per-author preference order:
+#   * author "local" (a local model authored the PR) -> the reviewer must be a
+#     cloud vendor: "local" is REMOVED from the candidate set in step 3, never
+#     merely deprioritised.
+#   * author claude -> codex is preferred when available: autospec already
+#     depends on it for peer review, and it is a genuinely different vendor
+#     rather than a second sample of the same one.
+#   * the order is total, so the ledger spend tiebreak is not consulted here
+#     (it is voter-mode-only); the choice is deterministic without a ledger.
+#   * no distinct vendor available -> exit 3 and the caller keeps the
+#     harness's TIER_A. A same-vendor reviewer is refused, never returned.
+#
 # Step 2 is the load-bearing mechanism, not step 4. scripts/usage-observe.sh
 # reports observable=false for all three harnesses — no harness exposes a live
 # quota fraction — so remaining budget is not measurable, only inferable. A 429
@@ -31,15 +49,21 @@
 # Usage:
 #   verify-voter-vendor.sh --proposer <vendor> [--unavailable <vendor>]...
 #                          [--ledger <path>] [--explain]
+#   verify-voter-vendor.sh --author <vendor|local> [--unavailable <vendor>]...
+#                          [--ledger <path>] [--explain]
 #
-# Vendors: claude | codex | opencode
+# Vendors: claude | codex | opencode | local
+#   "local" is the local-model vendor (R4, #3347): a PATH probe never finds it,
+#   so it is a candidate only when named in AUTOSPEC_VOTER_VENDORS — the caller
+#   knows its fleet and says so.
 #
 # Exit codes:
 #   0  a vendor was printed
 #   1  usage error
 #   3  no INDEPENDENT vendor available — caller keeps its current behaviour (a
-#      same-vendor TIER_B voter). Fails closed rather than printing the proposer's
-#      own vendor, which would claim an independence it does not have.
+#      same-vendor TIER_B voter, or the harness's TIER_A reviewer in --author
+#      mode). Fails closed rather than printing the proposer's/author's own
+#      vendor, which would claim an independence it does not have.
 #
 # Environment:
 #   AUTOSPEC_VOTER_VENDORS   override host detection with an explicit list
@@ -52,8 +76,9 @@ set -u
 PROG="verify-voter-vendor"
 _die() { printf '%s: %s\n' "$PROG" "$1" >&2; exit "${2:-1}"; }
 
-KNOWN_VENDORS="claude codex opencode"
+KNOWN_VENDORS="claude codex opencode local"
 PROPOSER=
+AUTHOR=
 UNAVAILABLE=
 LEDGER="${AUTOSPEC_ROUTING_LEDGER:-.autospec/routing-ledger.jsonl}"
 EXPLAIN=0
@@ -73,6 +98,9 @@ while [ $# -gt 0 ]; do
         --proposer)
             if [ $# -lt 2 ]; then _die '--proposer requires a vendor'; fi
             PROPOSER="$2"; shift 2 ;;
+        --author)
+            if [ $# -lt 2 ]; then _die '--author requires a vendor'; fi
+            AUTHOR="$2"; shift 2 ;;
         --unavailable)
             if [ $# -lt 2 ]; then _die '--unavailable requires a vendor'; fi
             UNAVAILABLE="$UNAVAILABLE $2"; shift 2 ;;
@@ -84,8 +112,23 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-if [ -z "$PROPOSER" ]; then _die '--proposer is required'; fi
-if ! _is_known "$PROPOSER"; then _die "unknown vendor: $PROPOSER"; fi
+if [ -n "$PROPOSER" ] && [ -n "$AUTHOR" ]; then
+    _die 'pass exactly one of --proposer (verify voter) or --author (PR reviewer)'
+fi
+if [ -n "$AUTHOR" ]; then
+    # "unknown" is the ledger's sentinel for "the authoring vendor was never
+    # recorded" (routing-ledger.sh normalizes an absent author_vendor to it).
+    # Independence cannot be established against an unknown author, so refuse
+    # exactly like a single-vendor host: exit 3, caller keeps TIER_A.
+    if [ "$AUTHOR" = "unknown" ]; then
+        _log 'author vendor unknown -> no independence can be established'
+        exit 3
+    fi
+    if ! _is_known "$AUTHOR"; then _die "unknown vendor: $AUTHOR"; fi
+else
+    if [ -z "$PROPOSER" ]; then _die '--proposer is required'; fi
+    if ! _is_known "$PROPOSER"; then _die "unknown vendor: $PROPOSER"; fi
+fi
 for _u in $UNAVAILABLE; do
     if ! _is_known "$_u"; then _die "unknown vendor: $_u"; fi
 done
@@ -119,19 +162,58 @@ for _v in $_candidates; do
 done
 _log "after failover: ${_after_failover:-<none>}"
 
-# ── step 3: independence (never the proposer's own vendor) ─────────────────────
+# ── step 3: independence (never the proposer's/author's own vendor) ───────────
+# Exactly one of PROPOSER / AUTHOR is set (validated above), so a single
+# exclusion variable covers both modes. For --author local this is what makes
+# "local author -> cloud reviewer" a REMOVAL rather than a ranking.
+_EXCLUDE="$PROPOSER$AUTHOR"
 _independent=
 for _v in $_after_failover; do
-    if [ "$_v" != "$PROPOSER" ]; then _independent="$_independent $_v"; fi
+    if [ "$_v" != "$_EXCLUDE" ]; then _independent="$_independent $_v"; fi
 done
-_log "independent of proposer=$PROPOSER: ${_independent:-<none>}"
+if [ -n "$AUTHOR" ]; then
+    _log "independent of author=$AUTHOR: ${_independent:-<none>}"
+else
+    _log "independent of proposer=$PROPOSER: ${_independent:-<none>}"
+fi
 
 if [ -z "$_independent" ]; then
-    _log 'no independent vendor -> caller keeps its current same-vendor voter'
+    if [ -n "$AUTHOR" ]; then
+        _log 'no independent vendor -> caller keeps its TIER_A reviewer'
+    else
+        _log 'no independent vendor -> caller keeps its current same-vendor voter'
+    fi
     exit 3
 fi
 
-# ── step 4: least-spent wins (tiebreak only) ──────────────────────────────────
+# ── step 4 (reviewer mode): a fixed per-author preference order ───────────────
+# Total, so the choice is deterministic with or without a ledger; the spend
+# tiebreak below is deliberately voter-mode-only (see the header).
+if [ -n "$AUTHOR" ]; then
+    _pref=
+    case "$AUTHOR" in
+        claude)   _pref="codex opencode local" ;;
+        codex)    _pref="claude opencode local" ;;
+        opencode) _pref="claude codex local" ;;
+        local)    _pref="claude codex opencode" ;;
+    esac
+    _winner=
+    for _v in $_pref; do
+        for _i in $_independent; do
+            if [ "$_v" = "$_i" ]; then _winner="$_v"; fi
+        done
+        if [ -n "$_winner" ]; then break; fi
+    done
+    if [ -z "$_winner" ]; then
+        _log 'no independent vendor -> caller keeps its TIER_A reviewer'
+        exit 3
+    fi
+    _log "chose $_winner (preferred vendor for author=$AUTHOR)"
+    printf '%s\n' "$_winner"
+    exit 0
+fi
+
+# ── step 4 (voter mode): least-spent wins (tiebreak only) ─────────────────────
 # Spend is summed from this repo's ledger over ALL dispatch kinds, not just
 # verify-voter rows: quota is consumed per harness, so an implementer dispatch
 # spends the same budget a voter would. Latest-line-per-dispatch_id, because the
