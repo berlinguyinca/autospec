@@ -46,11 +46,21 @@
 //!    the pool size per pass and flags a sustained decline, and the reconciler
 //!    line it produces ([`PoolMonitor::reconcile_line`]) never says "nothing to
 //!    do" without naming the pool size on the same line.
+//! 6. **A merged fix is not a deployed fix** (#4228). The service states the
+//!    revision it is running (`branch @ sha`, [`parse_revision`]); the
+//!    reconciler compares it against the expected tip ([`drift`]) and says
+//!    "nothing to do" only when the two agree ([`decide`]). A redeploy is
+//!    refused — naming the unverified preconditions — until restart safety is
+//!    tested: the build works, the preflight refuses to bind without auth, and
+//!    the reconciler starts a replacement ([`PreconditionLedger`]). The line
+//!    it produces ([`reconcile_line`]) never says "nothing to do" while the
+//!    running revision is stale or unreported.
 //!
 //! Everything here is pure except [`read_record`], which reads one file. The
 //! caller supplies the transport closure and the pool counts; no clock, no
 //! subprocesses.
 
+pub mod deploy;
 pub mod health;
 pub mod pool;
 pub mod record;
@@ -60,6 +70,10 @@ pub mod registration;
 /// it starts, relative to the deployment state directory.
 pub const GATEWAY_URL_RECORD: &str = "state/gateway-url";
 
+pub use deploy::{
+    decide, drift, parse_revision, reconcile_line, DeployAction, Precondition, PreconditionLedger,
+    Revision, RevisionDrift, RevisionError,
+};
 pub use health::{
     component_health, service_health, ComponentHealth, HealthEvidence, ServiceHealth,
 };

@@ -9,16 +9,20 @@
 //!   and follows the service to its new location;
 //! * a worker that serves but cannot register is degraded, not healthy;
 //! * "the scheduler says the job is RUNNING" is not a health check;
-//! * the reconciler reports pool size and flags a sustained decline.
+//! * the reconciler reports pool size and flags a sustained decline;
+//! * a merged fix is a deployed fix only when the running revision matches
+//!   the expected tip, and a redeploy is refused until restart safety is
+//!   tested (issue #4228).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use autospec_core::service_address::{
-    component_health, parse_address, read_record, service_health, AddressOrigin, AddressResolver,
-    ComponentHealth, HealthEvidence, PoolMonitor, PoolTrend, RecordError, RegistrationOutcome,
-    ServiceHealth,
+    component_health, decide, drift, parse_address, parse_revision, read_record, reconcile_line,
+    service_health, AddressOrigin, AddressResolver, ComponentHealth, DeployAction, HealthEvidence,
+    PoolMonitor, PoolTrend, Precondition, PreconditionLedger, RecordError, RegistrationOutcome,
+    RevisionDrift, RevisionError, ServiceHealth,
 };
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -328,4 +332,242 @@ fn reconciler_reports_pool_size_and_flags_sustained_decline() {
     assert!(empty
         .reconcile_line(0, "nothing to do")
         .contains("pool: unknown"));
+}
+
+/// #4228 invariant 2: the service reports the revision it is running
+/// (`branch @ sha`), and a report that cannot be read is "no revision",
+/// never "current".
+#[test]
+fn service_reports_the_revision_it_is_running() {
+    let main = parse_revision("main @ 1a2b3c4d").expect("a valid report parses");
+    assert_eq!(main.branch, "main");
+    assert_eq!(main.sha, "1a2b3c4d");
+    assert_eq!(main.to_string(), "main @ 1a2b3c4d");
+
+    // A full 40-digit sha, surrounding whitespace, and a 64-hex (sha-256
+    // repository) sha all parse.
+    assert!(parse_revision("  origin/main @ 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b  ").is_ok());
+    assert!(parse_revision(&format!("main @ {}", "ab".repeat(32))).is_ok());
+
+    // Garbage reports are no answers, never answers: the service is unreported.
+    assert_eq!(parse_revision("1a2b3c4d"), Err(RevisionError::NoSeparator));
+    assert_eq!(
+        parse_revision("no revision"),
+        Err(RevisionError::NoSeparator)
+    );
+    assert_eq!(
+        parse_revision("@ 1a2b3c4d"),
+        Err(RevisionError::EmptyBranch)
+    );
+    assert_eq!(
+        parse_revision("my branch @ 1a2b3c4d"),
+        Err(RevisionError::EmptyBranch)
+    );
+    assert_eq!(parse_revision("main @ xyz"), Err(RevisionError::BadSha));
+    assert_eq!(parse_revision("main @ 123"), Err(RevisionError::BadSha));
+    assert_eq!(
+        parse_revision("main @ 1a2b-3c4d"),
+        Err(RevisionError::BadSha)
+    );
+    assert_eq!(
+        parse_revision(&format!("main @ {}", "ab".repeat(33))),
+        Err(RevisionError::BadSha)
+    );
+}
+
+/// #4228 invariant 3: the reconciler compares the running revision against
+/// the expected tip (origin/main) and reports the difference. The same commit
+/// under a different branch name is in sync; a service that reports nothing is
+/// unreported, not current.
+#[test]
+fn reconciler_reports_drift_against_the_expected_tip() {
+    let expected = parse_revision("origin/main @ 1a2b3c4d").expect("valid");
+    let same_commit_other_name = parse_revision("main @ 1a2b3c4d").expect("valid");
+    let stale = parse_revision("main @ 0f9e8d7c").expect("valid");
+
+    assert_eq!(
+        drift(Some(&same_commit_other_name), &expected),
+        RevisionDrift::Current,
+        "the same commit is the same code, whatever it is called"
+    );
+    assert_eq!(
+        drift(Some(&stale), &expected),
+        RevisionDrift::Drifted {
+            running: stale.clone(),
+            expected: expected.clone()
+        }
+    );
+    assert_eq!(drift(None, &expected), RevisionDrift::Unreported);
+    assert!(drift(None, &expected).to_string().contains("unreported"));
+}
+
+/// #4228 invariants 1 and 4: "redeploy" is a decision the reconciler makes
+/// when the revision differs — not something that happens to the wait — and
+/// it is refused, naming the unverified preconditions, until restart safety is
+/// tested: the build works, the preflight refuses to bind without auth, the
+/// reconciler starts a replacement.
+#[test]
+fn redeploy_is_a_decision_not_a_wait() {
+    let expected = parse_revision("origin/main @ 1a2b3c4d").expect("valid");
+    let stale = parse_revision("main @ 0f9e8d7c").expect("valid");
+    let current = parse_revision("main @ 1a2b3c4d").expect("valid");
+
+    let mut ledger = PreconditionLedger::new();
+    assert_eq!(
+        ledger.missing(),
+        vec![
+            Precondition::Build,
+            Precondition::RefusesBindWithoutAuth,
+            Precondition::ReplacementStarts
+        ]
+    );
+    assert!(!ledger.all_verified());
+
+    // In sync: nothing to do, whatever the preconditions.
+    assert_eq!(
+        decide(Some(&current), &expected, &ledger),
+        DeployAction::NothingToDo
+    );
+
+    // Unreported: never "nothing to do" and never "redeploy" — the deployment
+    // cannot be verified either way.
+    assert_eq!(decide(None, &expected, &ledger), DeployAction::Unknown);
+
+    // Stale, nothing tested: refused, naming all three preconditions.
+    assert_eq!(
+        decide(Some(&stale), &expected, &ledger),
+        DeployAction::Refused {
+            missing: vec![
+                Precondition::Build,
+                Precondition::RefusesBindWithoutAuth,
+                Precondition::ReplacementStarts
+            ]
+        }
+    );
+
+    // Stale, two of three tested: refused, naming the one that remains.
+    ledger.record(Precondition::Build);
+    ledger.record(Precondition::RefusesBindWithoutAuth);
+    assert_eq!(
+        decide(Some(&stale), &expected, &ledger),
+        DeployAction::Refused {
+            missing: vec![Precondition::ReplacementStarts]
+        }
+    );
+
+    // Stale, all three tested: redeploy to the expected tip.
+    ledger.record(Precondition::ReplacementStarts);
+    assert!(ledger.all_verified());
+    assert_eq!(
+        decide(Some(&stale), &expected, &ledger),
+        DeployAction::Redeploy {
+            expected: expected.clone()
+        }
+    );
+}
+
+/// #4228 invariant 3: the reconciler line names the running revision next to
+/// its verdict, so "nothing to do" can never be stated over stale or
+/// unreported code. Inconsistent inputs fall to the unreported line.
+#[test]
+fn reconciler_line_never_says_nothing_to_do_over_stale_code() {
+    let expected = parse_revision("origin/main @ 1a2b3c4d").expect("valid");
+    let current = parse_revision("main @ 1a2b3c4d").expect("valid");
+    let stale = parse_revision("main @ 0f9e8d7c").expect("valid");
+
+    let mut verified = PreconditionLedger::new();
+    verified.record(Precondition::Build);
+    verified.record(Precondition::RefusesBindWithoutAuth);
+    verified.record(Precondition::ReplacementStarts);
+
+    // In sync: "nothing to do" is true, and the line names the revision that
+    // makes it true.
+    let in_sync = decide(Some(&current), &expected, &verified);
+    let line = reconcile_line(Some(&current), &expected, &in_sync);
+    assert!(line.contains("nothing to do"), "{line}");
+    assert!(
+        line.contains("1a2b3c4d"),
+        "the line names the running revision: {line}"
+    );
+
+    // Stale: the line says drifted and names both revisions.
+    let drifted = decide(Some(&stale), &expected, &verified);
+    let line = reconcile_line(Some(&stale), &expected, &drifted);
+    assert!(
+        !line.contains("nothing to do"),
+        "stale code is not nothing to do: {line}"
+    );
+    assert!(line.contains("DRIFTED"), "{line}");
+    assert!(
+        line.contains("0f9e8d7c") && line.contains("1a2b3c4d"),
+        "the line names both revisions: {line}"
+    );
+
+    // Refused: the line names the unverified preconditions.
+    let mut partial = PreconditionLedger::new();
+    partial.record(Precondition::Build);
+    let refused = decide(Some(&stale), &expected, &partial);
+    let line = reconcile_line(Some(&stale), &expected, &refused);
+    assert!(!line.contains("nothing to do"), "{line}");
+    assert!(line.contains("refused"), "{line}");
+    assert!(
+        line.contains("preflight refuses to bind without auth"),
+        "the remaining precondition is named: {line}"
+    );
+
+    // Unreported: the line says the deployment cannot be verified.
+    let unknown = decide(None, &expected, &verified);
+    let line = reconcile_line(None, &expected, &unknown);
+    assert!(!line.contains("nothing to do"), "{line}");
+    assert!(line.contains("unreported"), "{line}");
+
+    // Inconsistent inputs (a redeploy decision with no reported revision)
+    // fall to the unreported line: the line never overstates what was
+    // verified.
+    let bogus = reconcile_line(
+        None,
+        &expected,
+        &DeployAction::Redeploy {
+            expected: expected.clone(),
+        },
+    );
+    assert!(bogus.contains("unreported"), "{bogus}");
+}
+
+/// #4228 postscript: the redeploy moved the gateway. The consumer that held
+/// the address it captured at launch broke, exactly as it should; the consumer
+/// that resolves the published record at use time followed it without a
+/// restart.
+#[test]
+fn redeploy_moves_the_address_and_consumers_follow_the_record() {
+    let dir = temp_dir("redeploy");
+    let record = dir.join("gateway-url");
+    write_record(&dir, "http://node-04:8080");
+    let gateway = Gateway {
+        live: record.clone(),
+    };
+
+    // A consumer that captured the address at launch and never re-reads.
+    let captured = gateway.current();
+
+    // The redeploy: the new build lands on a different node and port and the
+    // gateway rewrites the record.
+    write_record(&dir, "http://node-31:9400");
+
+    assert_eq!(
+        gateway.register(&captured),
+        RegistrationOutcome::Unreachable,
+        "the consumer holding the old address cannot reach the moved gateway"
+    );
+
+    // A consumer that resolves at use time follows the record — same process,
+    // no restart.
+    let mut resolver = AddressResolver::new(&record, Some(&captured));
+    assert_eq!(
+        resolver.register(|address| gateway.register(address)),
+        RegistrationOutcome::Registered
+    );
+    assert_eq!(resolver.cached(), Some("http://node-31:9400"));
+
+    let _ = fs::remove_dir_all(&dir);
 }

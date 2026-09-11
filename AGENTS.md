@@ -725,10 +725,23 @@ a value captured at launch. Checkable in `autospec_core::service_address`:
   verdict (`PoolMonitor::reconcile_line`) and flags `decline_window` consecutive
   declines as `PoolTrend::Draining` — slow drain must be visible before it
   reaches zero, not after.
+- A merged fix is a deployed one only when the running revision matches the
+  expected tip (#4228). The service reports the revision it is running
+  (`branch @ sha` via `parse_revision`; a report that does not parse is "no
+  revision", never "current"), the reconciler compares it against the expected
+  tip by sha (`drift` — the same commit under a different branch name is in
+  sync) and says "nothing to do" only when the two agree (`decide`). A
+  redeploy is `Refused`, naming the unverified preconditions, until restart
+  safety is tested: the build works, the preflight refuses to bind without
+  auth, the reconciler starts a replacement (`PreconditionLedger`). The report
+  line (`reconcile_line`) names the running revision next to the verdict, so
+  "nothing to do" is never stated over stale or unreported code.
 
 Tests: `crates/autospec-core/tests/service_address.rs`, including the
 regression case "relocate the gateway, start a worker, it registers" with
-nothing else restarted.
+nothing else restarted, and the #4228 redeploy cases: drift against the
+expected tip, a refused redeploy naming its unverified preconditions, and the
+moved gateway breaking the consumer that held the old address.
 
 ## Stored-output lifecycle and blocker escalation
 
