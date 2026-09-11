@@ -108,6 +108,7 @@ pub mod state;
 pub mod stored_output;
 pub mod symptom_attribution;
 pub mod threshold_calibration;
+pub mod toolchain_gate;
 pub mod tractability;
 pub mod validation;
 pub mod verification;
