@@ -1,5 +1,6 @@
 pub mod aar;
 pub mod agent;
+pub mod agent_watchdog;
 pub mod autonomous {
     pub mod audit;
     pub mod blast_radius;
