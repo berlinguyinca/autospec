@@ -75,6 +75,7 @@ pub mod item_sweep;
 pub mod lint;
 pub mod log_freshness;
 pub mod managed_project;
+pub mod memo_key;
 pub mod name_scope;
 pub mod not_reproducible;
 pub mod planning;
