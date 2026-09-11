@@ -28,12 +28,19 @@
 //! their verdicts to the caller that performs the I/O.
 //!
 //! 1. **A timed-out run is re-dispatch material, not gate material**
-//!    ([`TriageDecision::Redispatch`]). `status=TIMEOUT` and
-//!    `status=TIMEOUT-NO-OUTPUT` mean the agent never reached the gate.
-//!    A local gate on an untested patch spends the gate's cost saying
-//!    nothing about it; a fresh dispatch is the only response. The
-//!    timeout outranks every other signal in the file — even a
-//!    `fmt_rc != 0` in the same report.
+//!    ([`TriageDecision::Redispatch`]). `status=TIMEOUT` means the agent
+//!    never reached the gate. A local gate on an untested patch spends
+//!    the gate's cost saying nothing about it; a fresh dispatch is the
+//!    only response. The timeout outranks every other signal in the file
+//!    — even a `fmt_rc != 0` in the same report.
+//! 1a. **A timed-out run with no output is review material, not
+//!    re-dispatch material** ([`TriageDecision::RaiseForReview`]).
+//!    `status=TIMEOUT-NO-OUTPUT` is the empty-output case: the agent
+//!    produced nothing, so re-dispatching the same prompt reproduces the
+//!    same emptiness (#3936). It outranks every other signal just as the
+//!    plain timeout does, but the response is to raise it for review —
+//!    a human or the monitor looks at why nothing came out — not to
+//!    silently re-queue it.
 //! 2. **Deterministic negatives are trusted; they hold, they do not
 //!    re-run** ([`TriageDecision::Hold`]). `fmt_rc != 0` holds the patch
 //!    as [`AgentHoldReason::Unformatted`]
@@ -186,13 +193,19 @@ fn parse_fmt_files(value: &str) -> Result<usize, String> {
         .map_err(|_| format!("fmt-files.txt expects a file count, got {value}"))
 }
 
-/// The three responses the pass can make to an agent report (#3715).
+/// The four responses the pass can make to an agent report (#3715).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriageDecision {
     /// Re-dispatch the issue; do not gate locally (rule 1).
     Redispatch {
-        /// The status that triggered the re-dispatch (`TIMEOUT` or
-        /// `TIMEOUT-NO-OUTPUT`).
+        /// The status that triggered the re-dispatch (`TIMEOUT`).
+        status: String,
+    },
+    /// Raise the issue for review instead of re-dispatching it (rule 1a).
+    RaiseForReview {
+        /// The status that triggered the review (`TIMEOUT-NO-OUTPUT`): the
+        /// run timed out with no output, so re-dispatch would reproduce the
+        /// same emptiness (#3936).
         status: String,
     },
     /// Hold the patch on the agent's own deterministic negative (rule 2).
@@ -264,10 +277,14 @@ pub enum GateBasis {
 ///
 /// The precedence is the contract, most decisive evidence first:
 ///
-/// 1. `TIMEOUT` / `TIMEOUT-NO-OUTPUT` → [`TriageDecision::Redispatch`].
-///    The run never reached the gate, so nothing the pass runs locally
-///    can say about the patch. The timeout outranks every other signal
-///    in the report.
+/// 1. `TIMEOUT` → [`TriageDecision::Redispatch`]. The run never reached
+///    the gate, so nothing the pass runs locally can say about the
+///    patch. The timeout outranks every other signal in the report.
+/// 1a. `TIMEOUT-NO-OUTPUT` → [`TriageDecision::RaiseForReview`]. The
+///    empty-output case (#3936): re-dispatching the same prompt
+///    reproduces the same emptiness, so the run is raised for review
+///    rather than re-queued. It outranks every other signal just as the
+///    plain timeout does.
 /// 2. `fmt_rc != 0` → [`TriageDecision::Hold`] as
 ///    [`AgentHoldReason::Unformatted`]. Deterministic; a local re-run
 ///    reproduces it.
@@ -300,10 +317,18 @@ pub fn triage(report: &AgentReport) -> TriageDecision {
     }
     let status = report.status.as_deref();
     // 1. The timeout outranks everything: the run never reached the
-    //    gate, so no local gate can speak about the patch.
-    if matches!(status, Some("TIMEOUT") | Some("TIMEOUT-NO-OUTPUT")) {
+    //    gate, so no local gate can speak about the patch. A plain
+    //    timeout re-dispatches; a timeout with no output raises for
+    //    review instead, because re-dispatch would reproduce the same
+    //    emptiness (#3936).
+    if status == Some("TIMEOUT") {
         return TriageDecision::Redispatch {
-            status: status.unwrap().to_string(),
+            status: "TIMEOUT".to_string(),
+        };
+    }
+    if status == Some("TIMEOUT-NO-OUTPUT") {
+        return TriageDecision::RaiseForReview {
+            status: "TIMEOUT-NO-OUTPUT".to_string(),
         };
     }
     // 2. fmt: a deterministic negative; trust the agent's.
@@ -385,6 +410,11 @@ pub fn decision_line(decision: &TriageDecision, report: &AgentReport) -> String 
     match decision {
         TriageDecision::Redispatch { status } => {
             format!("RE-DISPATCH: agent reported status={status}; the run never reached the gate")
+        }
+        TriageDecision::RaiseForReview { status } => {
+            format!(
+                "RAISE-FOR-REVIEW: agent reported status={status}; the run produced no output, so re-dispatch would reproduce the same emptiness (#3936)"
+            )
         }
         TriageDecision::Hold { reason } => held_line(report, *reason),
         TriageDecision::GateLocally { basis } => {
@@ -542,12 +572,43 @@ worker: gpu-4090-03
                 status: "TIMEOUT".to_string()
             }
         );
+    }
+
+    #[test]
+    fn a_timeout_with_no_output_raises_for_review() {
         assert_eq!(
             triage(&report(Some("TIMEOUT-NO-OUTPUT"), None, None, None, None)),
-            TriageDecision::Redispatch {
+            TriageDecision::RaiseForReview {
                 status: "TIMEOUT-NO-OUTPUT".to_string()
             }
         );
+    }
+
+    #[test]
+    fn a_timeout_with_no_output_outranks_every_other_signal() {
+        let noisy = report(
+            Some("TIMEOUT-NO-OUTPUT"),
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(32),
+        );
+        assert_eq!(
+            triage(&noisy),
+            TriageDecision::RaiseForReview {
+                status: "TIMEOUT-NO-OUTPUT".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn the_raise_for_review_decision_line_names_the_status_and_reason() {
+        let report = report(Some("TIMEOUT-NO-OUTPUT"), None, None, None, None);
+        let decision = triage(&report);
+        let line = decision_line(&decision, &report);
+        assert!(line.starts_with("RAISE-FOR-REVIEW:"), "{line}");
+        assert!(line.contains("status=TIMEOUT-NO-OUTPUT"), "{line}");
+        assert!(line.contains("no output"), "{line}");
     }
 
     #[test]
