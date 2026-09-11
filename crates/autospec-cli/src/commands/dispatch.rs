@@ -1071,10 +1071,11 @@ fn runs_policy(args: &[String]) -> Result<FleetDispatchPolicy, CommandFailure> {
 /// code.
 fn runs(args: &[String]) -> Result<(), CommandFailure> {
     const USAGE: &str = "usage: autospec dispatch runs --runs <PATH> \
-[--out <PATH>] [--duration-floor <SECS>] [--quote-bytes <N>] [--fault-threshold <N>] [--json]";
+[--out <PATH>] [--duration-floor <SECS>] [--quote-bytes <N>] [--fault-threshold <N>] [--json] [--transcript-dir <PATH>]";
     let runs_path =
         opt_string(args, "--runs")?.ok_or_else(|| CommandFailure::diagnostic(USAGE.to_string()))?;
     let out_path = opt_string(args, "--out")?;
+    let transcript_dir = opt_string(args, "--transcript-dir")?;
     let as_json = args.iter().any(|arg| arg == "--json");
     let policy = runs_policy(args)?;
 
@@ -1085,6 +1086,22 @@ fn runs(args: &[String]) -> Result<(), CommandFailure> {
         CommandFailure::diagnostic(format!("runs file {runs_path} is not valid JSON: {error}"))
     })?;
     let (run_records, subfleets) = parse_runs_input(value, &runs_path)?;
+
+    // AC #4: even empty runs leave a transcript on disk for post-mortem.
+    if let Some(dir) = &transcript_dir {
+        fs::create_dir_all(dir).map_err(|error| {
+            CommandFailure::transient(format!("cannot create transcript dir {dir}: {error}"))
+        })?;
+        for record in &run_records {
+            let path = std::path::Path::new(dir).join(format!("{}.transcript", record.issue));
+            fs::write(&path, record.transcript.as_bytes()).map_err(|error| {
+                CommandFailure::transient(format!(
+                    "cannot write transcript {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
 
     let report = build_runs_report(run_records, subfleets, &policy);
 
