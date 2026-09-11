@@ -25,6 +25,13 @@
 #   LAST_GOOD_SUBJECT:<first commit line | ->
 #   FIRST_FAILING:<sha | none | unknown>
 #   FIRST_FAILING_SUBJECT:<first commit line | ->
+#   CANCELLED_AFTER_LAST_GOOD:<n | unknown>
+#
+# `cancelled` is counted separately, never folded into the failure set
+# (issue #4199): a cancelled run is absent evidence — it neither proves its
+# commit broke the check (no false FIRST_FAILING bisect target) nor that the
+# check passed. A window with no failure but with runs cancelled after the
+# last good run is therefore `unknown` (exit 2), not `ok`.
 #
 # Usage:
 #   first-failing-commit.sh --repo OWNER/REPO [--check NAME] [--max-commits N]
@@ -58,11 +65,12 @@ done
 printf '%s' "$MAX_COMMITS" | grep -qE '^[1-9][0-9]*$' || _die "--max-commits must be a positive integer (got: $MAX_COMMITS)"
 
 _emit() {
-    # _emit <state> <last_good> <first_failing> <n_scanned>
+    # _emit <state> <last_good> <first_failing> <n_scanned> <n_cancelled>
     _state="$1"
     _lg="$2"
     _ff="$3"
     _n="$4"
+    _nc="$5"
     _lg_subj="-"
     _ff_subj="-"
     if [ "$_state" != "unknown" ]; then
@@ -89,17 +97,18 @@ _emit() {
     printf 'LAST_GOOD_SUBJECT:%s\n' "$_lg_subj"
     printf 'FIRST_FAILING:%s\n' "$_ff"
     printf 'FIRST_FAILING_SUBJECT:%s\n' "$_ff_subj"
+    printf 'CANCELLED_AFTER_LAST_GOOD:%s\n' "$_nc"
 }
 
 if ! _runs="$(gh api "repos/$REPO/actions/runs?branch=main&per_page=$MAX_COMMITS&status=completed" 2>/dev/null)"; then
     printf 'first-failing-commit: could not read the completed main runs for %s\n' "$REPO" >&2
-    _emit unknown unknown unknown 0
+    _emit unknown unknown unknown 0 unknown
     exit 2
 fi
 
 if ! printf '%s' "$_runs" | jq -e 'type == "object"' >/dev/null 2>&1; then
     printf 'first-failing-commit: unexpected response shape from the runs API for %s\n' "$REPO" >&2
-    _emit unknown unknown unknown 0
+    _emit unknown unknown unknown 0 unknown
     exit 2
 fi
 
@@ -116,13 +125,13 @@ if ! _seq="$(printf '%s' "$_runs" | jq -c --arg check "$CHECK" '
           | { sha: $r.head_sha, created: $r.created_at, conclusion: $j.conclusion })
     | sort_by(.created)')"; then
     printf 'first-failing-commit: failed to parse the runs payload for %s\n' "$REPO" >&2
-    _emit unknown unknown unknown 0
+    _emit unknown unknown unknown 0 unknown
     exit 2
 fi
 
 _n="$(printf '%s' "$_seq" | jq 'length')"
 if [ "$_n" = "0" ]; then
-    _emit unknown none none 0
+    _emit unknown none none 0 unknown
     exit 2
 fi
 
@@ -133,31 +142,46 @@ fi
 _lg=""
 if ! _lg="$(printf '%s' "$_seq" | jq -r '[ .[] | select(.conclusion == "success") ] | last | .sha // "none"')"; then
     printf 'first-failing-commit: failed to parse the reduced sequence for %s\n' "$REPO" >&2
-    _emit unknown unknown unknown "$_n"
+    _emit unknown unknown unknown "$_n" unknown
     exit 2
 fi
 
 _lg_created=""
 if ! _lg_created="$(printf '%s' "$_seq" | jq -r '[ .[] | select(.conclusion == "success") ] | last | .created // ""')"; then
     printf 'first-failing-commit: failed to parse the reduced sequence for %s\n' "$REPO" >&2
-    _emit unknown unknown unknown "$_n"
+    _emit unknown unknown unknown "$_n" unknown
     exit 2
 fi
 
 if ! _ff="$(printf '%s' "$_seq" | jq -r --arg lg "$_lg_created" '
     [ .[] | select(.conclusion as $c
         | $c == "failure" or $c == "timed_out" or $c == "startup_failure"
-          or $c == "action_required" or $c == "cancelled")
+          or $c == "action_required")
       | select(.created > $lg) ]
     | first | .sha // "none"')"; then
     printf 'first-failing-commit: failed to parse the reduced sequence for %s\n' "$REPO" >&2
-    _emit unknown unknown unknown "$_n"
+    _emit unknown unknown unknown "$_n" unknown
+    exit 2
+fi
+
+# Counted separately from the failure set (issue #4199): a cancelled run
+# after the last good run never verified its commit, so the window has no
+# failure evidence and no green evidence — that is unknown, not ok.
+if ! _nc="$(printf '%s' "$_seq" | jq -r --arg lg "$_lg_created" '
+    [ .[] | select(.conclusion == "cancelled") | select(.created > $lg) ]
+    | length')"; then
+    printf 'first-failing-commit: failed to parse the reduced sequence for %s\n' "$REPO" >&2
+    _emit unknown unknown unknown "$_n" unknown
     exit 2
 fi
 
 if [ "$_ff" = "none" ] || [ -z "$_ff" ]; then
-    _emit ok "$_lg" none "$_n"
+    if [ "$_nc" -gt 0 ]; then
+        _emit unknown "$_lg" none "$_n" "$_nc"
+        exit 2
+    fi
+    _emit ok "$_lg" none "$_n" "$_nc"
     exit 0
 fi
-_emit broken "$_lg" "$_ff" "$_n"
+_emit broken "$_lg" "$_ff" "$_n" "$_nc"
 exit 0
