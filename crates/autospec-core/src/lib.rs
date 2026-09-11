@@ -56,6 +56,7 @@ pub mod graph;
 pub mod growth;
 pub mod heartbeat;
 pub mod host_set;
+pub mod immutable_base;
 pub mod initiative;
 pub mod insights;
 pub mod integration;
