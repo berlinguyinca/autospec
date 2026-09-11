@@ -319,7 +319,10 @@ fn quoted_spans(source: &str) -> Vec<&str> {
 /// `refs`, `references`, `see`, `related` — they acknowledge an issue, not
 /// claim it. A green gate is not among them either: acceptance is claimed
 /// in words, never inferred from a count.
-const CLOSING_VERBS: [&str; 9] = [
+///
+/// Shared with `prose_closure` (issue #4305), which must classify the same
+/// verbs as closing keywords in PR-body prose.
+pub(crate) const CLOSING_VERBS: [&str; 9] = [
     "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
 ];
 

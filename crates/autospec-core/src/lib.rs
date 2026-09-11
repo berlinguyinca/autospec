@@ -84,6 +84,7 @@ pub mod planning;
 pub mod post_merge;
 pub mod procedure;
 pub mod prompt_blocks;
+pub mod prose_closure;
 pub mod rag;
 pub mod rebaseline;
 pub mod repair_loop;
