@@ -1,14 +1,15 @@
 //! Tests for [`autospec_core::fleet_models`] (issue #3664): the two-registry
 //! name bridge, the loud lookup-miss distinction, the startup refusal line,
-//! and the scale ratchet that may not ratchet against dying workers.
+//! the derived per-card fit check (issue #4244), and the scale ratchet that
+//! may not ratchet against dying workers.
 //!
 //! Wrapped in `mod fleet_models` so the issue's smoke command,
 //! `cargo test -p autospec-core fleet_models`, selects this binary's tests.
 
 mod fleet_models {
     use autospec_core::fleet_models::{
-        AuditFinding, FleetModelEntry, FleetRegistry, Registries, ResolveError, ScaleAction,
-        ScaleRatchet, ServingRegistry, StartupRejection,
+        AuditFinding, FitCheck, FleetModelEntry, FleetRegistry, GpuCard, Registries, ResolveError,
+        ScaleAction, ScaleRatchet, ServingRegistry, StartupRejection,
     };
 
     fn entry(canonical: &str, quant: &str) -> FleetModelEntry {
@@ -25,6 +26,18 @@ mod fleet_models {
                 .unwrap(),
             serving: ServingRegistry::new(serving.iter().map(|s| s.to_string()).collect()).unwrap(),
         }
+    }
+
+    fn card(class: &str, vram_mib: u64) -> GpuCard {
+        GpuCard {
+            class: class.to_string(),
+            vram_mib,
+        }
+    }
+
+    fn fleet() -> FleetRegistry {
+        // `entry()` pins vram_mib at 40_960: the model needs exactly 40 GiB.
+        FleetRegistry::new(vec![entry("qwen3.8-27b", "q8")]).unwrap()
     }
 
     #[test]
@@ -149,6 +162,175 @@ mod fleet_models {
         assert!(!line.contains('\n'));
         assert!(line.contains("fleet registry (models.tsv)"), "{line}");
         assert!(line.contains("`mistral-7b`"), "{line}");
+    }
+
+    #[test]
+    fn eligible_classes_are_derived_from_catalog_vram_not_listed() {
+        // The old shape was a `case "$MODEL"` allowlist; the new check reads
+        // the catalog's vram_mib and compares it to each candidate card.
+        let fleet = fleet();
+        let cards = vec![
+            card("gpu:6000_blackwell", 49_152), // fits: 49 GiB >= 40 GiB
+            card("gpu:a100", 81_920),           // fits
+            card("gpu:t4", 16_384),             // does not fit
+        ];
+        assert_eq!(
+            fleet.eligible_classes("qwen3.8-27b", &cards),
+            FitCheck::Fits {
+                canonical: "qwen3.8-27b".to_string(),
+                classes: vec!["gpu:6000_blackwell".to_string(), "gpu:a100".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn fit_boundary_is_exact_with_no_invented_margin() {
+        // Trap 1: no `* 1.2` safety margin invented at the guard. The
+        // catalog's vram_mib is the only model-side input, so equality
+        // fits and one MiB short does not.
+        let fleet = fleet();
+        assert_eq!(
+            fleet.eligible_classes("qwen3.8-27b", &[card("gpu:a100", 40_960)]),
+            FitCheck::Fits {
+                canonical: "qwen3.8-27b".to_string(),
+                classes: vec!["gpu:a100".to_string()],
+            }
+        );
+        assert_eq!(
+            fleet.eligible_classes("qwen3.8-27b", &[card("gpu:a100", 40_959)]),
+            FitCheck::Fits {
+                canonical: "qwen3.8-27b".to_string(),
+                classes: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_model_is_unknown_not_an_empty_fit() {
+        // Trap 2: a narrow vram probe (exit 0 on some budget) is not a
+        // membership test. An unlisted model is `Unknown` — a catalog gap
+        // to file — never `Fits { classes: [] }`, which would read as
+        // "fits nowhere" and steer the operator to add cards instead of a
+        // models.tsv row.
+        let fleet = fleet();
+        let cards = vec![card("gpu:a100", 81_920)];
+        assert_eq!(
+            fleet.eligible_classes("glm-5.3-flash", &cards),
+            FitCheck::Unknown {
+                name: "glm-5.3-flash".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn cataloged_model_that_fits_nowhere_is_an_empty_fit() {
+        // The capacity fact a known model can hit: every candidate card is
+        // too small. This is `Fits` with an empty class list, distinct
+        // from `Unknown`.
+        let fleet = fleet();
+        let cards = vec![card("gpu:t4", 16_384), card("gpu:rtx4090", 24_576)];
+        assert_eq!(
+            fleet.eligible_classes("qwen3.8-27b", &cards),
+            FitCheck::Fits {
+                canonical: "qwen3.8-27b".to_string(),
+                classes: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn unmeasured_card_refuses_instead_of_guessing() {
+        // A card declaring no VRAM must not be treated as fitting nothing
+        // (silently excluded) or as fitting everything (permissive
+        // default): both are lies. The check refuses and names the class.
+        let fleet = fleet();
+        let cards = vec![card("gpu:turing", 0), card("gpu:a100", 81_920)];
+        assert_eq!(
+            fleet.eligible_classes("qwen3.8-27b", &cards),
+            FitCheck::UnmeasuredCard {
+                class: "gpu:turing".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_model_is_checked_before_card_measurement() {
+        // The catalog is consulted first: a name it does not know is a
+        // catalog gap regardless of what the candidate cards declare.
+        let fleet = fleet();
+        let cards = vec![card("gpu:turing", 0)];
+        assert_eq!(
+            fleet.eligible_classes("deepseek-v4-flash", &cards),
+            FitCheck::Unknown {
+                name: "deepseek-v4-flash".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_card_classes_are_deduplicated_in_input_order() {
+        // Eligibility is per class, not per physical card: four A100s are
+        // one scheduling constraint, first occurrence wins the position.
+        let fleet = fleet();
+        let cards = vec![
+            card("gpu:a100", 81_920),
+            card("gpu:6000_blackwell", 49_152),
+            card("gpu:a100", 81_920),
+            card("gpu:t4", 16_384),
+            card("gpu:a100", 81_920),
+        ];
+        assert_eq!(
+            fleet.eligible_classes("qwen3.8-27b", &cards),
+            FitCheck::Fits {
+                canonical: "qwen3.8-27b".to_string(),
+                classes: vec!["gpu:a100".to_string(), "gpu:6000_blackwell".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn fit_line_for_unknown_names_models_tsv_and_refuses_to_guess() {
+        let fleet = fleet();
+        let line = fleet
+            .eligible_classes("glm-5.3-flash", &[card("gpu:a100", 81_920)])
+            .line();
+        assert!(!line.contains('\n'));
+        assert!(line.contains("models.tsv"), "{line}");
+        assert!(line.contains("`glm-5.3-flash`"), "{line}");
+        assert!(line.to_lowercase().contains("refus"), "{line}");
+    }
+
+    #[test]
+    fn fit_line_for_fits_names_the_derived_classes() {
+        let fleet = fleet();
+        let cards = vec![card("gpu:6000_blackwell", 49_152), card("gpu:t4", 16_384)];
+        let line = fleet.eligible_classes("qwen3.8-27b", &cards).line();
+        assert!(!line.contains('\n'));
+        assert!(line.contains("`qwen3.8-27b`"), "{line}");
+        assert!(line.contains("gpu:6000_blackwell"), "{line}");
+        assert!(!line.contains("gpu:t4"), "{line}");
+    }
+
+    #[test]
+    fn fit_line_for_empty_fit_states_the_capacity_fact() {
+        let fleet = fleet();
+        let line = fleet
+            .eligible_classes("qwen3.8-27b", &[card("gpu:t4", 16_384)])
+            .line();
+        assert!(!line.contains('\n'));
+        assert!(line.contains("`qwen3.8-27b`"), "{line}");
+        assert!(line.contains("no candidate class"), "{line}");
+    }
+
+    #[test]
+    fn fit_line_for_unmeasured_card_names_the_class() {
+        let fleet = fleet();
+        let line = fleet
+            .eligible_classes("qwen3.8-27b", &[card("gpu:turing", 0)])
+            .line();
+        assert!(!line.contains('\n'));
+        assert!(line.contains("`gpu:turing`"), "{line}");
+        assert!(line.to_lowercase().contains("refus"), "{line}");
     }
 
     #[test]

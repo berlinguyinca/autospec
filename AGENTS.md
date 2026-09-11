@@ -160,6 +160,25 @@ silently became a permissive default. A refusal that names its missing input is
 both the fix and the diagnosis: it tells the operator which file to consult
 instead of guessing for them.
 
+### Fit is derived, not listed (#4244)
+
+Scheduling eligibility is a property of the catalog plus the card, not a
+property of the model name. **Answer "on which classes may this model be
+scheduled?" by reading the catalog's `vram_mib` and comparing it to each
+candidate card — never by a `case "$MODEL"` allowlist of names.** A list of
+names drifts the moment the catalog gains a row; the derived answer cannot.
+The fit test is exactly `card.vram_mib >= entry.vram_mib` — no margin is
+invented at the guard, and a card whose VRAM is unmeasured (`vram_mib == 0`)
+refuses with a distinct variant rather than being treated as fitting
+everything (the permissive default is a lie) or silently dropped. A name the
+catalog does not know is its own refusal (`FitCheck::Unknown`), never an
+empty class list: a narrow probe's exit code is not a membership test.
+
+Checkable in `autospec_core::fleet_models` (`FleetRegistry::eligible_classes`,
+`GpuCard`, `FitCheck` — pure in-memory, no subprocess, so the node repo's
+`worker.sh` / `pick-config.py` can adopt them as the single source of truth).
+Tests: `crates/autospec-core/tests/fleet_models.rs`.
+
 ## Semantic code intelligence
 
 - Every code intelligence query names a workspace; a workspace resolves to exactly one
