@@ -308,20 +308,19 @@ run_gate() { # run_gate DIR TODAY
     fi
 
     local audit_cmd=()
-    if command -v cargo-audit >/dev/null 2>&1; then
-        # A cargo subcommand binary invoked DIRECTLY still takes its own
-        # subcommand name as argv[1]: cargo runs `cargo-audit audit ...`, and
-        # bare `cargo-audit` prints its usage and exits 2. That exit was then
-        # reported by the gate as "cargo-audit exited 2 without naming any
-        # RUSTSEC advisory -- failing closed", so the audit job failed on every
-        # run of main and every PR while no vulnerability existed.
-        #
-        # This branch only runs where cargo-audit is installed as its own
-        # binary -- i.e. CI. Locally the `cargo audit` fallback below is taken,
-        # and that form is correct, which is why this never reproduced off CI.
-        audit_cmd=(cargo-audit audit)
-    elif command -v cargo >/dev/null 2>&1; then
+    # Prefer `cargo audit` unconditionally when cargo exists. The standalone
+    # `cargo-audit` binary takes its own subcommand name as argv[1] when
+    # invoked DIRECTLY (cargo runs `cargo-audit audit ...`; bare `cargo-audit`
+    # prints usage and exits 2), which is the class of bug #4164 fixed in a
+    # branch that only CI ever selected -- the broken branch ran exactly where
+    # nobody runs it interactively, and the correct one ran everywhere else.
+    # Removing the environment-selected preference removes the class: `cargo
+    # audit` is the only form on hosts with cargo, and the standalone binary
+    # is a fallback for hosts without one.
+    if command -v cargo >/dev/null 2>&1; then
         audit_cmd=(cargo audit)
+    elif command -v cargo-audit >/dev/null 2>&1; then
+        audit_cmd=(cargo-audit audit)
     else
         die 3 "neither cargo-audit nor cargo found in PATH — install cargo-audit (cargo install cargo-audit --locked)"
     fi
