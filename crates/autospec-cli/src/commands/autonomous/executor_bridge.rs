@@ -17156,22 +17156,34 @@ fn exact_draft_candidates<'a>(
         .collect()
 }
 
+/// The single chokepoint for the closing keyword of a PR body (issue #4341).
+///
+/// Issue #4295 put the close behind the acceptance verdict, but the guard was
+/// written inside one arm of the body selector and the umbrella-child arm kept
+/// emitting `Closes` unconditionally — the population most likely to be
+/// partially delivered. Every arm that emits a keyword must obtain it here, so
+/// a new arm cannot adopt the guard partially.
+fn closure_keyword(state: &PersistedInvocation) -> &'static str {
+    if state.closes_authorized {
+        "Closes"
+    } else {
+        "Refs"
+    }
+}
+
 fn canonical_pull_request_body(
     state: &PersistedInvocation,
     closeout: &str,
 ) -> Result<String, String> {
+    let keyword = closure_keyword(state);
     match (state.umbrella, state.current_child) {
         (Some(umbrella), Some(child)) if umbrella != child => Ok(format!(
-            "Part of #{umbrella}\n\nCloses #{child}\n\n{closeout}"
+            "Part of #{umbrella}\n\n{keyword} #{child}\n\n{closeout}"
         )),
-        (None, None) => {
-            let keyword = if state.closes_authorized {
-                "Closes"
-            } else {
-                "Refs"
-            };
-            Ok(format!("{keyword} #{}\n\n{closeout}", state.identity.issue))
-        }
+        (None, None) => Ok(format!(
+            "{keyword} #{}\n\n{closeout}",
+            state.identity.issue
+        )),
         _ => Err("executor continuation part binding is invalid".to_string()),
     }
 }

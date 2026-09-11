@@ -27,6 +27,7 @@ mod closes_authorized_roundtrip;
 mod closeout_harness;
 mod closeout_remote;
 mod closeout_repairs;
+mod closure_keyword_selector;
 mod codex_permission;
 #[cfg(unix)]
 mod codex_root_policy;
