@@ -275,6 +275,7 @@ pub(crate) fn requeue_abandoned_active_issue(
         issue,
         selected,
         &mut |expected, successor| super::advance_claim_ref(repo, issue, expected, successor),
+        &mut |repo, branch| super::branch_liveness(repo, branch),
     )?
     else {
         return Ok(false);
@@ -301,24 +302,35 @@ fn relabel_abandoned_active_issue(repo: &str, issue: u64) -> Result<(), super::C
     )
 }
 
-pub(super) fn quarantine_abandoned_claim_generation_with<Advance>(
+/// Requeue an abandoned claim generation, with the branch-liveness lookup
+/// injected at the seam.
+///
+/// The lookup consults GitHub, so it is a parameter rather than a call made
+/// inside the requeue: production wires [`super::branch_liveness`], tests
+/// substitute a known answer, and the unit tier never depends on network
+/// reachability (#4129). A live attempt blocks the requeue, and an unknown
+/// answer fails closed and blocks too — the state says which occurred
+/// instead of defaulting unknown to live.
+pub(super) fn quarantine_abandoned_claim_generation_with<Advance, Liveness>(
     repo: &str,
     issue: u64,
     selected: Option<super::ClaimRefHead>,
     advance: &mut Advance,
+    branch_liveness: &mut Liveness,
 ) -> Result<Option<Box<super::ClaimRefHead>>, super::CommandFailure>
 where
     Advance: FnMut(
         Option<&super::ClaimRefHead>,
         &RunStateRecord,
     ) -> Result<super::ClaimRefAdvance, super::CommandFailure>,
+    Liveness: FnMut(&str, &str) -> super::BranchLiveness,
 {
     if let Some(record) = selected
         .as_ref()
         .map(|head| &head.record)
         .filter(|record| record.state == "claimed")
     {
-        if super::branch_attempt_is_live(repo, &record.branch).unwrap_or(true) {
+        if branch_liveness(repo, &record.branch).live_or_unknown() {
             return Ok(None);
         }
     }
