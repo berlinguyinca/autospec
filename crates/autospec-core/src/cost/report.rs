@@ -368,14 +368,14 @@ impl CostReport {
         out.push_str(&self.headline());
         out.push_str(&self.evidence_note());
         out.push_str(&render_summary(
-            "cumulative",
+            "cumulative (observed)",
             &self.cumulative,
             self.threshold_percent,
         ));
         if let Some(window) = &self.window {
             out.push('\n');
             out.push_str(&format!(
-                "window (since {}): {} costed run(s), {} GPU-hours\n",
+                "window (since {}): {} observed costed run(s), {} observed GPU-hours\n",
                 self.since.as_deref().unwrap_or_default(),
                 window.records,
                 fmt_hours(window.total_gpu_hours)
@@ -389,7 +389,7 @@ impl CostReport {
 impl CostReport {
     fn headline(&self) -> String {
         format!(
-            "GPU cost report — {}: {} costed run(s), {} GPU-hours cumulative\n",
+            "GPU cost report — {}: {} observed costed run(s), {} observed GPU-hours cumulative\n",
             self.out_dir,
             self.cumulative.records,
             fmt_hours(self.cumulative.total_gpu_hours)
@@ -404,7 +404,10 @@ impl CostReport {
             return String::new();
         }
         let mut note = format!(
-            "  evidence: {incomplete} incomplete, {no_record} with no status.txt, {malformed} malformed\n"
+            "  queue exposure (potential, not observed GPU-hours): {incomplete} incomplete, {no_record} with no status.txt, {malformed} malformed\n"
+        );
+        note.push_str(
+            "    potential: realised only if those runs finish and record a terminal status plus agent_secs\n",
         );
         if !self.incomplete.is_empty() {
             note.push_str(&format!("    incomplete: {}\n", self.incomplete.join(", ")));

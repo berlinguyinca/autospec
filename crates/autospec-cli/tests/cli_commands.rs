@@ -2892,6 +2892,19 @@ fn autonomous_timeline_reports_forecast_and_planned_steps() {
     assert!(stdout.contains("autospec-autonomous forecast"));
     assert!(stdout.contains("things left: 4 total (2 ready, 1 in progress, 1 blocked)"));
     assert!(stdout.contains("rough ETA: about 3-6 hours"));
+    // #3987: the queue depth is an observed figure and the ETA is a potential
+    // one that names the condition that would realise it.
+    assert!(
+        stdout.contains("things left: 4 total (2 ready, 1 in progress, 1 blocked) — observed"),
+        "queue depth must be labelled observed: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "rough ETA: about 3-6 hours — potential, realised only if all 4 items dispatch and \
+             complete at the assumed 45-90 minutes per item"
+        ),
+        "ETA must be labelled potential with its condition: {stdout}"
+    );
     assert!(
         stdout.contains("planned next: finish #1537 feat: proactive security scanning workstream")
     );

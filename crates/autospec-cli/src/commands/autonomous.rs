@@ -7040,13 +7040,13 @@ fn timeline_forecast(lines: &[String]) -> Option<Vec<String>> {
     let mut rows = vec![
         "autospec-autonomous forecast".to_string(),
         format!(
-            "things left: {total} total ({} ready, {} in progress, {} blocked)",
+            "things left: {total} total ({} ready, {} in progress, {} blocked) — observed",
             ready.len(),
             claimed.len(),
             blocked.len()
         ),
         format!(
-            "rough ETA: about {} at 45-90 minutes per item",
+            "rough ETA: about {} — potential, realised only if all {total} items dispatch and complete at the assumed 45-90 minutes per item",
             format_duration_range((total * 45) as i64, (total * 90) as i64)
         ),
     ];
@@ -7054,17 +7054,17 @@ fn timeline_forecast(lines: &[String]) -> Option<Vec<String>> {
         (
             claimed.first(),
             "finish",
-            "after current item finishes, roughly 15-45 minutes of handoff overhead",
+            "after current item finishes, roughly 15-45 minutes of handoff overhead (potential; realised when the in-progress item completes and handoff takes the assumed 15-45 minutes)",
         ),
         (
             batch.first(),
             "start",
-            "likely within the next conductor cycle",
+            "likely within the next conductor cycle (potential; realised when the next conductor cycle dispatches it)",
         ),
         (
             ready.first(),
             "start",
-            "likely within the next conductor cycle",
+            "likely within the next conductor cycle (potential; realised when the next conductor cycle dispatches it)",
         ),
     ];
     let planned = plan_candidates

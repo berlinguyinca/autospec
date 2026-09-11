@@ -230,3 +230,51 @@ fn json_report_is_an_object_with_schema_version() {
     assert_eq!(value["cumulative"]["records"], 1);
     assert!(value["window"].is_null());
 }
+
+#[test]
+fn populated_case_labels_observed_and_potential_and_keeps_exposure_out_of_gpu_hours() {
+    let dir = Dir::new("observed-potential");
+    let (_scan, _per_run) = fleet_report(&dir, false);
+    // Queue exposure: three runs that never became costed records.
+    // - incomplete: parsed status.txt with neither status nor agent_secs
+    // - no_record:   a run directory with no status.txt at all
+    // - malformed:   a status.txt whose agent_secs value does not parse
+    dir.write("issue-900", &[("worker", "w-1")]);
+    fs::create_dir_all(dir.path.join("issue-901")).unwrap();
+    dir.write(
+        "issue-902",
+        &[("status", "VERIFIED"), ("agent_secs", "abc")],
+    );
+    let scan = scan_out_dir(&dir.path).unwrap();
+    let report = summarize("out", &scan, None, 10.0);
+    let text = report.to_text();
+
+    // AC1: the observed GPU-hour figures are labelled observed.
+    assert!(text.contains("341 observed costed run(s)"), "{text}");
+    assert!(
+        text.contains("556.5 observed GPU-hours cumulative"),
+        "{text}"
+    );
+
+    // AC2: the potential figure names the condition that would realise it.
+    assert!(
+        text.contains("potential: realised only if those runs finish"),
+        "{text}"
+    );
+
+    // AC3: the queue-exposure line is a count, not a GPU-hours figure.
+    let line = text
+        .lines()
+        .find(|line| line.contains("queue exposure"))
+        .unwrap_or_else(|| panic!("no queue exposure line: {text}"));
+    assert!(line.contains("not observed GPU-hours"), "{line}");
+    let stripped = line.replace("not observed GPU-hours", "");
+    assert!(
+        !stripped.to_lowercase().contains("gpu"),
+        "queue exposure must not render in GPU-hours: {line}"
+    );
+    assert!(
+        line.contains("1 incomplete, 1 with no status.txt, 1 malformed"),
+        "{line}"
+    );
+}
