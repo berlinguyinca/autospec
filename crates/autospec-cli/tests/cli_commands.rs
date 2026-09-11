@@ -8,6 +8,7 @@ use std::os::unix::fs::symlink;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
 #[path = "support/autonomous_lease_fixture.rs"]
@@ -44,48 +45,80 @@ fn help_command_names(help: &str) -> Vec<&str> {
 const COMMANDS_TABLE_SOURCE: &str = include_str!("../src/commands/mod.rs");
 const COMMANDS_TABLE_PATH: &str = "crates/autospec-cli/src/commands/mod.rs";
 
-/// Parses the `const COMMANDS: &[(&str, &str)]` table out of the CLI source,
-/// returning `(1-based source line, command name)` for every entry. Handles
-/// both single-line entries (`("init", "...")`) and block entries where the
-/// name sits alone on its own line after the opening paren.
-fn command_table_entries(source: &str) -> Vec<(usize, &str)> {
+/// Parses the single `commands! { ... }` declaration site out of the CLI
+/// source, returning `(1-based source line, command name)` for every entry.
+/// The table, the module declarations, and the dispatch arms are all
+/// generated from this one list by the `commands!` macro, so parsing it here
+/// keeps the test derived from the same source `print_help` iterates (#4017).
+/// Handles both entry shapes: `module => "help", shape;` and
+/// `module as "name" => "help", shape;`.
+/// Locates the single `commands! { ... }` invocation, returning its byte
+/// offset in the source and the invocation body (header line through the
+/// final entry, before the closing brace).
+fn commands_macro_block(source: &str) -> (usize, &str) {
     let start = source
-        .find("const COMMANDS: &[(&str, &str)]")
-        .unwrap_or_else(|| panic!("const COMMANDS table not found in {COMMANDS_TABLE_PATH}"));
-    let table = source[start..]
-        .split_once("];")
+        .find("commands! {")
+        .unwrap_or_else(|| panic!("commands! invocation not found in {COMMANDS_TABLE_PATH}"));
+    let block = source[start..]
+        .split_once("\n}")
         .map(|(head, _)| head)
-        .unwrap_or_else(|| panic!("unterminated const COMMANDS table in {COMMANDS_TABLE_PATH}"));
-    let base_lines = source[..start].lines().count();
-    let mut entries = Vec::new();
-    let mut pending_open = false;
-    for (idx, line) in table.lines().enumerate() {
-        let lineno = base_lines + idx + 1;
-        let trimmed = line.trim();
-        if pending_open {
-            if let Some(name) = table_entry_name(trimmed) {
-                entries.push((lineno, name));
-            }
-            pending_open = false;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix('(') {
-            let rest = rest.trim_start();
-            if rest.is_empty() {
-                pending_open = true; // block entry: name is on the next line
-            } else if let Some(name) = table_entry_name(rest) {
-                entries.push((lineno, name)); // single-line entry: ("name", "...")
-            }
-        }
-    }
-    entries
+        .unwrap_or_else(|| panic!("unterminated commands! invocation in {COMMANDS_TABLE_PATH}"));
+    (start, block)
 }
 
-/// Extracts the quoted name from an entry fragment that starts with it.
-fn table_entry_name(rest: &str) -> Option<&str> {
-    rest.strip_prefix('"')
-        .and_then(|r| r.split('"').next())
-        .filter(|n| !n.is_empty())
+fn command_table_entries(source: &str) -> Vec<(usize, &str)> {
+    let (start, block) = commands_macro_block(source);
+    let base_lines = source[..start].lines().count();
+    block
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            Some((base_lines + idx + 1, command_entry_name(trimmed)?))
+        })
+        .collect()
+}
+
+/// Returns the module identifier for each `commands!` entry, in list order
+/// (the leading identifier of each entry line, whether aliased or not).
+fn command_entry_modules(source: &str) -> Vec<&str> {
+    let (_, block) = commands_macro_block(source);
+    block
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || !trimmed.contains("=>") {
+                return None;
+            }
+            trimmed.split_whitespace().next()
+        })
+        .collect()
+}
+
+/// Extracts the CLI-visible name from a single `commands!` entry line: the
+/// `as "name"` alias when present, otherwise the module identifier.
+/// Returns `None` for lines that are not entry lines (no `=>` ... `;`).
+fn command_entry_name(entry: &str) -> Option<&str> {
+    if !entry.ends_with(';') || !entry.contains("=>") {
+        return None;
+    }
+    if let Some(as_idx) = entry.find(" as ") {
+        let name = entry[as_idx + 4..].trim_start();
+        if name.starts_with('"') {
+            let inner = &name[1..];
+            let end = inner.find('"')?;
+            return Some(&inner[..end]);
+        }
+        return None;
+    }
+    let module = entry.split_whitespace().next()?;
+    if module.is_empty() {
+        return None;
+    }
+    Some(module)
 }
 
 fn help_usage_invocation(help: &str) -> Option<&str> {
@@ -127,13 +160,13 @@ fn help_usage_parser_returns_first_usage_invocation() {
 
 #[test]
 fn command_table_parser_reads_both_entry_shapes_with_source_lines() {
-    let source = "mod x;\n\nconst COMMANDS: &[(&str, &str)] = &[\n    (\"init\", \"Initialize AutoSpec metadata\"),\n    (\n        \"growth-report\",\n        \"Render metrics\",\n    ),\n];\n";
+    let source = "mod x;\n\ncommands! {\n    init => \"Initialize AutoSpec metadata\", diagnostic;\n    growth_report as \"growth-report\" => \"Render metrics\", diagnostic;\n};\n";
 
     let entries = command_table_entries(source);
     assert_eq!(
         entries,
-        vec![(4, "init"), (6, "growth-report")],
-        "entry (line, name) pairs must track the table in {COMMANDS_TABLE_PATH}"
+        vec![(4, "init"), (5, "growth-report")],
+        "entry (line, name) pairs must track the commands! list in {COMMANDS_TABLE_PATH}"
     );
 }
 
@@ -169,6 +202,110 @@ fn cli_commands_help_lists_required_commands() {
          missing from --help (add this value): {missing:?}; \
          unexpected in --help (remove from print_help or add to the table): {extra:?}"
     );
+}
+
+/// AC4 (#4017): dispatch probe. Invokes every table command with no
+/// arguments and asserts dispatch reaches the command's own handler (which
+/// emits its own usage error) rather than the `unknown autospec command`
+/// fallthrough. A command present in the table but missing from the
+/// dispatch match arms — or whose module was never declared — lands in the
+/// fallthrough and fails here; the reverse drift (a dispatch arm with no
+/// table entry) is caught by
+/// `cli_commands_help_lists_required_commands`. Together the two tests
+/// prove the three forms generated by `commands!` cannot disagree.
+#[test]
+fn cli_commands_dispatch_reaches_handler_for_every_table_command() {
+    let dir = temp_dir("autospec-dispatch-probe");
+    let mut unhandled = Vec::new();
+    for (line, name) in command_table_entries(COMMANDS_TABLE_SOURCE) {
+        let output = autospec()
+            .arg(name)
+            .current_dir(&dir)
+            .output()
+            .expect("autospec runs");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if combined.contains("unknown autospec command") {
+            unhandled.push(format!("{name} ({COMMANDS_TABLE_PATH}:{line})"));
+        }
+    }
+
+    assert!(
+        unhandled.is_empty(),
+        "table commands with no dispatch arm (or no module declaration): {unhandled:?}"
+    );
+}
+
+/// AC4 (#4017): structural proof that the three command-table forms live in
+/// one place. The `commands!` macro generates the module declarations, the
+/// `COMMANDS` help table, and the dispatch arms; this test fails if any of
+/// the three is re-introduced by hand — a second `commands!` invocation, a
+/// hand-written top-level `pub mod` for a command, a `const COMMANDS`
+/// outside the macro definition, a hand-written string-literal dispatch
+/// arm, or a macro entry whose module file does not exist.
+#[test]
+fn cli_commands_command_table_forms_cannot_disagree() {
+    let source = COMMANDS_TABLE_SOURCE;
+
+    let invocations = source.matches("commands! {").count();
+    assert_eq!(
+        invocations, 1,
+        "expected exactly one commands! invocation in {COMMANDS_TABLE_PATH}"
+    );
+
+    let declared: Vec<&str> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim_start()
+                .strip_prefix("pub mod ")
+                .and_then(|rest| rest.strip_suffix(';'))
+                .filter(|name| {
+                    !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                })
+        })
+        .collect();
+    assert_eq!(
+        declared,
+        vec!["dispatch_spec", "managed_project"],
+        "command modules must be declared by the commands! macro, not by hand; \
+         the only direct top-level modules are the non-command helpers"
+    );
+
+    let table_sites = source.matches("const COMMANDS:").count();
+    assert_eq!(
+        table_sites, 1,
+        "const COMMANDS must exist only inside the commands! macro definition"
+    );
+
+    let literal_arms: Vec<usize> = source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with('"') && trimmed.contains("\" =>")
+        })
+        .map(|(idx, _)| idx + 1)
+        .collect();
+    assert!(
+        literal_arms.is_empty(),
+        "hand-written dispatch arm(s) at lines {literal_arms:?} in {COMMANDS_TABLE_PATH}; \
+         add the command to the commands! list instead"
+    );
+
+    let crate_root = std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir set by cargo");
+    for module in command_entry_modules(COMMANDS_TABLE_SOURCE) {
+        let path = format!("{crate_root}/src/commands/{module}.rs");
+        assert!(
+            Path::new(&path).is_file(),
+            "commands! entry {module} has no module file at {path}"
+        );
+    }
 }
 
 #[test]

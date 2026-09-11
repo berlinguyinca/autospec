@@ -1,37 +1,3 @@
-pub mod aar;
-pub mod anchor;
-pub mod autonomous;
-pub mod benchmark;
-pub mod claim;
-pub mod cost;
-pub mod dispatch;
-pub mod dispatch_outcomes;
-pub mod dispatch_spec;
-pub mod doctor;
-pub mod explore;
-pub mod graph;
-pub mod growth_report;
-pub mod handoff;
-pub mod init;
-pub mod initiative;
-pub mod insights;
-pub mod issue;
-pub mod lint;
-pub mod managed_project;
-pub mod parent;
-pub mod plan;
-pub mod queue;
-pub mod rag;
-pub mod repair_loop;
-pub mod report;
-pub mod resources;
-pub mod resume;
-pub mod run;
-pub mod runtime;
-pub mod showcase;
-pub mod status;
-pub mod validate;
-
 #[cfg(test)]
 pub(crate) static PROCESS_ENVIRONMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -86,122 +52,132 @@ impl std::fmt::Display for CommandFailure {
     }
 }
 
-const COMMANDS: &[(&str, &str)] = &[
-    ("init", "Initialize AutoSpec metadata"),
-    ("aar", "Inspect adaptive agent runtime policy"),
-    (
-        "anchor",
-        "Register and verify protected evaluator anchor suites",
-    ),
-    ("initiative", "Inspect cross-repository initiatives"),
-    ("lint", "Lint issue and implementation policy inputs"),
-    ("claim", "Manage GitHub-backed issue claim state"),
-    (
-        "cost",
-        "Account GPU-hours by terminal status: runs, share, rework, defect cost, threshold flags",
-    ),
-    ("parent", "Reconcile decomposed parent issue state"),
-    ("queue", "Compute the safe GitHub issue queue"),
-    (
-        "repair-loop",
-        "Observe repair loops: rate, consecutive-sweep escalation, defect tickets",
-    ),
-    (
-        "dispatch",
-        "Gate dispatch on queue freshness and per-hop liveness",
-    ),
-    (
-        "dispatch-outcomes",
-        "Attribute dispatch outcomes to model and spec size band (append-only ledger report)",
-    ),
-    (
-        "resources",
-        "List and show resource ledger rows (read-only)",
-    ),
-    (
-        "doctor",
-        "Check the Rust core workspace (`doctor code-intel` for LSP health)",
-    ),
-    ("status", "Summarize local AutoSpec state"),
-    ("autonomous", "Plan and supervise autonomous conductor runs"),
-    ("plan", "Inspect a generated spec package"),
-    ("rag", "Inspect Agentic RAG policy and routing"),
-    ("validate", "Run configured validation gates"),
-    ("run", "Execute the spec queue"),
-    ("runtime", "Inspect runtime ownership policy"),
-    ("resume", "Resume an interrupted run"),
-    ("report", "Render release and run reports"),
-    ("showcase", "Render a local demo showcase"),
-    ("benchmark", "Run local benchmark checks"),
-    (
-        "growth-report",
-        "Render local-only launch readiness metrics",
-    ),
-    (
-        "graph",
-        "Analyze a proposed issue DAG: metrics, execution waves, planner summary",
-    ),
-    (
-        "handoff",
-        "Produce the autospec.implementation-handoff.v1 handoff (side-effect-free)",
-    ),
-];
+// The command table below is the single declaration site for every CLI
+// command. One `commands!` invocation generates all three forms that
+// previously lived as hand-kept parallel lists (#4017): the `pub mod`
+// declarations, the `const COMMANDS` help table, and the dispatch match arms.
+// Adding a command is a one-line change; the three forms cannot disagree
+// because only one exists.
+//
+// Entry shapes:
+//   module => "help text", shape;                 // dispatch name = module name
+//   module as "display-name" => "help text", shape;
+//
+// Handler shapes (the return type of each command's `pub fn run`):
+//   direct      — `Result<(), CommandFailure>`
+//   diagnostic  — `Result<(), String>`, errors wrapped in CommandFailure::diagnostic
+//   status_code — `Result<i32, String>`, Ok(0) succeeds, other codes become
+//                 CommandFailure::status, Err becomes CommandFailure::diagnostic
 
-pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
-    match args.as_slice() {
-        [] => {
-            print_help();
-            Ok(())
+macro_rules! commands_name {
+    ($module:ident) => {
+        stringify!($module)
+    };
+    ($module:ident as $name:literal) => {
+        $name
+    };
+}
+
+macro_rules! commands_entry {
+    ($module:ident => $help:literal) => {
+        (stringify!($module), $help)
+    };
+    ($module:ident as $name:literal => $help:literal) => {
+        ($name, $help)
+    };
+}
+
+macro_rules! commands_dispatch {
+    ($module:ident, direct, $rest:ident) => {
+        $module::run($rest)
+    };
+    ($module:ident, diagnostic, $rest:ident) => {
+        $module::run($rest).map_err(CommandFailure::diagnostic)
+    };
+    ($module:ident, status_code, $rest:ident) => {
+        $module::run($rest)
+            .map(|code| {
+                if code == 0 {
+                    Ok(())
+                } else {
+                    Err(CommandFailure::status(String::new(), code))
+                }
+            })
+            .unwrap_or_else(|message| Err(CommandFailure::diagnostic(message)))
+    };
+}
+
+macro_rules! commands {
+    ($($module:ident $(as $name:literal)? => $help:literal, $shape:ident ;)*) => {
+        $(
+            pub mod $module;
+        )*
+
+        const COMMANDS: &[(&str, &str)] = &[$(
+            commands_entry!($module $(as $name)? => $help),
+        )*];
+
+        pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
+            match args.as_slice() {
+                [] => {
+                    print_help();
+                    Ok(())
+                }
+                [flag] if flag == "--help" || flag == "-h" => {
+                    print_help();
+                    Ok(())
+                }
+                [command, rest @ ..] => match command.as_str() {
+                    $(
+                        commands_name!($module $(as $name)?) => {
+                            commands_dispatch!($module, $shape, rest)
+                        }
+                    )*
+                    _ => Err(CommandFailure::diagnostic(format!(
+                        "unknown autospec command: {command}"
+                    ))),
+                },
+            }
         }
-        [flag] if flag == "--help" || flag == "-h" => {
-            print_help();
-            Ok(())
-        }
-        [command, rest @ ..] => match command.as_str() {
-            "init" => init::run(rest).map_err(CommandFailure::diagnostic),
-            "aar" => aar::run(rest),
-            "anchor" => anchor::run(rest),
-            "initiative" => initiative::run(rest),
-            "issue" => issue::run(rest),
-            "insights" => insights::run(rest)
-                .map(|code| {
-                    if code == 0 {
-                        Ok(())
-                    } else {
-                        Err(CommandFailure::status(String::new(), code))
-                    }
-                })
-                .unwrap_or_else(|message| Err(CommandFailure::diagnostic(message))),
-            "lint" => lint::run(rest),
-            "claim" => claim::run(rest),
-            "cost" => cost::run(rest).map_err(CommandFailure::diagnostic),
-            "parent" => parent::run(rest),
-            "queue" => queue::run(rest),
-            "dispatch" => dispatch::run(rest),
-            "dispatch-outcomes" => dispatch_outcomes::run(rest).map_err(CommandFailure::diagnostic),
-            "resources" => resources::run(rest),
-            "doctor" => doctor::run(rest).map_err(CommandFailure::diagnostic),
-            "explore" => explore::run(rest),
-            "status" => status::run(rest).map_err(CommandFailure::diagnostic),
-            "autonomous" => autonomous::run(rest),
-            "plan" => plan::run(rest).map_err(CommandFailure::diagnostic),
-            "rag" => rag::run(rest),
-            "repair-loop" => repair_loop::run(rest),
-            "validate" => validate::run(rest).map_err(CommandFailure::diagnostic),
-            "run" => run::run(rest).map_err(CommandFailure::diagnostic),
-            "runtime" => runtime::run(rest),
-            "resume" => resume::run(rest).map_err(CommandFailure::diagnostic),
-            "report" => report::run(rest).map_err(CommandFailure::diagnostic),
-            "showcase" => showcase::run(rest).map_err(CommandFailure::diagnostic),
-            "benchmark" => benchmark::run(rest).map_err(CommandFailure::diagnostic),
-            "growth-report" => growth_report::run(rest).map_err(CommandFailure::diagnostic),
-            "handoff" => handoff::run(rest),
-            "graph" => graph::run(rest),
-            _ => Err(CommandFailure::diagnostic(format!(
-                "unknown autospec command: {command}"
-            ))),
-        },
-    }
+    };
+}
+
+// Helper modules (not commands) stay as plain declarations outside the table.
+pub mod dispatch_spec;
+pub mod managed_project;
+
+commands! {
+    init => "Initialize AutoSpec metadata", diagnostic;
+    aar => "Inspect adaptive agent runtime policy", direct;
+    anchor => "Register and verify protected evaluator anchor suites", direct;
+    initiative => "Inspect cross-repository initiatives", direct;
+    issue => "Stamp and promote the canonical GitHub issue", direct;
+    insights => "Inspect the continuous improvement engine (spec §44)", status_code;
+    lint => "Lint issue and implementation policy inputs", direct;
+    claim => "Manage GitHub-backed issue claim state", direct;
+    cost => "Account GPU-hours by terminal status: runs, share, rework, defect cost, threshold flags", diagnostic;
+    parent => "Reconcile decomposed parent issue state", direct;
+    queue => "Compute the safe GitHub issue queue", direct;
+    repair_loop as "repair-loop" => "Observe repair loops: rate, consecutive-sweep escalation, defect tickets", direct;
+    dispatch => "Gate dispatch on queue freshness and per-hop liveness", direct;
+    dispatch_outcomes as "dispatch-outcomes" => "Attribute dispatch outcomes to model and spec size band (append-only ledger report)", diagnostic;
+    resources => "List and show resource ledger rows (read-only)", direct;
+    doctor => "Check the Rust core workspace (`doctor code-intel` for LSP health)", diagnostic;
+    explore => "Plan repository routing and specialist discovery", direct;
+    status => "Summarize local AutoSpec state", diagnostic;
+    autonomous => "Plan and supervise autonomous conductor runs", direct;
+    plan => "Inspect a generated spec package", diagnostic;
+    rag => "Inspect Agentic RAG policy and routing", direct;
+    validate => "Run configured validation gates", diagnostic;
+    run => "Execute the spec queue", diagnostic;
+    runtime => "Inspect runtime ownership policy", direct;
+    resume => "Resume an interrupted run", diagnostic;
+    report => "Render release and run reports", diagnostic;
+    showcase => "Render a local demo showcase", diagnostic;
+    benchmark => "Run local benchmark checks", diagnostic;
+    growth_report as "growth-report" => "Render local-only launch readiness metrics", diagnostic;
+    graph => "Analyze a proposed issue DAG: metrics, execution waves, planner summary", direct;
+    handoff => "Produce the autospec.implementation-handoff.v1 handoff (side-effect-free)", direct;
 }
 
 fn print_help() {
