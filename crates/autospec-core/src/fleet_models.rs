@@ -12,7 +12,7 @@
 //! the desired count (5 → 6 → 7). Each raised worker died the same way. The
 //! fleet shrank to 1 while the autoscaler demanded 7.
 //!
-//! Four invariants close that loop:
+//! Five invariants close that loop:
 //!
 //! 1. **One name, enforced.** The canonical name is the fleet registry's
 //!    base name; the serving name is *derived* from it with the
@@ -35,6 +35,14 @@
 //! 4. **Startup says which registry refused.**
 //!    [`StartupRejection::log_line`] renders a single line naming the
 //!    refusing registry, the model, and the reason.
+//! 5. **Fit is derived, not listed.** [`FleetRegistry::eligible_classes`]
+//!    answers "on which classes may this model be scheduled?" by reading
+//!    the catalog's `vram_mib` and comparing it to each candidate card's
+//!    VRAM — not by a `case "$MODEL"` allowlist of names. The fit test is
+//!    exactly `card.vram_mib >= entry.vram_mib` (no margin invented at the
+//!    guard), and a name the catalog does not know is
+//!    [`FitCheck::Unknown`], never an empty class list: a narrow probe is
+//!    not a membership test.
 //!
 //! Everything here is pure in-memory state — no I/O, no clock, no
 //! subprocess — so the node-repo shell entry points (worker.sh,
@@ -154,6 +162,114 @@ impl FleetRegistry {
 
     pub fn entries(&self) -> impl Iterator<Item = &FleetModelEntry> {
         self.entries.values()
+    }
+
+    /// The scheduling classes a model fits on, derived from the catalog's
+    /// `vram_mib` and each candidate card's VRAM (issue #4244).
+    ///
+    /// This is the replacement for a `case "$MODEL"` allowlist mapping
+    /// names to constraint strings: the guard reads the property the
+    /// catalog owns and derives the class set, so a new model needs a
+    /// `models.tsv` row, not a list entry in every scheduler. The fit test
+    /// is exactly `card.vram_mib >= entry.vram_mib` — no safety margin is
+    /// invented at this call site; the catalog's measured `vram_mib` is
+    /// the only model-side input. A name the catalog does not know is
+    /// [`FitCheck::Unknown`], never [`FitCheck::Fits`] with an empty class
+    /// list: treating "unknown" as "fits nowhere" is the trap of using a
+    /// narrow probe as a membership test.
+    pub fn eligible_classes(&self, canonical: &str, cards: &[GpuCard]) -> FitCheck {
+        let Some(entry) = self.get(canonical) else {
+            return FitCheck::Unknown {
+                name: canonical.to_string(),
+            };
+        };
+        for card in cards {
+            if card.vram_mib == 0 {
+                return FitCheck::UnmeasuredCard {
+                    class: card.class.clone(),
+                };
+            }
+        }
+        let mut classes = Vec::new();
+        for card in cards {
+            if card.vram_mib >= entry.vram_mib && !classes.contains(&card.class) {
+                classes.push(card.class.clone());
+            }
+        }
+        FitCheck::Fits {
+            canonical: entry.canonical.clone(),
+            classes,
+        }
+    }
+}
+
+/// A candidate scheduling card: the class the scheduler constrains on
+/// (e.g. `gpu:6000_blackwell`) and the VRAM one card of that class has.
+///
+/// The class is a label for the constraint; `vram_mib` is the property a
+/// fit decision may depend on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuCard {
+    pub class: String,
+    pub vram_mib: u64,
+}
+
+/// The answer to "on which classes may this model be scheduled?", derived
+/// from the catalog's `vram_mib` instead of a list of model names (issue
+/// #4244).
+///
+/// The old shape was a `case "$MODEL"` allowlist mapping names to
+/// constraint strings. The two traps it sets, and this type closes:
+///
+/// 1. **No margin invented at the guard.** The fit comparison is exactly
+///    `card.vram_mib >= entry.vram_mib`. A `* 1.2` factor here would be a
+///    policy no one owns; the catalog's measured `vram_mib` is the only
+///    model-side input.
+/// 2. **A narrow probe is not a membership test.** Asking "does this model
+///    load in 40 GiB?" (exit 0) never proved the model was in the catalog.
+///    [`FitCheck::Unknown`] is a distinct variant from [`FitCheck::Fits`]
+///    with an empty class list: an unlisted model is a catalog gap to file,
+///    not a model that fits nowhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FitCheck {
+    /// The catalog knows the model. `classes` is every candidate class
+    /// whose per-card VRAM covers the model's `vram_mib`, in candidate
+    /// order, deduplicated — derived, not listed. An empty list is a real
+    /// capacity fact: the fleet cannot run this model as cataloged.
+    Fits {
+        canonical: String,
+        classes: Vec<String>,
+    },
+    /// The catalog does not know the name. A refusal, not an empty card
+    /// list: the fix is a row in `models.tsv`, not more cards.
+    Unknown { name: String },
+    /// A candidate card declares no VRAM. Failing closed: the guard
+    /// refuses to answer rather than guess whether an unmeasured card
+    /// fits — a permissive default here is a lie in both directions.
+    UnmeasuredCard { class: String },
+}
+
+impl FitCheck {
+    /// One line, no embedded newline. An [`FitCheck::Unknown`] refusal
+    /// names the file that would tell the guard (`models.tsv`) instead of
+    /// guessing a class list.
+    pub fn line(&self) -> String {
+        match self {
+            FitCheck::Fits { canonical, classes } if classes.is_empty() => format!(
+                "model `{canonical}` is cataloged but no candidate class has a card with \
+                 enough VRAM; add cards or catalog a smaller quant"
+            ),
+            FitCheck::Fits { canonical, classes } => {
+                format!("model `{canonical}` fits: {}", classes.join(" "))
+            }
+            FitCheck::Unknown { name } => {
+                format!("FATAL: `{name}` is not in models.tsv; refusing to guess its GPU classes")
+            }
+            FitCheck::UnmeasuredCard { class } => format!(
+                "FATAL: candidate class `{class}` declares no per-card vram_mib; \
+                 refusing to guess whether it fits"
+            ),
+        }
     }
 }
 
