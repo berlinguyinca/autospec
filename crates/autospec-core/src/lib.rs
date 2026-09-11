@@ -101,6 +101,7 @@ pub mod self_gate;
 pub mod semantic_integration;
 pub mod service_address;
 pub mod service_timeout;
+pub mod shared_write_target;
 pub mod spec;
 pub mod staged_spec;
 pub mod state;
