@@ -58,6 +58,7 @@ pub mod initiative;
 pub mod insights;
 pub mod integration;
 pub mod issue_lock;
+pub mod item_sweep;
 pub mod lint;
 pub mod managed_project;
 pub mod not_reproducible;
