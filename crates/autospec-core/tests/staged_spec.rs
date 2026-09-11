@@ -13,11 +13,12 @@
 
 use autospec_core::grading::{staged_gates, GateSet, GATES_SECTION};
 use autospec_core::staged_spec::{
-    authorize, format_timestamp, parse_timestamp, prompt_verdict, spec_is_empty, staged_at,
-    staged_source_updated_at, DispatchVerdict, EnvironmentProbe, IssueComment, IssueSnapshot,
-    ProbeState, PromptVerdict, RefuseReason, SpecReceipt, ABSENT, BODY_SECTION, DISCUSSION_SECTION,
-    ENVIRONMENT_SECTION, HEADER_COMMENTS, HEADER_ISSUE, HEADER_SOURCE_UPDATED_AT, HEADER_STAGED_AT,
-    KEY_ABSENT, KEY_CONTAINER_RUNTIME, KEY_DATABASE, KEY_REGISTRY, NOT_PROBED, NO_SPEC_STATUS,
+    authorize, format_timestamp, is_mechanical_author, parse_timestamp, prompt_verdict,
+    spec_is_empty, staged_at, staged_source_updated_at, DispatchVerdict, EnvironmentProbe,
+    IssueComment, IssueSnapshot, ProbeState, PromptVerdict, RefuseReason, SpecReceipt, ABSENT,
+    BODY_SECTION, BODY_TRUNCATION_MARKER, DISCUSSION_SECTION, ENVIRONMENT_SECTION, HEADER_COMMENTS,
+    HEADER_ISSUE, HEADER_SOURCE_UPDATED_AT, HEADER_STAGED_AT, KEY_ABSENT, KEY_CONTAINER_RUNTIME,
+    KEY_DATABASE, KEY_REGISTRY, MECHANICAL_AUTHORS, NOT_PROBED, NO_SPEC_STATUS, RUNNER_SPEC_BUDGET,
 };
 
 const STAGED_AT: u64 = 1_757_000_000; // 2025-09-04T15:33:20Z
@@ -84,6 +85,16 @@ fn environment() -> EnvironmentProbe {
 
 fn staged() -> String {
     snapshot().stage(&environment(), STAGED_AT)
+}
+
+/// The snapshot with no comments and the given body: the budget tests vary
+/// the body and the discussion, not the rest of the issue.
+fn snapshot_with_body(body: String) -> IssueSnapshot {
+    IssueSnapshot {
+        body,
+        comments: Vec::new(),
+        ..snapshot()
+    }
 }
 
 // ---------------------------------------------------------------- staging --
@@ -257,6 +268,237 @@ fn a_snapshot_document_without_a_gates_field_reads_back_with_none() {
 
     assert!(source.gates.is_empty());
     assert_eq!(staged_gates(&source.stage(&environment(), STAGED_AT)), None);
+}
+
+// ---------------------------------------- mechanical filter (#4020) --
+
+#[test]
+fn a_correcting_comment_after_the_body_edit_is_staged_in_order() {
+    let text = staged();
+
+    // Both clarifications are staged, oldest first: the correction that moved
+    // the task is present, and the later comment does not overtake it.
+    let first = text
+        .find("### Comment 1 — maintainer at ")
+        .expect("first comment");
+    let second = text
+        .find("### Comment 2 — operator at ")
+        .expect("second comment");
+    assert!(first < second, "{text}");
+    assert!(text.contains("Do not use `docker`"), "{text}");
+    // The correction stays a correction: it is not merged into the body, the
+    // body stays what the tracker says it is.
+    let body_start = text.find(BODY_SECTION).expect("body section");
+    assert!(
+        !text[body_start..].contains("Do not use `docker`"),
+        "{text}"
+    );
+}
+
+#[test]
+fn comments_by_declared_mechanical_authors_are_never_staged() {
+    let mut source = snapshot();
+    source.comments.push(comment(
+        "dependabot[bot]",
+        SOURCE_UPDATED_AT + 120,
+        "Bumped a dependency.",
+    ));
+
+    let text = source.stage(&environment(), STAGED_AT);
+
+    assert!(!text.contains("Bumped a dependency."), "{text}");
+    // 2 of 3: the bot post is not even counted — the denominator is the
+    // comments that can appear at all, not every comment on the issue.
+    assert!(
+        text.contains(&format!("{HEADER_COMMENTS} 2 of 3")),
+        "{text}"
+    );
+    // The human clarifications are unaffected by the filter.
+    assert!(text.contains("Do not use `docker`"), "{text}");
+    assert!(text.contains("unauthenticated"), "{text}");
+}
+
+#[test]
+fn a_bot_only_discussion_stages_byte_identically_to_no_discussion() {
+    let mut plain = snapshot();
+    plain.comments.clear();
+
+    let mut bot_only = snapshot();
+    bot_only.comments = vec![
+        comment("dependabot[bot]", SOURCE_UPDATED_AT, "Bumped a dependency."),
+        comment(
+            "github-actions[bot]",
+            SOURCE_UPDATED_AT + 30,
+            "Workflow ran.",
+        ),
+    ];
+
+    let plain_text = plain.stage(&environment(), STAGED_AT);
+    let bot_text = bot_only.stage(&environment(), STAGED_AT);
+
+    assert_eq!(plain_text, bot_text);
+    assert!(
+        plain_text.contains(&format!("{HEADER_COMMENTS} 0 of 0")),
+        "{plain_text}"
+    );
+    assert!(
+        plain_text.contains("No comments since the last body edit"),
+        "{plain_text}"
+    );
+    assert!(!plain_text.contains("Bumped a dependency."), "{plain_text}");
+}
+
+#[test]
+fn mechanical_matching_is_exact_and_case_insensitive_not_substring() {
+    // The list is the declaration the filter is allowed to use: no
+    // heuristics beyond it.
+    assert_eq!(
+        MECHANICAL_AUTHORS,
+        &["dependabot[bot]", "github-actions[bot]"]
+    );
+    assert!(is_mechanical_author("dependabot[bot]"));
+    assert!(is_mechanical_author("DEPENDABOT[BOT]"));
+    assert!(is_mechanical_author("github-actions[bot]"));
+    // A human login that merely contains a bot name is not a bot.
+    assert!(!is_mechanical_author("my-dependabot[bot]"));
+    assert!(!is_mechanical_author("dependabot"));
+    assert!(!is_mechanical_author(""));
+}
+
+#[test]
+fn a_human_comment_about_a_bot_is_staged() {
+    let mut source = snapshot();
+    source.comments.push(comment(
+        "operator",
+        SOURCE_UPDATED_AT + 90,
+        "Ignore the dependabot[bot] posts: they are tracker noise.",
+    ));
+
+    let text = source.stage(&environment(), STAGED_AT);
+
+    // The filter is on the author, never on the content.
+    assert!(text.contains("Ignore the dependabot[bot] posts"), "{text}");
+    assert!(
+        text.contains(&format!("{HEADER_COMMENTS} 3 of 4")),
+        "{text}"
+    );
+}
+
+// --------------------------------------------------- spec budget (#4020) --
+
+#[test]
+fn a_spec_at_or_under_the_budget_is_staged_verbatim() {
+    let source = snapshot_with_body(format!("## Goal\n\n{}\n", "x".repeat(20_000)));
+
+    let text = source.stage(&environment(), STAGED_AT);
+
+    assert!(!text.contains(BODY_TRUNCATION_MARKER), "{text}");
+    assert!(text.contains(&"x".repeat(20_000)), "the body is verbatim");
+    assert!(text.len() < RUNNER_SPEC_BUDGET, "{}", text.len());
+}
+
+#[test]
+fn an_over_budget_body_is_truncated_with_a_marker_not_the_comments() {
+    let mut source = snapshot_with_body("x".repeat(40_000));
+    source.comments = vec![comment(
+        "maintainer",
+        SOURCE_UPDATED_AT,
+        "Do not use `docker`: the cluster runs apptainer.",
+    )];
+
+    let text = source.stage(&environment(), STAGED_AT);
+
+    assert!(text.contains(BODY_TRUNCATION_MARKER), "{text}");
+    // The whole discussion survives: truncation is at the body, not the
+    // comments.
+    assert!(
+        text.contains("Do not use `docker`: the cluster runs apptainer."),
+        "{text}"
+    );
+    assert!(!text.contains(&"x".repeat(40_000)), "the body was cut");
+    // The cut lands exactly on the budget: an ASCII body needs no
+    // boundary back-off, so nothing overflows past it.
+    assert_eq!(text.len(), RUNNER_SPEC_BUDGET, "{}", text.len());
+}
+
+#[test]
+fn a_truncated_body_ends_on_a_character_boundary() {
+    // Every body character is two bytes: a cut on a non-boundary byte
+    // offset would panic the slice rather than produce a spec.
+    let source = snapshot_with_body("é".repeat(20_000));
+
+    let text = source.stage(&environment(), STAGED_AT);
+
+    assert!(text.contains(BODY_TRUNCATION_MARKER), "{text}");
+    let start = text.find(BODY_SECTION).expect("body section") + BODY_SECTION.len();
+    let end = text.find(BODY_TRUNCATION_MARKER).expect("marker");
+    let body_part = &text[start..end];
+    // body_part is "\n" plus the kept body; a boundary-safe cut keeps whole
+    // two-byte characters.
+    assert_eq!(body_part[1..].len() % 2, 0, "{}", body_part[1..].len());
+}
+
+#[test]
+fn comments_that_exceed_the_budget_shrink_the_body_to_the_marker() {
+    let mut source = snapshot_with_body(String::from("Dispatch the batch.\n"));
+    source.comments.push(comment(
+        "maintainer",
+        SOURCE_UPDATED_AT,
+        &"x".repeat(40_000),
+    ));
+
+    let text = source.stage(&environment(), STAGED_AT);
+
+    // The discussion is never truncated: the whole comment is there even
+    // though it alone exceeds the budget.
+    assert!(text.contains(&"x".repeat(40_000)), "the comment is intact");
+    // The body gives way entirely: the marker is all that is left of it, and
+    // the spec may exceed the budget — the body is what may not.
+    assert!(text.contains(BODY_TRUNCATION_MARKER), "{text}");
+    assert!(!text.contains("Dispatch the batch."), "{text}");
+    assert!(text.len() > RUNNER_SPEC_BUDGET, "{}", text.len());
+}
+
+#[test]
+fn a_no_comment_spec_is_byte_identical_to_the_pre_4020_layout() {
+    // The budget must not move a byte of a spec that already fits: this is
+    // the exact layout staging produced before #4020, pinned byte for byte.
+    let mut source = snapshot();
+    source.comments.clear();
+
+    let text = source.stage(&environment(), STAGED_AT);
+
+    let expected = format!(
+        "{HEADER_ISSUE} 50\n\
+         {HEADER_STAGED_AT} {STAGED_AT} ({})\n\
+         {HEADER_SOURCE_UPDATED_AT} {SOURCE_UPDATED_AT} ({})\n\
+         {HEADER_COMMENTS} 0 of 0\n\
+         \n\
+         # Issue #50: Run the batch on the cluster\n\
+         \n\
+         {ENVIRONMENT_SECTION}\n\
+         - container-runtime: /usr/bin/apptainer [$PATH lookup]\n\
+         - database: absent [no listener]\n\
+         - registry: {NOT_PROBED}\n\
+         - absent: docker, podman, postgres\n\
+         \n\
+         {DISCUSSION_SECTION}\n\
+         _No comments since the last body edit at {}._\n\
+         \n\
+         {BODY_SECTION}\n\
+         ## Goal\n\
+         \n\
+         Dispatch the batch.\n\
+         \n\
+         ## Acceptance criteria\n\
+         \n\
+         - [ ] `autospec dispatch --issue 50` exits 0\n",
+        format_timestamp(STAGED_AT),
+        format_timestamp(SOURCE_UPDATED_AT),
+        format_timestamp(BODY_EDITED_AT)
+    );
+
+    assert_eq!(text, expected);
 }
 
 // ------------------------------------------------------------- freshness --

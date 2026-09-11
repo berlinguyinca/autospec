@@ -37,6 +37,16 @@
 //! against a weaker set is not one this spec asked for. A spec that names
 //! no gates renders no gate section.
 //!
+//! A sixth concern, the budget side of the same completeness promise (#4020):
+//! the spec a worker gets has to fit the worker's context, and how it
+//! overflows is decided, not left to the buffer. Comments by declared
+//! mechanical authors ([`MECHANICAL_AUTHORS`]) never belong in the
+//! discussion, a comment that clarifies the body is never the first thing
+//! cut, and an over-budget body is truncated under its own header with a
+//! visible marker ([`BODY_TRUNCATION_MARKER`]) rather than letting the spec
+//! grow without bound ([`RUNNER_SPEC_BUDGET`]). The headers, the
+//! environment, the whole discussion, and the gate set are never truncated.
+//!
 //! Everything here is pure and testable: no I/O, no clock, no subprocess. The
 //! caller fetches the issue, probes its own host, and calls
 //! [`IssueSnapshot::stage`] when staging and [`authorize`] when dispatching.
@@ -66,9 +76,35 @@ pub const ENVIRONMENT_SECTION: &str = "## Execution environment";
 /// Section holding the discussion that post-dates the body's last edit.
 pub const DISCUSSION_SECTION: &str = "## Discussion since the last body edit";
 
-/// Section holding the issue body verbatim — the acceptance criteria a worker
-/// must be able to satisfy from the staged spec alone.
+/// Section holding the issue body — verbatim while it fits
+/// [`RUNNER_SPEC_BUDGET`], truncated with [`BODY_TRUNCATION_MARKER`] when it
+/// does not. The acceptance criteria a worker must satisfy come from here,
+/// which is why the body, not the discussion, is what gives way.
 pub const BODY_SECTION: &str = "## Issue body";
+
+/// The size, in bytes, a staged spec is held to. The worker's context is the
+/// budget the spec has to fit: the headers, the environment, the whole
+/// discussion, and the gate set are kept, and the body — the part the tracker
+/// still holds — is what gives way first.
+pub const RUNNER_SPEC_BUDGET: usize = 32 * 1024;
+
+/// The marker appended where a body is cut to fit [`RUNNER_SPEC_BUDGET`].
+/// Fixed text on purpose: a reader sees a cut, not a number to re-derive.
+pub const BODY_TRUNCATION_MARKER: &str = "\n… [body truncated to fit the staged-spec budget]";
+
+/// The declared mechanical authors whose comments never belong in a staged
+/// spec (#4020): bot posts are tracker housekeeping, not a clarification of
+/// the task, and they move `updatedAt` without saying anything a worker
+/// needs. Matched exactly and case-insensitively — a human login that merely
+/// contains one of these names is not a bot.
+pub const MECHANICAL_AUTHORS: &[&str] = &["dependabot[bot]", "github-actions[bot]"];
+
+/// Whether one author is in the declared mechanical list.
+pub fn is_mechanical_author(author: &str) -> bool {
+    MECHANICAL_AUTHORS
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(author))
+}
 
 /// Environment entry naming the container runtime available to the worker.
 pub const KEY_CONTAINER_RUNTIME: &str = "container-runtime";
@@ -122,7 +158,9 @@ pub struct IssueSnapshot {
     /// exists to prevent.
     #[serde(default)]
     pub body_updated_at: Option<u64>,
-    /// Every comment on the source issue, in any order.
+    /// Every comment on the source issue, in any order. Declared mechanical
+    /// authors are kept here — the snapshot stays a faithful record of the
+    /// issue — and filtered out at staging ([`is_mechanical_author`]).
     pub comments: Vec<IssueComment>,
     /// The gate set the patch is graded against, in gate-set order
     /// (#3925). Empty when the caller does not name one: the spec then
@@ -137,11 +175,14 @@ impl IssueSnapshot {
     ///
     /// With a known body-edit instant: strictly the comments authored after
     /// it. With no known instant: all of them, because an unknown edit time
-    /// cannot rule any comment out.
+    /// cannot rule any comment out. Comments by declared mechanical authors
+    /// never belong in either case (#4020): they are housekeeping, not a
+    /// clarification of the task.
     pub fn comments_since_body_edit(&self) -> Vec<&IssueComment> {
         let mut kept: Vec<&IssueComment> = self
             .comments
             .iter()
+            .filter(|comment| !is_mechanical_author(&comment.author))
             .filter(|comment| match self.body_updated_at {
                 Some(edited) => comment.created_at > edited,
                 None => true,
@@ -151,73 +192,115 @@ impl IssueSnapshot {
         kept
     }
 
+    /// The comments that can appear in the staged spec at all: everything but
+    /// the declared mechanical authors (#4020). This is the header's
+    /// denominator, so a bot-only discussion reads `0 of 0` — byte-identical
+    /// to one with no discussion — instead of staging bot noise the worker
+    /// would have to discount.
+    fn stageable_comment_count(&self) -> usize {
+        self.comments
+            .iter()
+            .filter(|comment| !is_mechanical_author(&comment.author))
+            .count()
+    }
+
     /// Render the staged spec: revision headers, then the execution
-    /// environment, then the discussion, then the body verbatim, and — when
-    /// the snapshot names a gate set — the gate section last, so the
-    /// acceptance criteria a worker satisfies and the gates that grade the
-    /// result are one document (#3925).
+    /// environment, then the discussion, then the body — verbatim while it
+    /// fits [`RUNNER_SPEC_BUDGET`], cut with [`BODY_TRUNCATION_MARKER`] when
+    /// it does not — and, when the snapshot names a gate set, the gate
+    /// section last, so the acceptance criteria a worker satisfies and the
+    /// gates that grade the result are one document (#3925).
+    ///
+    /// The body is the only part that gives way (#4020): the headers, the
+    /// environment, the whole discussion, and the gate set are never
+    /// truncated, so a clarification filed after the body's last edit is
+    /// never the casualty of an over-long spec.
     pub fn stage(&self, environment: &EnvironmentProbe, staged_at: u64) -> String {
         let discussion = self.comments_since_body_edit();
-        let mut out = String::new();
-        out.push_str(&format!("{HEADER_ISSUE} {}\n", self.number));
-        out.push_str(&format!(
+
+        // Everything up to and including the body's section header. Never
+        // truncated.
+        let mut prefix = String::new();
+        prefix.push_str(&format!("{HEADER_ISSUE} {}\n", self.number));
+        prefix.push_str(&format!(
             "{HEADER_STAGED_AT} {} ({})\n",
             staged_at,
             format_timestamp(staged_at)
         ));
-        out.push_str(&format!(
+        prefix.push_str(&format!(
             "{HEADER_SOURCE_UPDATED_AT} {} ({})\n",
             self.source_updated_at,
             format_timestamp(self.source_updated_at)
         ));
-        out.push_str(&format!(
+        prefix.push_str(&format!(
             "{HEADER_COMMENTS} {} of {}\n",
             discussion.len(),
-            self.comments.len()
+            self.stageable_comment_count()
         ));
-        out.push('\n');
-        out.push_str(&format!("# Issue #{}: {}\n", self.number, self.title));
-        out.push('\n');
-        out.push_str(ENVIRONMENT_SECTION);
-        out.push('\n');
+        prefix.push('\n');
+        prefix.push_str(&format!("# Issue #{}: {}\n", self.number, self.title));
+        prefix.push('\n');
+        prefix.push_str(ENVIRONMENT_SECTION);
+        prefix.push('\n');
         for line in environment.render() {
-            out.push_str(&format!("- {line}\n"));
+            prefix.push_str(&format!("- {line}\n"));
         }
-        out.push('\n');
-        out.push_str(DISCUSSION_SECTION);
-        out.push('\n');
+        prefix.push('\n');
+        prefix.push_str(DISCUSSION_SECTION);
+        prefix.push('\n');
         match self.body_updated_at {
             // Say so when the inclusion rule fell back to keeping everything,
             // so a reader never mistakes "all comments" for "new comments".
-            None => out.push_str("_No body edit time recorded, so every comment is included._\n\n"),
-            Some(at) if discussion.is_empty() => out.push_str(&format!(
+            None => {
+                prefix.push_str("_No body edit time recorded, so every comment is included._\n\n")
+            }
+            Some(at) if discussion.is_empty() => prefix.push_str(&format!(
                 "_No comments since the last body edit at {}._\n\n",
                 format_timestamp(at)
             )),
             Some(_) => {}
         }
-        if !discussion.is_empty() {
-            for (index, comment) in discussion.iter().enumerate() {
-                out.push_str(&format!(
-                    "### Comment {} — {} at {} ({})\n\n",
-                    index + 1,
-                    comment.author,
-                    comment.created_at,
-                    format_timestamp(comment.created_at)
-                ));
-                out.push_str(comment.body.trim_end());
-                out.push_str("\n\n");
-            }
+        for (index, comment) in discussion.iter().enumerate() {
+            prefix.push_str(&format!(
+                "### Comment {} — {} at {} ({})\n\n",
+                index + 1,
+                comment.author,
+                comment.created_at,
+                format_timestamp(comment.created_at)
+            ));
+            prefix.push_str(comment.body.trim_end());
+            prefix.push_str("\n\n");
         }
-        out.push_str(BODY_SECTION);
-        out.push('\n');
-        out.push_str(self.body.trim_end());
-        out.push('\n');
+        prefix.push_str(BODY_SECTION);
+        prefix.push('\n');
+
+        // The newline closing the body, and — when the snapshot names a gate
+        // set — the gate section last: the acceptance criteria the worker
+        // satisfies come before the gates that grade the result (#3925). A
+        // snapshot with no gates renders no gate section, as before #3925.
+        // Never truncated.
+        let mut suffix = String::from('\n');
         if !self.gates.is_empty() {
-            out.push('\n');
-            out.push_str(&crate::grading::gate_section(&self.gates));
+            suffix.push('\n');
+            suffix.push_str(&crate::grading::gate_section(&self.gates));
         }
-        out
+
+        // The body is what gives way: the allowance is the budget minus
+        // everything that is kept, and an over-long body is cut to it on a
+        // character boundary, with the marker under the body's own header.
+        let body = self.body.trim_end();
+        let allowance = RUNNER_SPEC_BUDGET
+            .saturating_sub(prefix.len())
+            .saturating_sub(suffix.len())
+            .saturating_sub(BODY_TRUNCATION_MARKER.len());
+        if body.len() <= allowance {
+            return format!("{prefix}{body}{suffix}");
+        }
+        let mut cut = allowance;
+        while cut > 0 && !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{prefix}{}{BODY_TRUNCATION_MARKER}{suffix}", &body[..cut])
     }
 }
 
