@@ -1,0 +1,24 @@
+# autospec/baseline-failures.txt — known-failing tests (issue #4291).
+#
+# One line per known-failing test, tab-separated, sorted with LC_ALL=C sort,
+# no duplicate ids:
+#
+#   <cargo test id> <TAB> issue=#<N> [<TAB> binary=<cargo test target>]
+#
+# The gate is scripts/test-failures-baseline.sh:
+#
+#   scripts/test-failures-baseline.sh --check            # run + compare
+#   scripts/test-failures-baseline.sh --lint-baseline-only
+#   scripts/test-failures-baseline.sh --rebaseline       # lower only
+#
+# Every entry MUST carry an `issue=#<N>` column: a known failure with no
+# linked issue is unowned, nothing schedules its removal, and the entry keeps
+# tolerating whatever fails under that name after the original test is fixed.
+# Growth is therefore refused by --rebaseline (it only ever drops entries);
+# adding a line is a hand edit that names the issue authorising it.
+#
+# An entry whose test now passes is a blocking finding (STALE_BASELINE_ENTRY),
+# not a note; remove it (or run --rebaseline) in the same PR that fixes it.
+# Override the path with $AUTOSPEC_TEST_FAILURE_BASELINE.
+autonomous_stale_startup_recovery::foreground_scan_recovers_stale_pending_startup_heartbeat_pending_before_acquire	issue=#4291	binary=autonomous_conductor_commands
+foreground_recovers_with_integrated_inactive_local_branch	issue=#4291	binary=autonomous_conductor_commands

@@ -703,6 +703,11 @@ already-registered `tests/unit/test_lint_implementation.bats` (catalog owner
   below.
 - `AUTOSPEC_ZERO_OUTPUT_STATE_FILE` — path to the per-issue zero-output streak
   state for review routing (default `~/.autospec/state/zero-output-streaks.json`).
+- `AUTOSPEC_TEST_FAILURE_BASELINE` — path to the known-failing-test baseline
+  read by `scripts/test-failures-baseline.sh` (default
+  `autospec/baseline-failures.txt` at the repo root). The entry format and the
+  three rules that keep the file a baseline rather than a tolerated number are
+  in [`docs/conversion-gate.md`](docs/conversion-gate.md) §5.
 
 ## Capability prerequisites and zero-output review routing
 

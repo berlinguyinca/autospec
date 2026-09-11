@@ -142,3 +142,52 @@ comparison. Together the two mechanisms keep a finished artifact from being
 invisible to every consumer at once: the conversion pass reads the
 re-derived status, and the dispatch guard (#3764) names the artifact by
 path whenever it refuses to destroy it.
+
+### 5. The known-failing set is a file, not a tolerated number
+
+`UNKNOWN-NO-BASELINE` names a *missing* baseline. A baseline that exists but
+lives only as an operator's expectation — "this suite always fails two tests" —
+is the same fault wearing a green label: the gate cannot tell a tolerated
+pre-existing failure from a new one, so every failure is tolerated. Issue #4291
+found `crates/autospec-cli --test autonomous_conductor_commands` in exactly that
+state: two tests red on `main`, no record of which two.
+
+The baseline is therefore a committed file,
+`autospec/baseline-failures.txt` (override with `AUTOSPEC_TEST_FAILURE_BASELINE`),
+one entry per known-failing test:
+
+```text
+<cargo test id>\tissue=#<N>[\tbinary=<test target>]
+```
+
+sorted with `LC_ALL=C`, no duplicate ids, `#` for comments. The gate is
+`scripts/test-failures-baseline.sh`:
+
+| Mode | Behaviour |
+|---|---|
+| `--check` (default) | run the targets (or parse `--run-log`), lint the file, block on any live failure absent from it |
+| `--lint-baseline-only` | validate the file's syntax without running cargo |
+| `--rebaseline` | rewrite the file **downward only**: drop entries proven to pass, never add one |
+
+Three rules keep it a baseline instead of a list of excuses:
+
+- **Every entry carries `issue=#<N>`.** A known failure with no linked issue is
+  unowned: nothing schedules its removal, so it keeps tolerating whatever else
+  fails under that name. Growth is refused twice — `--rebaseline` exits 1 on an
+  unlisted failing id (`REBASELINE_REFUSED_UPWARD`) rather than absorbing it, and
+  a hand-added entry without the column is rejected (`BASELINE_ENTRY_NO_ISSUE`).
+- **An entry whose test now passes is blocking** (`STALE_BASELINE_ENTRY`), not a
+  note. A baselined id suppresses the next regression of the same test, so a
+  fix that leaves the entry behind re-arms the bug.
+- **An entry that was merely not executed warns and stays.** Silence is not
+  evidence of a fix; only an observed pass drops an entry.
+
+A harness that never ran is `HARNESS_NEVER_RAN`, a compile error is
+`TESTS_DO_NOT_COMPILE` (§2), and failures the log declares but never names are
+`FAILURE_ATTRIBUTION` — all exit 1, none of them a pass, none of them
+`VERIFIED-ABSOLUTE`. Exit codes: 0 = live failures are exactly the baselined
+ones, 1 = at least one blocking finding, 2 = usage or environment error.
+
+Tests: `tests/test-failures-baseline.bats`, with the `main` run that produced
+the two entries kept at
+`tests/fixtures/test-failures-baseline/main-baseline.log`.
