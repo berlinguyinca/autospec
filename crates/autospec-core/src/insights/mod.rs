@@ -15,6 +15,7 @@ pub mod config;
 pub mod context;
 pub mod correlate;
 pub mod enrich;
+pub mod evaluation;
 pub mod events;
 pub mod metrics;
 pub mod models;
