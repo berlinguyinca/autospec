@@ -122,6 +122,7 @@ pub mod prompt_blocks;
 pub mod prose_closure;
 pub mod queue_gap;
 pub mod rag;
+pub mod reader_fidelity;
 pub mod rebase_review;
 pub mod rebaseline;
 pub mod recovery_path;
