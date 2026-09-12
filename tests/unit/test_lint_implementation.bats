@@ -1322,3 +1322,248 @@ DIFF
     [ "$status" -eq 0 ]
     ! echo "$output" | grep -q "GATE_PROMOTION_UNEVIDENCED"
 }
+
+
+# ── UNWIRED_PUB_ITEM (#4346) ─────────────────────────────────────────────────
+# Three consecutive conversions (#4312, #4295, #315) shipped a well-tested
+# capability nothing calls: the gate cannot distinguish a well-tested library
+# from a well-tested library in use. An added pub fn / pub struct with zero
+# references outside its own test module must be flagged, and the PR must say
+# which it is (forgotten wiring or deliberate staging) via the skip/allow hatches.
+#
+# Fixture bodies live in helpers, not in @test blocks: the bats block scanners
+# (VACUOUS_NO_ASSERT, ASSERTION_DENSITY) close a block at the first bare brace
+# line, which the Rust heredocs contain, and would otherwise never reach the
+# assertions.
+
+upi_repo() {  # upi_repo REPO — scratch git repo with one committed empty file
+    local repo="$1"
+    mkdir -p "$repo/src"
+    : > "$repo/README.md"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "t@t.com"
+    git -C "$repo" config user.name "T"
+    git -C "$repo" add README.md
+    git -C "$repo" commit -q -m "init"
+}
+
+upi_fixture_unwired_fn() {  # pub fn referenced only by its own test module
+    cat > "$1/src/lib.rs" <<'RUST'
+pub fn compute_alpha() -> i32 {
+    41 + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alpha_works() {
+        assert_eq!(compute_alpha(), 42);
+    }
+}
+RUST
+}
+
+upi_fixture_unwired_struct() {  # pub struct referenced only by its own test module
+    cat > "$1/src/lib.rs" <<'RUST'
+pub struct AlphaState;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_constructs() {
+        let _ = AlphaState;
+    }
+}
+RUST
+}
+
+upi_fixture_wired() {  # pub fn called from another file, which is called in turn
+    cat > "$1/src/lib.rs" <<'RUST'
+pub fn compute_beta() -> i32 {
+    42
+}
+
+mod helper;
+RUST
+    cat > "$1/src/helper.rs" <<'RUST'
+use super::compute_beta;
+
+pub fn run() -> i32 {
+    compute_beta() + 1
+}
+RUST
+    cat > "$1/src/main.rs" <<'RUST'
+fn main() {
+    helper::run();
+}
+RUST
+}
+
+upi_fixture_moddecl() {  # capability behind a bare pub mod declaration (#4312)
+    printf 'pub mod rate_alarm;\n' > "$1/src/lib.rs"
+    cat > "$1/src/rate_alarm.rs" <<'RUST'
+pub fn rate_alarm(pass: u32, total: u32) -> bool {
+    total == 40 && pass == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alarms_on_zero() {
+        assert!(rate_alarm(0, 40));
+        assert!(!rate_alarm(40, 40));
+    }
+}
+RUST
+}
+
+upi_fixture_reexport() {  # pub use re-export is the wiring for a library API
+    printf 'pub mod rate_alarm;\npub use crate::rate_alarm::rate_alarm;\n' > "$1/src/lib.rs"
+    cat > "$1/src/rate_alarm.rs" <<'RUST'
+pub fn rate_alarm() -> bool {
+    true
+}
+RUST
+}
+
+upi_fixture_staged() {  # pub fn with no caller at all, plus an optional prefix line
+    local prefix="${2:-}"
+    if [ -n "$prefix" ]; then
+        printf '%s\n' "$prefix" > "$1/src/lib.rs"
+    fi
+    cat >> "$1/src/lib.rs" <<'RUST'
+pub fn staged_cap() -> i32 {
+    1
+}
+RUST
+}
+
+upi_skip_issue() {  # issue body declaring deliberate staging
+    printf '%s\n' \
+        '## Goal' \
+        'Stage a capability.' \
+        '' \
+        '## Files touched' \
+        '- src/' \
+        '' \
+        'Guardian: skip-UNWIRED_PUB_ITEM # deliberate staging, caller lands in the follow-up issue' \
+        > "$1/issue.md"
+}
+
+@test "unwired-pub: pub fn referenced only by its own test module is flagged" {
+    local repo="$PR_SIZE_TMP/upi-unwired-fn"
+    upi_repo "$repo"
+    upi_fixture_unwired_fn "$repo"
+    git -C "$repo" add src/lib.rs
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "UNWIRED_PUB_ITEM:src/lib.rs:1: 'compute_alpha'"
+}
+
+@test "unwired-pub: pub struct referenced only by its own test module is flagged" {
+    local repo="$PR_SIZE_TMP/upi-unwired-struct"
+    upi_repo "$repo"
+    upi_fixture_unwired_struct "$repo"
+    git -C "$repo" add src/lib.rs
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "UNWIRED_PUB_ITEM:src/lib.rs:1: 'AlphaState'"
+}
+
+@test "unwired-pub: pub fn called from another file is not flagged" {
+    local repo="$PR_SIZE_TMP/upi-wired"
+    upi_repo "$repo"
+    upi_fixture_wired "$repo"
+    git -C "$repo" add src/
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "UNWIRED_PUB_ITEM"
+}
+
+@test "unwired-pub: a bare pub mod declaration is not a caller (#4312)" {
+    local repo="$PR_SIZE_TMP/upi-moddecl"
+    upi_repo "$repo"
+    upi_fixture_moddecl "$repo"
+    git -C "$repo" add src/
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "UNWIRED_PUB_ITEM:src/rate_alarm.rs:1: 'rate_alarm'"
+}
+
+@test "unwired-pub: pub use re-export counts as wiring for a library API" {
+    local repo="$PR_SIZE_TMP/upi-reexport"
+    upi_repo "$repo"
+    upi_fixture_reexport "$repo"
+    git -C "$repo" add src/
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "UNWIRED_PUB_ITEM"
+}
+
+@test "unwired-pub: Guardian skip with justification declares staging and passes" {
+    local repo="$PR_SIZE_TMP/upi-guardian-skip"
+    upi_repo "$repo"
+    upi_fixture_staged "$repo"
+    upi_skip_issue "$repo"
+    git -C "$repo" add src/lib.rs
+
+    run env AUTOSPEC_LINT_ISSUE_BODY_FILE="$repo/issue.md" \
+        bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged --issue 4346"
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "INFO:UNWIRED_PUB_ITEM"
+    ! echo "$output" | grep -qE "^UNWIRED_PUB_ITEM"
+}
+
+@test "unwired-pub: inline linter:allow with reason suppresses the finding" {
+    local repo="$PR_SIZE_TMP/upi-inline-allow"
+    upi_repo "$repo"
+    upi_fixture_staged "$repo" '// linter:allow-UNWIRED_PUB_ITEM deliberate staging: caller lands in the follow-up issue'
+    git -C "$repo" add src/lib.rs
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "suppressed by linter:allow-UNWIRED_PUB_ITEM"
+    ! echo "$output" | grep -qE "^UNWIRED_PUB_ITEM"
+}
+
+@test "unwired-pub: bare linter:allow without reason does not suppress" {
+    local repo="$PR_SIZE_TMP/upi-bare-allow"
+    upi_repo "$repo"
+    upi_fixture_staged "$repo" '// linter:allow-UNWIRED_PUB_ITEM'
+    git -C "$repo" add src/lib.rs
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "UNWIRED_PUB_ITEM:src/lib.rs:2: 'staged_cap'"
+}
+
+@test "unwired-pub: detector is inert in --diff-file mode" {
+    local repo="$PR_SIZE_TMP/upi-diff-file"
+    upi_repo "$repo"
+    upi_fixture_unwired_fn "$repo"
+    git -C "$repo" add src/lib.rs
+    git -C "$repo" diff --cached > "$PR_SIZE_TMP/upi.diff"
+
+    run bash -c "cd '$repo' && bash '$LINT' --diff-file '$PR_SIZE_TMP/upi.diff'"
+    rm -rf "$repo"
+    ! echo "$output" | grep -q "UNWIRED_PUB_ITEM"
+}
