@@ -122,6 +122,7 @@ pub mod spec_outcome;
 pub mod staged_spec;
 pub mod state;
 pub mod stored_output;
+pub mod summarization;
 pub mod symptom_attribution;
 pub mod threshold_calibration;
 pub mod toolchain_gate;
