@@ -117,3 +117,56 @@ fn populated_conflict_with_one_line_of_real_code_refuses() {
         other => panic!("expected Refused, got {other:?}"),
     }
 }
+
+/// issue #4319, the actual incident: a module file that declares most of its
+/// modules via a brace-bodied `commands!` macro. The textual `mod`
+/// declarations are a small subset; the macro's expansion adds the rest. The
+/// resolver cannot enumerate the full declared-name set, so it must refuse the
+/// file rather than union the (declaration-only) hunk — which would emit a
+/// macro-generated module twice.
+#[test]
+fn a_macro_generated_module_file_refuses_the_conflict() {
+    let file = "crates/autospec-cli/src/commands/mod.rs";
+    let content = "
+// The command table is the single declaration site for every CLI command.
+// One `commands!` invocation generates the `pub mod` declarations.
+
+macro_rules! commands {
+    ($($module:ident => $help:literal, $shape:ident ;)*) => {
+        $(pub mod $module;)*
+    };
+}
+
+// Helper modules (not commands) stay as plain declarations outside the table.
+<<<<<<< HEAD
+pub mod dispatch_spec;
+pub mod managed_project;
+=======
+pub mod dispatch_spec;
+pub mod managed_project;
+pub mod repair_loop;
+>>>>>>> feat/repair-loop
+
+commands! {
+    init => \"Initialize AutoSpec metadata\", diagnostic;
+    aar => \"Inspect adaptive agent runtime policy\", direct;
+    dispatch => \"Gate dispatch on queue freshness\", direct;
+}
+";
+
+    // The hold record reports the file is not declaration-only, naming the
+    // macro, so the pass holds it for a person instead of blaming the patch.
+    let shape = hold_shape(file, content);
+    assert!(!shape.declaration_only, "{shape}");
+    let refusal = shape.refusal.expect("stated reason");
+    assert!(refusal.contains("brace-bodied macro"), "{refusal}");
+
+    match resolve(file, content) {
+        ResolveOutcome::Refused(r) => {
+            assert_eq!(r.kind, RefusalKind::UnenumerableDeclarations);
+            assert_eq!(r.file, file);
+            assert!(r.detail.contains("commands"), "names the macro: {r}");
+        }
+        other => panic!("expected Refused, got {other:?}"),
+    }
+}

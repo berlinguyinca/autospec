@@ -55,8 +55,11 @@ pub struct HoldShape {
     pub file: String,
     /// Number of conflict hunks (`<<<<<<<` markers) in the file.
     pub hunks: usize,
-    /// True when every hunk, on every side, contains only in-scope lines
-    /// (doc comments, blank lines, `mod` declarations, `use` blocks).
+    /// True when the resolver will resolve the conflict: every hunk, on
+    /// every side, contains only in-scope lines (doc comments, blank lines,
+    /// `mod` declarations, `use` blocks) and the file invokes no
+    /// brace-bodied macro (whose expansion may declare modules the source
+    /// does not list, so the declared-name set is not derivable).
     pub declaration_only: bool,
     /// Stated refusal reason when `declaration_only` is false.
     pub refusal: Option<String>,
@@ -99,6 +102,14 @@ pub enum RefusalKind {
     UnclosedUseBlock,
     /// A conflict marker has no matching pair, or appears outside one.
     MalformedHunk,
+    /// The file invokes a brace-bodied macro whose expansion may declare `mod`
+    /// items the source does not list, so the declared-name set is not
+    /// derivable from the text and the resolver must refuse the file.
+    UnenumerableDeclarations,
+    /// The resolved file would declare the same `mod` more than once — the
+    /// resolution is invalid and is refused at the point of production, before
+    /// it is offered (invariant 3).
+    DuplicateResolution,
 }
 
 impl fmt::Display for RefusalKind {
@@ -115,6 +126,13 @@ impl fmt::Display for RefusalKind {
             }
             RefusalKind::UnclosedUseBlock => "use block does not close within the conflict hunk",
             RefusalKind::MalformedHunk => "malformed or unterminated conflict hunk",
+            RefusalKind::UnenumerableDeclarations => {
+                "a brace-bodied macro may declare modules the source does not list; \
+                 the declared-name set is not derivable"
+            }
+            RefusalKind::DuplicateResolution => {
+                "the resolution would declare the same module more than once"
+            }
         })
     }
 }
@@ -251,6 +269,18 @@ pub fn hold_shape(file: &str, content: &str) -> HoldShape {
             refusal: Some(describe(kind, &detail)),
         },
         Ok(hunks) => {
+            // A brace-bodied macro makes the declared-name set non-derivable,
+            // so the file is not declaration-only (issue #4319). Only checked
+            // when there is a conflict to resolve.
+            let macro_refusal = hunks.first().and_then(|_| macro_refusal(file, content));
+            if let Some(refusal) = macro_refusal {
+                return HoldShape {
+                    file: file.to_string(),
+                    hunks: hunks.len(),
+                    declaration_only: false,
+                    refusal: Some(refusal.describe()),
+                };
+            }
             for hunk in &hunks {
                 if let Err(refusal) = hunk_in_scope(file, hunk) {
                     return HoldShape {
@@ -309,6 +339,22 @@ pub fn resolve(file: &str, content: &str) -> ResolveOutcome {
     }
 
     let lines: Vec<&str> = content.lines().collect();
+
+    // Invariant (issue #4319): an automated resolver must be able to
+    // enumerate what it is reasoning about, and refuse when it cannot. A
+    // brace-bodied macro invocation (`commands! { … }`) may expand to `mod`
+    // declarations the source does not list, so a textual union could emit a
+    // name twice. Refuse and leave the conflict for a person.
+    if let Some(refusal) = macro_refusal(file, content) {
+        return ResolveOutcome::Refused(refusal);
+    }
+
+    // Names declared outside every conflict block (issue #4319): the
+    // out-of-hunk lines are kept verbatim in the resolution, so a `theirs`
+    // declaration of the same name is a duplicate the union must not
+    // re-emit.
+    let external_mods = external_mod_names(&lines, &hunks);
+
     let mut out: Vec<String> = Vec::new();
     let mut kept: Vec<String> = Vec::new();
     let mut added: Vec<String> = Vec::new();
@@ -317,7 +363,7 @@ pub fn resolve(file: &str, content: &str) -> ResolveOutcome {
     let mut h = 0usize;
     while i < lines.len() {
         if h < hunks.len() && i == hunks[h].start {
-            let resolved = match resolve_hunk(file, &hunks[h]) {
+            let resolved = match resolve_hunk(file, &hunks[h], &external_mods) {
                 Ok(r) => r,
                 Err(refusal) => return ResolveOutcome::Refused(refusal),
             };
@@ -330,6 +376,18 @@ pub fn resolve(file: &str, content: &str) -> ResolveOutcome {
             out.push(lines[i].to_string());
             i += 1;
         }
+    }
+
+    // Invariant 3 (issue #4319): validate the output before reporting
+    // success. A duplicate `mod` name in the resolved file cannot compile; the
+    // cause is visible now, at production, rather than minutes later in a
+    // compiler error attributed to the patch.
+    if let Some(dup) = duplicate_mod_names(&out) {
+        return ResolveOutcome::Refused(Refusal {
+            file: file.to_string(),
+            kind: RefusalKind::DuplicateResolution,
+            detail: format!("the resolution would declare `mod {dup}` more than once"),
+        });
     }
 
     ResolveOutcome::Resolved(ResolvedFile {
@@ -553,7 +611,11 @@ fn classify_side(
 }
 
 /// Resolve one hunk to its replacement lines plus the kept/added report.
-fn resolve_hunk(file: &str, hunk: &Hunk) -> Result<ResolvedHunk, Refusal> {
+fn resolve_hunk(
+    file: &str,
+    hunk: &Hunk,
+    external_mods: &[String],
+) -> Result<ResolvedHunk, Refusal> {
     let ours = classify_side(file, "ours", &hunk.ours, hunk.ours_first)?;
     let theirs = classify_side(file, "theirs", &hunk.theirs, hunk.theirs_first)?;
     let base = match &hunk.base {
@@ -639,7 +701,10 @@ fn resolve_hunk(file: &str, hunk: &Hunk) -> Result<ResolvedHunk, Refusal> {
 
     for decl in &theirs {
         match decl {
-            LineKind::Mod { name, text } if !ours_mods.contains(&name.as_str()) => {
+            LineKind::Mod { name, text }
+                if !ours_mods.contains(&name.as_str())
+                    && !external_mods.iter().any(|m| m.as_str() == name.as_str()) =>
+            {
                 added.push(name.clone());
                 lines.push(text.clone());
             }
@@ -713,6 +778,178 @@ fn is_ident(s: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// One identifier character (ASCII alphanumeric or `_`).
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// One character that may appear in a macro invocation name: an identifier
+/// character or a path separator (`::` / `.`), so `foo::bar!` reports the
+/// full `foo::bar`.
+fn is_macro_name_char(c: char) -> bool {
+    is_ident_char(c) || c == ':' || c == '.'
+}
+
+/// The module names declared on the lines OUTSIDE every conflict hunk, in
+/// file order (issue #4319). These lines are kept verbatim in the
+/// resolution, so a `theirs` declaration of the same name is a duplicate the
+/// union must not re-emit.
+fn external_mod_names(lines: &[&str], hunks: &[Hunk]) -> Vec<String> {
+    let mut in_hunk: Vec<bool> = vec![false; lines.len()];
+    for hunk in hunks {
+        for idx in hunk.start..hunk.end {
+            if idx < in_hunk.len() {
+                in_hunk[idx] = true;
+            }
+        }
+    }
+    let mut names: Vec<String> = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        if in_hunk[idx] {
+            continue;
+        }
+        if let Some(name) = parse_mod(line.trim()) {
+            if !names.iter().any(|existing| existing == &name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// Locate the first brace-bodied macro invocation in the content, skipping
+/// comments and string literals, and return its 1-based line number and the
+/// invocation name (issue #4319). A brace-bodied macro is `<name>!` followed
+/// (after optional whitespace) by `{`; a `macro_rules! name {` *definition*
+/// is not matched, because the `!` there is followed by the name, not `{`.
+fn find_brace_bodied_macro(content: &str) -> Option<(usize, String)> {
+    let masked = mask_comments_and_strings(content);
+    let chars: Vec<char> = masked.chars().collect();
+    let mut line_no = 1usize;
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '!' && i > 0 && is_ident_char(chars[i - 1]) {
+            let mut j = i + 1;
+            let mut j_line = line_no;
+            while j < chars.len() && chars[j].is_whitespace() {
+                if chars[j] == '\n' {
+                    j_line += 1;
+                }
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == '{' {
+                let mut name_start = i - 1;
+                while name_start > 0 && is_macro_name_char(chars[name_start - 1]) {
+                    name_start -= 1;
+                }
+                let name: String = chars[name_start..i].iter().collect();
+                return Some((j_line, name));
+            }
+        }
+        if chars[i] == '\n' {
+            line_no += 1;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The first `mod` name declared more than once in the resolved lines, if any
+/// (invariant 3): a duplicate would emit one name twice, which cannot compile,
+/// so the resolution is refused at the point of production rather than
+/// reported as success and blamed on the patch later.
+fn duplicate_mod_names(lines: &[String]) -> Option<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for line in lines {
+        let Some(name) = parse_mod(line.trim()) else {
+            continue;
+        };
+        if seen.iter().any(|existing| existing == &name) {
+            return Some(name);
+        }
+        seen.push(name);
+    }
+    None
+}
+
+/// A refusal for a file that invokes a brace-bodied macro (issue #4319),
+/// naming the macro and its line: the declared-name set is not derivable from
+/// the source, so the resolver refuses the file. `None` when the file invokes
+/// no such macro.
+fn macro_refusal(file: &str, content: &str) -> Option<Refusal> {
+    find_brace_bodied_macro(content).map(|(line_no, macro_name)| Refusal {
+        file: file.to_string(),
+        kind: RefusalKind::UnenumerableDeclarations,
+        detail: format!(
+            "line {line_no}: `{macro_name}!` may declare modules the source does not list"
+        ),
+    })
+}
+
+/// Blank out comment and string-literal interiors, preserving the original
+/// length and line structure, so the brace-bodied-macro scan does not fire on
+/// a `!` inside a doc comment or a help string.
+fn mask_comments_and_strings(content: &str) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    let mut out: Vec<char> = Vec::with_capacity(chars.len());
+    let mut i = 0usize;
+    let mut in_block_comment = false;
+    let mut in_string = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_block_comment {
+            if c == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                out.push(' ');
+                out.push(' ');
+                in_block_comment = false;
+                i += 2;
+            } else {
+                out.push(if c == '\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+            continue;
+        }
+        if in_string {
+            if c == '\\' && i + 1 < chars.len() {
+                out.push(' ');
+                out.push(if chars[i + 1] == '\n' { '\n' } else { ' ' });
+                i += 2;
+            } else if c == '"' {
+                out.push(' ');
+                in_string = false;
+                i += 1;
+            } else {
+                out.push(if c == '\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            while i < chars.len() && chars[i] != '\n' {
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            out.push(' ');
+            out.push(' ');
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+        if c == '"' {
+            out.push(' ');
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out.into_iter().collect()
 }
 
 /// Whether a trimmed line starts a `use` statement (possibly multi-line).
@@ -984,5 +1221,142 @@ mod tests {
             }
             other => panic!("expected Refused, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_brace_bodied_macro_refuses_the_whole_file() {
+        // issue #4319: `commands! { … }` expands to `pub mod` declarations
+        // the source does not list, so the declared-name set is not
+        // derivable and the resolver refuses the file instead of unioning
+        // it — even when the hunk itself is declaration-only.
+        let content = "
+//! commands
+pub mod dispatch_spec;
+
+<<<<<<< HEAD
+pub mod managed_project;
+=======
+pub mod managed_project;
+pub mod new_module;
+>>>>>>> feat/add-module
+
+commands! {
+    init => \"Initialize\", diagnostic;
+    aar => \"Inspect\", direct;
+}
+";
+        match resolve(FILE, content) {
+            ResolveOutcome::Refused(refusal) => {
+                assert_eq!(refusal.kind, RefusalKind::UnenumerableDeclarations);
+                assert!(
+                    refusal.detail.contains("commands"),
+                    "the reason names the macro: {}",
+                    refusal.detail
+                );
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        // hold_shape agrees the conflict is not declaration-only.
+        let shape = hold_shape(FILE, content);
+        assert!(!shape.declaration_only, "{shape}");
+        assert_eq!(shape.hunks, 1);
+        let refusal = shape.refusal.expect("stated reason");
+        assert!(refusal.contains("brace-bodied macro"), "{refusal}");
+    }
+
+    #[test]
+    fn a_macro_mentioned_in_a_doc_comment_does_not_refuse() {
+        // The `!` is inside a doc comment, not a real invocation. The scan
+        // must not fire on comment text, so an ordinary declaration-only
+        // conflict still unions.
+        let content = "
+//! Use `commands! { … }` to declare modules.
+<<<<<<< HEAD
+pub mod a;
+=======
+pub mod a;
+pub mod b;
+>>>>>>> feat/x
+";
+        let r = resolved(content);
+        assert_eq!(r.kept, vec!["a"]);
+        assert_eq!(r.added, vec!["b"]);
+    }
+
+    #[test]
+    fn a_macro_definition_alone_does_not_refuse() {
+        // `macro_rules! name {` is a definition, not an invocation: its `!`
+        // is followed by the name, not `{`. Only an invocation refuses.
+        let content = "
+macro_rules! declare {
+    ($($m:ident;)*) => { $($m)*; };
+}
+<<<<<<< HEAD
+pub mod a;
+=======
+pub mod a;
+pub mod b;
+>>>>>>> feat/x
+";
+        let r = resolved(content);
+        assert_eq!(r.kept, vec!["a"]);
+        assert_eq!(r.added, vec!["b"]);
+    }
+
+    #[test]
+    fn a_resolution_that_would_duplicate_a_mod_is_refused() {
+        // Invariant 3 (issue #4319): the resolver validates its own output.
+        // Two separate hunks each add `pub mod x;`; `x` is in neither hunk's
+        // `ours` nor outside any hunk, so the union would emit `mod x` twice.
+        // The resolver refuses at the point of production instead of reporting
+        // success and letting a compiler blame the patch.
+        let content = "<<<<<<< HEAD\npub mod a;\n=======\npub mod a;\npub mod x;\n>>>>>>> feat/1\n\
+                       //! mid\n\
+                       <<<<<<< HEAD\npub mod b;\n=======\npub mod b;\npub mod x;\n>>>>>>> feat/2\n";
+        match resolve(FILE, content) {
+            ResolveOutcome::Refused(refusal) => {
+                assert_eq!(refusal.kind, RefusalKind::DuplicateResolution);
+                assert!(refusal.detail.contains("x"), "{refusal}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_theirs_addition_declared_outside_the_hunk_is_not_reemitted() {
+        // issue #4319: `main` declares `pub mod dispatch_spec;` outside the
+        // conflict block (a "Helper modules" section); the patch adds the
+        // same declaration to the top of the file inside the hunk. The union
+        // keeps the out-of-hunk declaration verbatim and must NOT re-emit the
+        // hunk-side copy, or the name is declared twice.
+        let content = "
+//! header
+<<<<<<< HEAD
+pub mod alpha;
+pub mod beta;
+=======
+pub mod alpha;
+pub mod beta;
+pub mod dispatch_spec;
+>>>>>>> feat/patch
+
+// Helper modules
+pub mod dispatch_spec;
+";
+        let r = resolved(content);
+        assert_eq!(r.kept, vec!["alpha", "beta"]);
+        assert!(
+            r.added.is_empty(),
+            "no re-emission of an already-declared name: {:?}",
+            r.added
+        );
+        let content = r.mark_verified().into_content().unwrap();
+        assert_eq!(
+            content.matches("pub mod dispatch_spec;").count(),
+            1,
+            "exactly one declaration survives:\n{content}"
+        );
+        assert!(content.contains("pub mod beta;"));
+        assert!(!content.contains("<<<<<<<"));
     }
 }
