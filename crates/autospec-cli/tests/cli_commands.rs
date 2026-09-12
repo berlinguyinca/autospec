@@ -1551,6 +1551,28 @@ fn validate_json_plans_rust_checks_for_changed_rust_sources() {
     assert!(stdout.contains("\"changed_paths\":[\"crates/autospec-core/src/state/mod.rs\"]"));
     assert!(stdout.contains("\"name\":\"rust:lint\""));
     assert!(!stdout.contains("\"status\":\"ok\""));
+    assert!(stdout.contains("\"ungated_paths\":[]"));
+}
+
+#[test]
+fn validate_planner_reports_ungated_paths_and_fails_closed() {
+    // Regression (#3790): a web-only path has no declared gate, so the planner
+    // reports it ungated and exits non-zero instead of defaulting to the
+    // Rust gate set.
+    let output = autospec()
+        .args(["validate", "--path", "apps/web/app/page.tsx", "--json"])
+        .output()
+        .expect("validate command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "an ungated plan must not exit clean"
+    );
+    assert!(stdout.contains("\"mode\":\"planning\""));
+    assert!(stdout.contains("\"ungated_paths\":[\"apps/web/app/page.tsx\"]"));
+    assert!(stderr.contains("ungated: no declared gate covers apps/web/app/page.tsx"));
 }
 
 #[test]

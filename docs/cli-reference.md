@@ -30,7 +30,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec initiative verify --id INIT-YYYY-NNNN [--json]` | yes | final completion gate; exits `1` while an unwaived requirement is unverified |
 | `autospec initiative project --id INIT-YYYY-NNNN [--json]` | yes | renders the GitHub projection from canonical state and stores it; performs no GitHub mutation |
 | `autospec initiative status --id INIT-YYYY-NNNN [--json]` | yes | Initiative snapshot: stage, repository and owner span, task states, requirement coverage, completion |
-| `autospec validate [--path <changed-path>]... [--json]` | yes | read-only affected-check planner; shell wrapper remains the executor |
+| `autospec validate [--path <changed-path>]... [--json]` | yes | read-only affected-check planner; the gate set is a function of the changed paths — paths no declared gate covers are reported `ungated` and the planner exits non-zero; shell wrapper remains the executor |
 | `autospec validate --shadow-results <captured-results.json> [--json]` | yes | aggregates captured shell outcomes without executing commands; returns non-zero when a required captured result failed |
 | `autospec runtime classify <path> --json` | yes | implemented R0-R4 ownership classification for one repository path |
 | `autospec runtime audit --json` | yes | implemented read-only R0-R4 inventory; it neither migrates nor executes candidates |
