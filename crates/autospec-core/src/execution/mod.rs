@@ -2,6 +2,7 @@ pub mod acceptance_gate;
 pub mod backlog;
 pub mod closure;
 pub mod conversion_claim;
+pub mod dispatch_base;
 pub mod endpoint;
 pub mod executor;
 pub mod fast_lane;
