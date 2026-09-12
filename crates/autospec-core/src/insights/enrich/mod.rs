@@ -14,6 +14,10 @@
 //! - [`queue::run_queue`] drives a resumable [`EnrichmentJob`] queue:
 //!   crash-safe status transitions, a per-job `cursor`, and retry with
 //!   `attempts` accounting (a stopped queue resumes where it stopped).
+//! - [`classify::classify`] runs §36 stage 3 on the same backend-neutral
+//!   seam: §9 user re-steering is classified into the 16 §9 categories
+//!   and persisted to `user_interventions` with a message reference
+//!   (issue #3851, spec §35).
 //! - Dispatch gates: every batch passes [`redact::Redactor`] (secrets are
 //!   never dispatched) and every session passes [`redact::repo_allowed`]
 //!   (a session in a repo outside the allowlist stays unenriched, with
@@ -21,6 +25,7 @@
 //! - Strong model diagnosis (spec §36 stages 4-8) is deferred to the
 //!   classifier epic (#3830).
 
+pub mod classify;
 pub mod inferweave;
 pub mod queue;
 pub mod redact;
