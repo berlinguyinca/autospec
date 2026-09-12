@@ -49,6 +49,7 @@ pub mod deadline_ratchet;
 pub mod declaration_ownership;
 pub mod dependency_gates;
 pub mod deploy_drift;
+pub mod diff_coverage;
 pub mod dispatch_guard;
 pub mod dispatch_outcomes;
 pub mod dispatch_pipeline;
