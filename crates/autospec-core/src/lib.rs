@@ -111,6 +111,7 @@ pub mod resources;
 pub mod restart_safety;
 pub mod result_soundness;
 pub mod review_checklist;
+pub mod roll_selection;
 pub mod run_status;
 pub mod runtime_env;
 pub mod runtime_policy;
