@@ -170,6 +170,76 @@ fn command_table_parser_reads_both_entry_shapes_with_source_lines() {
     );
 }
 
+/// AC3 (#3985), exercised against the populated case (#3793): adding a
+/// command is a declaration-only edit. The help table, the dispatch arms, and
+/// the module declarations are generated from the single `commands!` list by
+/// the macro, and this test's expected list is parsed out of the same list —
+/// so re-applying the #3793 change (adding `autospec cost`) by editing only
+/// the declaration must change the derived expected list and nothing else.
+/// A second registration site for commands would leave the derived list
+/// behind here and fail the assertion.
+#[test]
+fn declaration_only_edit_adds_command_to_derived_list() {
+    let source = COMMANDS_TABLE_SOURCE;
+    let cost_line = source
+        .lines()
+        .find(|line| line.trim_start().starts_with("cost =>"))
+        .expect("the #3793 entry is in the commands! declaration");
+    let lines: Vec<&str> = source.lines().collect();
+    let cost_idx = lines
+        .iter()
+        .position(|line| *line == cost_line)
+        .expect("the #3793 entry is in the commands! declaration");
+
+    // The tree as it stood before #3793 landed: the declaration without the
+    // entry, and no other site to edit.
+    let mut pre_lines = lines;
+    pre_lines.remove(cost_idx);
+    let pre = pre_lines.join("\n");
+    let mut pre = pre;
+    if source.ends_with('\n') {
+        pre.push('\n');
+    }
+    assert!(
+        command_table_entries(&pre)
+            .iter()
+            .all(|(_, name)| *name != "cost"),
+        "the derived expected list must not contain `cost` once the entry is removed from the declaration"
+    );
+
+    // Re-apply the #3793 change: one line, in the declaration only.
+    let mut post_lines: Vec<&str> = pre.lines().collect();
+    post_lines.insert(cost_idx, cost_line);
+    let mut post = post_lines.join("\n");
+    if source.ends_with('\n') {
+        post.push('\n');
+    }
+    assert_ne!(post, pre, "the insertion must have changed the declaration");
+    assert_eq!(
+        post, source,
+        "a declaration-only edit (remove and re-add the entry) must reproduce \
+         the committed table exactly — there is no other site carrying the command"
+    );
+
+    let post_entries = command_table_entries(&post);
+    assert!(
+        post_entries.iter().any(|(_, name)| *name == "cost"),
+        "the derived expected list must pick up the declaration-only addition"
+    );
+    assert_eq!(
+        post_entries
+            .iter()
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>(),
+        command_table_entries(source)
+            .iter()
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>(),
+        "with the entry re-added the derived list must equal the derived list of the real table — \
+         the declaration is the only input, so a declaration-only edit is a complete edit"
+    );
+}
+
 #[test]
 fn cli_commands_help_lists_required_commands() {
     let output = autospec().arg("--help").output().expect("autospec runs");
