@@ -25,17 +25,25 @@
 //!   record (the `agent-status.tsv` row), transcripts under the size
 //!   threshold are quoted verbatim, the batch is summarized, and repeated
 //!   identical failures raise a fleet-level fault. Exit 0 no fault, 1 fault.
-//! - `tick` — one dispatch tick over the queue (#3911): once the liveness
-//!   gate authorizes the queue, reports per entry which entries are
+//! - `tick` — one dispatch tick over the queue (#3911, #4451): once the
+//!   liveness gate authorizes the queue, reports per entry which entries are
 //!   actionable (a fresh dispatch, or a conversion of a patch that is
 //!   already produced) and which are skipped, with a reason for each skip.
-//!   Exit 0 when anything is dispatched; 1 on a liveness hold or a stall
-//!   (non-empty queue, nothing dispatched — every skip is named).
-//! - `mark` — move one queue entry through its lifecycle (#3911):
+//!   The tick enforces the dispatch bound: an entry dispatched repeatedly
+//!   without a patch is held — with the count and the reason — not
+//!   redispatched, and the run reports how many entries it skipped over the
+//!   bound. The tick records its decisions in the lifecycle ledger (fresh
+//!   dispatches flag the entry in flight; bound-exceeding entries are held),
+//!   so the bound survives the dispatcher process. Exit 0 when anything is
+//!   dispatched; 1 on a liveness hold or a stall (non-empty queue, nothing
+//!   dispatched — every skip is named).
+//! - `mark` — move one queue entry through its lifecycle (#3911, #4451):
 //!   `produced` (the agent produced a patch), `converted` (the patch became
 //!   a PR or commit — the only terminal state), `hold` (record why the
-//!   entry is blocked), or `release` (clear the hold; a released produced
-//!   entry re-enters the next tick as a conversion, not a fresh dispatch).
+//!   entry is blocked), `release` (clear the hold and reset the dispatch
+//!   attempt count; a released produced entry re-enters the next tick as a
+//!   conversion, not a fresh dispatch), or `failed` (a run ended without a
+//!   patch: advance the attempt count and clear the in-flight flag).
 //!   Exit 0 accepted, 1 refused, 2 usage error.
 //! - `schedule` — audit the refresh-queue schedule as a first-class
 //!   component (#4320): the critical-path manifest covers every step it
@@ -60,8 +68,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use autospec_core::dispatch_guard::{self, CheckId, CheckReport};
 use autospec_core::dispatch_pipeline::{
     DispatchPipeline, DispatchTick, EntryState, FreshnessPolicy, LifecycleLedger, LivenessLedger,
-    PipelineReport, PipelineTopology, QueueFile, SchedulingReconciliation, DEFAULT_INTERVAL_SECS,
-    DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
+    PipelineReport, PipelineTopology, QueueFile, SchedulingReconciliation,
+    DEFAULT_INTERVAL_SECS, DEFAULT_MAX_DISPATCH_ATTEMPTS, DEFAULT_MAX_STALE_INTERVALS,
+    QUEUE_ARTIFACT,
 };
 use autospec_core::refresh_queue_contract::{
     admit_schedule, assess_artifact, ArtifactStaleness, ScheduleManifest, SchedulingVerdict,
@@ -114,11 +123,11 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
     ("runs", "Classify a dispatch batch and summarize it (#3918)"),
     (
         "tick",
-        "One dispatch tick over the queue: per-entry dispatch / convert / skip, every skip with a reason (#3911)",
+        "One dispatch tick over the queue: per-entry dispatch / convert / skip, every skip with a reason, dispatch bound enforced (#3911, #4451)",
     ),
     (
         "mark",
-        "Move one queue entry through its lifecycle: produced / converted / hold / release (#3911)",
+        "Move one queue entry through its lifecycle: produced / converted / hold / release / failed (#3911, #4451)",
     ),
     (
         "schedule",
@@ -211,7 +220,10 @@ fn print_help() {
     println!("    --fault-threshold <N> runs: identical failures at/above N in one batch raise a fleet fault (default 3)");
     println!("    --out <PATH>          runs: where to write the agent-status.tsv record (default stdout)");
     println!("    --lifecycle <PATH>    Lifecycle ledger (default $HOME/.autospec/dispatch-lifecycle.json)");
-    println!("    --action <A>          mark: produced / converted / hold / release (required)");
+    println!("    --action <A>          mark: produced / converted / hold / release / failed (required)");
+    println!(
+        "    --max-attempts <N>    tick: fresh dispatches without a patch tolerated before an entry is held, not redispatched (default {DEFAULT_MAX_DISPATCH_ATTEMPTS}, #4451)"
+    );
     println!("    --reason <TEXT>       mark hold: why the entry is blocked (required for hold)");
     println!("    --at <EPOCH>          Beat timestamp in epoch seconds (default: current time)");
     println!("    --now <EPOCH>         Evaluate against this instant instead of the clock");
@@ -645,14 +657,23 @@ fn print_human(report: &PipelineReport, pipeline: &DispatchPipeline) {
 }
 
 /// Assemble topology + ledger + policy from flags and on-disk state.
-/// `tick` — one dispatch tick over the queue (#3911).
+/// `tick` — one dispatch tick over the queue (#3911, #4451).
 ///
 /// Once the liveness gate authorizes the queue, report per entry which
 /// entries are actionable — a fresh dispatch, or a conversion of a patch
 /// that is already produced — and which are skipped, with a reason for each
 /// skip. A tick that dispatches nothing over a non-empty queue is a stall,
 /// exit 1: a skip without a reason is the silent version of the bug this
-/// reports. The tick is read-only: it never writes the lifecycle ledger.
+/// reports.
+///
+/// The tick enforces the dispatch bound (#4451): an entry dispatched
+/// `--max-attempts` times without a patch is held — with the count and the
+/// reason — not redispatched, and the summary reports how many entries were
+/// skipped over the bound. The tick records its decisions in the lifecycle
+/// ledger — fresh dispatches flag the entry in flight, bound-exceeding
+/// entries are held — so the bound is durable across dispatcher processes,
+/// not a guard bolted onto the shell. A tick with nothing to record leaves
+/// the ledger untouched.
 fn tick(args: &[String]) -> Result<(), CommandFailure> {
     let pipeline = build_pipeline(args)?;
     let queue = read_queue(&queue_path(args)?)?;
@@ -668,7 +689,26 @@ fn tick(args: &[String]) -> Result<(), CommandFailure> {
         ));
     };
 
-    let report = DispatchTick::run(&queue, &load_lifecycle(&lifecycle_file(args)?)?);
+    let max_attempts =
+        opt_u64(args, "--max-attempts")?.unwrap_or(DEFAULT_MAX_DISPATCH_ATTEMPTS);
+    if max_attempts == 0 {
+        return Err(CommandFailure::diagnostic(
+            "--max-attempts must be greater than zero".to_string(),
+        ));
+    }
+
+    let ledger_path = lifecycle_file(args)?;
+    let mut ledger = load_lifecycle(&ledger_path)?;
+    let report = DispatchTick::run_bounded(&queue, &ledger, max_attempts);
+
+    // Record the tick's decisions before reporting them: if the ledger
+    // cannot be written, the tick fails and the dispatcher dispatches
+    // nothing, rather than reporting a dispatch that was never recorded
+    // (and would be repeated on the next run).
+    let written = report.apply_to_ledger(&mut ledger, now);
+    if written > 0 {
+        save_lifecycle(&ledger_path, &ledger)?;
+    }
 
     if super::is_json(args) {
         println!("{}", report.to_json());
@@ -680,6 +720,9 @@ fn tick(args: &[String]) -> Result<(), CommandFailure> {
         println!("{}", walk.line());
         for line in report.lines() {
             println!("{line}");
+        }
+        if written > 0 {
+            println!("lifecycle ledger updated: {written} record(s) written");
         }
     }
 
@@ -799,16 +842,19 @@ fn credential_present() -> bool {
         .is_ok_and(|home| Path::new(&home).join(".config/gh/hosts.yml").is_file())
 }
 
-/// `mark` — move one queue entry through its lifecycle (#3911).
+/// `mark` — move one queue entry through its lifecycle (#3911, #4451).
 ///
-/// `produced` (the agent produced a patch), `converted` (the patch became a
-/// PR or commit — the only terminal state), `hold` (record why the entry is
-/// blocked; the state is preserved), or `release` (clear the hold; a released
-/// produced entry re-enters the next tick as a conversion, not a fresh
-/// dispatch). A refused stamp — terminal entry, backwards timestamp — exits
-/// 1 and names why; a usage error exits 2.
+/// `produced` (the agent produced a patch; resets the dispatch attempt
+/// count), `converted` (the patch became a PR or commit — the only terminal
+/// state), `hold` (record why the entry is blocked; the state is preserved),
+/// `release` (clear the hold and reset the attempt count — the explicit
+/// re-arm after triaging a dispatch-bound entry; a released produced entry
+/// re-enters the next tick as a conversion, not a fresh dispatch), or
+/// `failed` (a run ended without a patch: advance the attempt count and
+/// clear the in-flight flag). A refused stamp — terminal entry, backwards
+/// timestamp — exits 1 and names why; a usage error exits 2.
 fn mark(args: &[String]) -> Result<(), CommandFailure> {
-    const USAGE: &str = "usage: autospec dispatch mark --action <produced|converted|hold|release> --issue <N> [--reason <TEXT>] [--at <EPOCH>] [--lifecycle <PATH>]";
+    const USAGE: &str = "usage: autospec dispatch mark --action <produced|converted|hold|release|failed> --issue <N> [--reason <TEXT>] [--at <EPOCH>] [--lifecycle <PATH>]";
     let action = opt_string(args, "--action")?
         .ok_or_else(|| CommandFailure::diagnostic(USAGE.to_string()))?;
     let issue_text = opt_string(args, "--issue")?
@@ -827,9 +873,10 @@ fn mark(args: &[String]) -> Result<(), CommandFailure> {
         "converted" => mark_state(&mut ledger, issue, EntryState::Converted, at)?,
         "hold" => mark_hold(&mut ledger, issue, &hold_reason(reason)?, at)?,
         "release" => mark_release(&mut ledger, issue, at)?,
+        "failed" => mark_failed(&mut ledger, issue, at)?,
         other => {
             return Err(CommandFailure::diagnostic(format!(
-                "unknown mark action {other:?} (expected produced, converted, hold, or release)"
+                "unknown mark action {other:?} (expected produced, converted, hold, release, or failed)"
             )))
         }
     };
@@ -904,9 +951,38 @@ fn mark_release(
         ));
     }
     Ok(format!(
-        "released #{issue} [{}]",
+        "released #{issue} [{}] (dispatch attempt count reset)",
         ledger.state_of(issue).as_str()
     ))
+}
+
+/// `failed` — a run ended without a patch (#4451). The attempt count
+/// advances — this is the counter the dispatch bound is enforced on — and
+/// the in-flight flag clears, so the next tick either dispatches the entry
+/// again (within the bound) or holds it over the bound with the count.
+fn mark_failed(
+    ledger: &mut LifecycleLedger,
+    issue: u64,
+    at: u64,
+) -> Result<String, CommandFailure> {
+    match ledger.record_failed(issue, at) {
+        Some(count) => Ok(format!(
+            "recorded failed run for #{issue}: attempt {count} (no patch; in-flight flag cleared)"
+        )),
+        None => {
+            let message = if ledger.state_of(issue).is_terminal() {
+                format!("mark: #{issue} is already converted; a terminal entry cannot record a failed run")
+            } else {
+                let recorded = ledger
+                    .record_of(issue)
+                    .map_or(at, |record| record.recorded_at);
+                format!(
+                    "mark: #{issue} failed refused — a later stamp already exists (recorded {recorded}); stamps are monotonic"
+                )
+            };
+            Err(CommandFailure::status(message, HOLD_EXIT))
+        }
+    }
 }
 
 fn build_pipeline(args: &[String]) -> Result<DispatchPipeline, CommandFailure> {
@@ -1538,10 +1614,88 @@ mod lifecycle_tests {
         let records = &read_lifecycle(&lifecycle)["records"];
         assert_eq!(records["102"]["state"], "produced");
         assert_eq!(records["110"]["state"], "converted");
-        assert!(
-            !records.get("101").is_some(),
-            "a tick is read-only: it must not invent lifecycle records"
-        );
+        // 101 was dispatched fresh, so the tick recorded it: in flight,
+        // with a no-patch count of zero (#4451) — the dispatch is durable,
+        // not inferred from the absence of a patch file.
+        let fresh = records.get("101").expect("a fresh dispatch is recorded");
+        assert_eq!(fresh["attempts"], 0);
+        assert_eq!(fresh["dispatched_at"], NOW);
+    }
+
+    #[test]
+    fn tick_holds_bound_exceeded_entries_and_reports_the_count() {
+        let dir = fixture_dir("bound");
+        // Stamped well inside the freshness window for every --now below.
+        let queue = live_queue(&dir, &[101], NOW - 600);
+        let lifecycle = lifecycle_path(&dir);
+
+        // Three dispatches, each ending in a failed run: the tick records
+        // the dispatch, mark failed records the outcome.
+        for offset in [0u64, 10, 20] {
+            let at = NOW - 60 + offset;
+            tick(&tick_args(&queue, &lifecycle, at)).expect("within the bound");
+            mark(&mark_args(&lifecycle, "failed", 101, at + 5)).expect("failed recorded");
+        }
+
+        // The fourth dispatch is refused: the entry is held, with the count
+        // and the reason, and the run reports the over-bound skip.
+        let stall = tick(&tick_args(&queue, &lifecycle, NOW))
+            .expect_err("the bound holds: nothing is dispatchable");
+        assert_eq!(stall.exit_code, 1);
+
+        let records = &read_lifecycle(&lifecycle)["records"];
+        assert_eq!(records["101"]["attempts"], 3);
+        let reason = records["101"]["held_reason"]
+            .as_str()
+            .expect("the hold is durable");
+        assert!(reason.contains("3 dispatches with no patch"), "{reason}");
+        assert!(reason.contains("bound 3"), "{reason}");
+
+        // Releasing is the re-arm: the attempt count resets and the entry
+        // dispatches again.
+        mark(&mark_args(&lifecycle, "release", 101, NOW + 10)).expect("released");
+        tick(&tick_args(&queue, &lifecycle, NOW + 20)).expect("rearmed entry dispatches");
+        let records = &read_lifecycle(&lifecycle)["records"];
+        assert_eq!(records["101"]["attempts"], 0);
+    }
+
+    #[test]
+    fn tick_reports_in_flight_skips_and_does_not_redispatch() {
+        let dir = fixture_dir("inflight");
+        let queue = live_queue(&dir, &[101], NOW - 600);
+        let lifecycle = lifecycle_path(&dir);
+
+        tick(&tick_args(&queue, &lifecycle, NOW - 60)).expect("first dispatch");
+
+        // The run is still going: the second tick must wait, not redispatch.
+        let second = tick(&tick_args(&queue, &lifecycle, NOW - 50))
+            .expect_err("in flight: nothing dispatchable");
+        assert_eq!(second.exit_code, 1);
+
+        // The outcome arrives with no patch: the count advances and the
+        // in-flight flag clears.
+        mark(&mark_args(&lifecycle, "failed", 101, NOW - 40)).expect("failed recorded");
+        tick(&tick_args(&queue, &lifecycle, NOW)).expect("within the bound again");
+        let records = &read_lifecycle(&lifecycle)["records"];
+        assert_eq!(records["101"]["attempts"], 1);
+        assert_eq!(records["101"]["dispatched_at"], NOW);
+    }
+
+    #[test]
+    fn mark_failed_refuses_terminal_and_is_a_usage_error_without_action() {
+        let dir = fixture_dir("failed-usage");
+        let lifecycle = lifecycle_path(&dir);
+
+        mark(&mark_args(&lifecycle, "converted", 110, NOW - 20)).expect("110 converted");
+        let refused = mark(&mark_args(&lifecycle, "failed", 110, NOW - 10))
+            .expect_err("a terminal entry cannot record a failed run");
+        assert_eq!(refused.exit_code, 1);
+        assert!(refused.message.contains("converted"), "{}", refused.message);
+
+        let unknown = mark(&mark_args(&lifecycle, "nope", 101, NOW))
+            .expect_err("unknown action is a usage error");
+        assert_eq!(unknown.exit_code, 2);
+        assert!(unknown.message.contains("failed"), "{}", unknown.message);
     }
 
     #[test]

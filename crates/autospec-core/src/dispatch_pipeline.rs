@@ -77,6 +77,15 @@
 //!   ([`DispatchTick`], [`SkipReason`]): which entries are held and why, and
 //!   which are converted and should leave the queue. Produced-but-unconverted
 //!   is directly queryable ([`LifecycleLedger::produced_but_unconverted`]).
+//! * **Dispatch is bounded by attempts, not by evidence of success** (#4451):
+//!   the guard "already produced a patch" treats an *absent* patch as "not
+//!   yet tried", so an issue that fails before producing one is redispatched
+//!   forever — eight issues consumed 83 GPU dispatches. The ledger instead
+//!   counts each fresh dispatch per entry, flags the entry in flight until an
+//!   outcome is recorded, and holds an entry that reaches
+//!   [`DEFAULT_MAX_DISPATCH_ATTEMPTS`] dispatches without a patch — with the
+//!   count and the reason — instead of spending another run on it
+//!   ([`SkipReason::InFlight`], [`SkipReason::AttemptBoundExceeded`]).
 //!
 //! Everything here is pure and testable: no I/O, no clock, no subprocess. The
 //! caller supplies `now` and the artifact it read; [`DispatchPipeline`] decides.
@@ -94,6 +103,12 @@ pub const DEFAULT_INTERVAL_SECS: u64 = 600;
 /// How many missed intervals a consumer tolerates before the artifact stops
 /// being authoritative.
 pub const DEFAULT_MAX_STALE_INTERVALS: u64 = 3;
+
+/// Fresh dispatches an entry may consume without producing a patch before it
+/// is held rather than redispatched (#4451). The bound is on attempts, never
+/// on the presence of a patch file: an issue dispatched N times with no patch
+/// is a defect to be reported, not "not yet tried".
+pub const DEFAULT_MAX_DISPATCH_ATTEMPTS: u64 = 3;
 
 /// Header the refresher writes with the epoch seconds of the last refresh. A
 /// queue file without it cannot be told apart from a frozen one, so it is
@@ -1487,6 +1502,18 @@ pub struct EntryRecord {
     pub held_reason: Option<String>,
     /// Epoch seconds of the last accepted stamp.
     pub recorded_at: u64,
+    /// Dispatches that ended without a patch, since the last reset (a
+    /// `produced` / `converted` stamp, or an explicit `release`). The
+    /// dispatch bound (#4451) is enforced on this count, never on the
+    /// presence of a patch file.
+    #[serde(default)]
+    pub attempts: u64,
+    /// The entry is in flight since this instant: a fresh dispatch was
+    /// recorded and no outcome (`produced` / `failed`) since. `None` when
+    /// nothing is running for it — "no patch" is only "untried" or "kept
+    /// failing" then, never "still going" (#4451).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatched_at: Option<u64>,
 }
 
 /// The consumer-owned durable record of where each queue entry is in its
@@ -1526,7 +1553,9 @@ impl LifecycleLedger {
     /// current one is refused, so a stale "converted" cannot rewind a newer
     /// record (ties are accepted — re-stamping is idempotent). Stamping a
     /// state clears any hold on the entry: an explicit stamp supersedes the
-    /// hold.
+    /// hold. It also resets the dispatch-attempt count and clears the
+    /// in-flight flag: a stamped outcome (a produced patch, a conversion)
+    /// is evidence the no-patch loop has broken (#4451).
     pub fn record(&mut self, issue: u64, state: EntryState, at: u64) -> bool {
         if let Some(existing) = self.records.get(&issue) {
             if at < existing.recorded_at {
@@ -1539,16 +1568,106 @@ impl LifecycleLedger {
                 state,
                 held_reason: None,
                 recorded_at: at,
+                attempts: 0,
+                dispatched_at: None,
             },
         );
         true
     }
 
+    /// Record a fresh dispatch for the entry (#4451): flag it in flight
+    /// until an outcome is recorded. The attempt count is deliberately NOT
+    /// advanced here — a dispatch that is still running has not yet failed,
+    /// and the count only advances when a run ends without a patch
+    /// ([`Self::record_failed`]). The state and any hold are preserved.
+    /// Refused when the stamp is older than the record's current one: a
+    /// stale dispatch cannot rewind the record.
+    pub fn record_attempt(&mut self, issue: u64, at: u64) -> bool {
+        let existing = self.records.get(&issue).cloned().unwrap_or(EntryRecord {
+            state: EntryState::Queued,
+            held_reason: None,
+            recorded_at: 0,
+            attempts: 0,
+            dispatched_at: None,
+        });
+        if at < existing.recorded_at {
+            return false;
+        }
+        self.records.insert(
+            issue,
+            EntryRecord {
+                state: existing.state,
+                held_reason: existing.held_reason,
+                recorded_at: at,
+                attempts: existing.attempts,
+                dispatched_at: Some(at),
+            },
+        );
+        true
+    }
+
+    /// Record that a run ended without a patch (#4451): advance the attempt
+    /// count and clear the in-flight flag. The state and any hold are
+    /// preserved — a failed run is not evidence of success, the entry stays
+    /// `queued`, and the bound is what stops the redispatch. The count is on
+    /// dispatches that ended with no patch, so a run that never reports an
+    /// outcome neither advances the count nor is redispatched: it sits in
+    /// flight, named on every tick. Refused for terminal entries and for
+    /// stamps older than the record's current one. Returns the new attempt
+    /// count.
+    pub fn record_failed(&mut self, issue: u64, at: u64) -> Option<u64> {
+        if self.state_of(issue).is_terminal() {
+            return None;
+        }
+        let existing = self.records.get(&issue).cloned().unwrap_or(EntryRecord {
+            state: EntryState::Queued,
+            held_reason: None,
+            recorded_at: 0,
+            attempts: 0,
+            dispatched_at: None,
+        });
+        if at < existing.recorded_at {
+            return None;
+        }
+        let attempts = existing.attempts.saturating_add(1);
+        self.records.insert(
+            issue,
+            EntryRecord {
+                state: existing.state,
+                held_reason: existing.held_reason,
+                recorded_at: at,
+                attempts,
+                dispatched_at: None,
+            },
+        );
+        Some(attempts)
+    }
+
+    /// The attempt count for one entry: fresh dispatches recorded since the
+    /// last reset. Zero for an entry the ledger has never seen.
+    pub fn attempts_of(&self, issue: u64) -> u64 {
+        self.records
+            .get(&issue)
+            .map(|record| record.attempts)
+            .unwrap_or(0)
+    }
+
+    /// When the entry's current run was dispatched, if it is in flight:
+    /// a fresh dispatch was recorded and no outcome since. `None` when
+    /// nothing is running for it.
+    pub fn in_flight_since(&self, issue: u64) -> Option<u64> {
+        self.records
+            .get(&issue)
+            .and_then(|record| record.dispatched_at)
+    }
+
     /// Hold a non-terminal entry with the reason. The state is preserved — a
     /// held `produced` entry is still a `produced` entry — and the hold is
     /// what the next tick reports as the skip reason. An entry the ledger has
-    /// never seen is created as `queued` and held. Refused when the reason is
-    /// empty, the entry is terminal, or the stamp is older than the record.
+    /// never seen is created as `queued` and held. The attempt count and the
+    /// in-flight flag are preserved: holding an entry does not erase its
+    /// failures. Refused when the reason is empty, the entry is terminal, or
+    /// the stamp is older than the record.
     pub fn hold(&mut self, issue: u64, reason: &str, at: u64) -> bool {
         if reason.trim().is_empty() {
             return false;
@@ -1562,12 +1681,16 @@ impl LifecycleLedger {
                 return false;
             }
         }
+        let attempts = self.attempts_of(issue);
+        let dispatched_at = self.in_flight_since(issue);
         self.records.insert(
             issue,
             EntryRecord {
                 state,
                 held_reason: Some(reason.trim().to_string()),
                 recorded_at: at,
+                attempts,
+                dispatched_at,
             },
         );
         true
@@ -1575,8 +1698,13 @@ impl LifecycleLedger {
 
     /// Clear a hold. The state is preserved, so a released `produced` entry
     /// re-enters the next tick as a conversion, not a fresh dispatch.
-    /// Idempotent on an entry that is not held. Refused when there is no
-    /// record to release or the entry is terminal.
+    /// Release is also the operator's explicit re-arm after triage (#4451):
+    /// it resets the attempt count and clears the in-flight flag, so a
+    /// released entry gets a full bound of fresh dispatches again. An entry
+    /// held over the dispatch bound re-arms only this way — the bound is on
+    /// attempts, and triage is what earns a new budget. Idempotent on an
+    /// entry that is not held. Refused when there is no record to release or
+    /// the entry is terminal.
     pub fn release(&mut self, issue: u64, at: u64) -> bool {
         let Some(existing) = self.records.get(&issue) else {
             return false;
@@ -1590,6 +1718,8 @@ impl LifecycleLedger {
         let mut record = existing.clone();
         record.held_reason = None;
         record.recorded_at = at;
+        record.attempts = 0;
+        record.dispatched_at = None;
         self.records.insert(issue, record);
         true
     }
@@ -1679,6 +1809,14 @@ pub enum SkipReason {
     /// The entry is terminal: the converted work should leave the queue, and
     /// the tick names it instead of dispatching it again.
     Converted,
+    /// The entry is in flight: a fresh dispatch was recorded and no outcome
+    /// since. The tick waits for the result rather than redispatching a run
+    /// that is still going (#4451).
+    InFlight { dispatched_at: u64 },
+    /// The entry was dispatched `attempts` times without producing a patch
+    /// and `bound` is the cap it has reached. It is held — with the count
+    /// and the reason — not redispatched (#4451).
+    AttemptBoundExceeded { attempts: u64, bound: u64 },
 }
 
 impl SkipReason {
@@ -1687,6 +1825,9 @@ impl SkipReason {
         match self {
             Self::Held { state, .. } => *state,
             Self::Converted => EntryState::Converted,
+            // Both are fresh-dispatch states: attempts only accumulate on
+            // queued entries, and a stamped outcome resets them.
+            Self::InFlight { .. } | Self::AttemptBoundExceeded { .. } => EntryState::Queued,
         }
     }
 
@@ -1695,6 +1836,12 @@ impl SkipReason {
         match self {
             Self::Held { reason, state } => format!("held [{}]: {reason}", state.as_str()),
             Self::Converted => "converted [terminal]: should leave the queue".to_string(),
+            Self::InFlight { dispatched_at } => format!(
+                "in flight: dispatched at {dispatched_at}, no outcome recorded — not redispatched"
+            ),
+            Self::AttemptBoundExceeded { attempts, bound } => format!(
+                "held [queued]: dispatch bound — {attempts} dispatches with no patch (bound {bound}); held for triage, not redispatched"
+            ),
         }
     }
 }
@@ -1722,18 +1869,50 @@ pub struct DispatchTick {
 }
 
 impl DispatchTick {
-    /// Join the queue with the lifecycle ledger, in queue order.
-    ///
-    /// Per entry: held → skipped, carrying the hold reason and the state it
-    /// was held in; `converted` → skipped as terminal; `produced` →
-    /// dispatched with [`DispatchAction::Convert`]; `queued` (the default) →
-    /// dispatched with [`DispatchAction::Dispatch`].
+    /// Join the queue with the lifecycle ledger, in queue order, enforcing
+    /// the default dispatch bound ([`DEFAULT_MAX_DISPATCH_ATTEMPTS`]).
     pub fn run(queue: &QueueFile, lifecycle: &LifecycleLedger) -> Self {
+        Self::run_bounded(queue, lifecycle, DEFAULT_MAX_DISPATCH_ATTEMPTS)
+    }
+
+    /// Join the queue with the lifecycle ledger, in queue order, with an
+    /// explicit dispatch bound (#4451).
+    ///
+    /// Per entry: `converted` → skipped as terminal; attempts at or over the
+    /// bound → skipped over the dispatch bound, carrying the count and the
+    /// bound; held → skipped, carrying the hold reason and the state it was
+    /// held in; a recorded fresh dispatch with no outcome → skipped in
+    /// flight; `produced` → dispatched with [`DispatchAction::Convert`];
+    /// `queued` (the default) → dispatched with [`DispatchAction::Dispatch`].
+    ///
+    /// The bound is checked before the hold: an entry held over the bound
+    /// keeps reporting as over the bound on every run, so the skip is never
+    /// silently re-labelled a plain hold. The tick is pure and only reports;
+    /// [`Self::apply_to_ledger`] is what makes its decisions durable.
+    pub fn run_bounded(queue: &QueueFile, lifecycle: &LifecycleLedger, bound: u64) -> Self {
         let mut dispatched = Vec::new();
         let mut skipped = Vec::new();
         for &issue in &queue.entries {
             let state = lifecycle.state_of(issue);
-            if let Some(record) = lifecycle.record_of(issue) {
+            if state == EntryState::Converted {
+                skipped.push(SkippedEntry {
+                    issue,
+                    reason: SkipReason::Converted,
+                });
+                continue;
+            }
+            let record = lifecycle.record_of(issue);
+            if let Some(record) = record {
+                if record.attempts >= bound {
+                    skipped.push(SkippedEntry {
+                        issue,
+                        reason: SkipReason::AttemptBoundExceeded {
+                            attempts: record.attempts,
+                            bound,
+                        },
+                    });
+                    continue;
+                }
                 if let Some(reason) = &record.held_reason {
                     skipped.push(SkippedEntry {
                         issue,
@@ -1744,28 +1923,57 @@ impl DispatchTick {
                     });
                     continue;
                 }
+                if let Some(dispatched_at) = record.dispatched_at {
+                    skipped.push(SkippedEntry {
+                        issue,
+                        reason: SkipReason::InFlight { dispatched_at },
+                    });
+                    continue;
+                }
             }
-            if state == EntryState::Converted {
-                skipped.push(SkippedEntry {
-                    issue,
-                    reason: SkipReason::Converted,
-                });
-            } else {
-                dispatched.push(DispatchedEntry {
-                    issue,
-                    state,
-                    action: if state == EntryState::Produced {
-                        DispatchAction::Convert
-                    } else {
-                        DispatchAction::Dispatch
-                    },
-                });
-            }
+            dispatched.push(DispatchedEntry {
+                issue,
+                state,
+                action: if state == EntryState::Produced {
+                    DispatchAction::Convert
+                } else {
+                    DispatchAction::Dispatch
+                },
+            });
         }
         Self {
             dispatched,
             skipped,
         }
+    }
+
+    /// The mutating half of the tick (#4451): record this tick's decisions in
+    /// the ledger so they survive the dispatcher process. Every fresh
+    /// dispatch advances the entry's attempt count and flags it in flight;
+    /// every entry skipped over the dispatch bound is held with the count
+    /// and the reason, so the next tick — and every human looking at the
+    /// ledger — sees it as "repeatedly failed", not silently re-queued.
+    /// Returns the number of ledger records written, so a caller with zero
+    /// changes can skip the write.
+    pub fn apply_to_ledger(&self, lifecycle: &mut LifecycleLedger, at: u64) -> usize {
+        let mut written = 0;
+        for entry in &self.dispatched {
+            if entry.action == DispatchAction::Dispatch && lifecycle.record_attempt(entry.issue, at)
+            {
+                written += 1;
+            }
+        }
+        for entry in &self.skipped {
+            if let SkipReason::AttemptBoundExceeded { attempts, bound } = entry.reason {
+                let reason = format!(
+                    "dispatch bound: {attempts} dispatches with no patch (bound {bound}) — held for triage, not redispatched until released"
+                );
+                if lifecycle.hold(entry.issue, &reason, at) {
+                    written += 1;
+                }
+            }
+        }
+        written
     }
 
     pub fn dispatched(&self) -> &[DispatchedEntry] {
@@ -1814,6 +2022,24 @@ impl DispatchTick {
             .count()
     }
 
+    /// The skipped entries that are in flight: dispatched, outcome pending.
+    pub fn in_flight_count(&self) -> usize {
+        self.skipped
+            .iter()
+            .filter(|entry| matches!(entry.reason, SkipReason::InFlight { .. }))
+            .count()
+    }
+
+    /// The skipped entries that exceeded the dispatch bound (#4451). The run
+    /// must report this count — a silent skip reproduces the invisibility
+    /// the bound exists to remove.
+    pub fn over_bound_count(&self) -> usize {
+        self.skipped
+            .iter()
+            .filter(|entry| matches!(entry.reason, SkipReason::AttemptBoundExceeded { .. }))
+            .count()
+    }
+
     /// The per-entry report: one summary line, then one line per entry.
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![self.summary_line()];
@@ -1833,25 +2059,64 @@ impl DispatchTick {
         lines
     }
 
+    /// The non-zero skip categories, in fixed order. They partition every
+    /// skip reason, so a non-empty skip set always names at least one.
+    fn skip_categories(&self) -> String {
+        let mut categories = Vec::new();
+        if self.held_count() > 0 {
+            categories.push(format!("{} held", self.held_count()));
+        }
+        if self.converted_count() > 0 {
+            categories.push(format!("{} converted", self.converted_count()));
+        }
+        if self.in_flight_count() > 0 {
+            categories.push(format!("{} in flight", self.in_flight_count()));
+        }
+        if self.over_bound_count() > 0 {
+            categories.push(format!("{} over dispatch bound", self.over_bound_count()));
+        }
+        categories.join(", ")
+    }
+
     fn summary_line(&self) -> String {
         if self.dispatched.is_empty() && self.skipped.is_empty() {
             return "dispatch tick: queue empty — nothing to dispatch".to_string();
         }
         if self.dispatched.is_empty() {
             return format!(
-                "dispatch tick: nothing dispatched — {} entries skipped ({} held, {} converted)",
+                "dispatch tick: nothing dispatched — {} entries skipped ({})",
                 self.skipped.len(),
-                self.held_count(),
-                self.converted_count(),
+                self.skip_categories(),
             );
         }
-        format!(
+        // The over-bound and in-flight counts ride in the summary even when
+        // other entries dispatched: a silent skip reproduces the
+        // invisibility the dispatch bound exists to remove (#4451).
+        let notable: Vec<String> = [
+            (
+                self.in_flight_count() > 0,
+                format!("{} in flight", self.in_flight_count()),
+            ),
+            (
+                self.over_bound_count() > 0,
+                format!("{} over dispatch bound", self.over_bound_count()),
+            ),
+        ]
+        .into_iter()
+        .filter(|(present, _)| *present)
+        .map(|(_, text)| text)
+        .collect();
+        let mut line = format!(
             "dispatch tick: {} dispatched ({} fresh, {} convert), {} skipped",
             self.dispatched.len(),
             self.fresh_count(),
             self.convert_count(),
             self.skipped.len(),
-        )
+        );
+        if !notable.is_empty() {
+            line.push_str(&format!(" ({})", notable.join(", ")));
+        }
+        line
     }
 
     pub fn to_json(&self) -> String {
@@ -2338,5 +2603,248 @@ mod lifecycle_tests {
         assert_eq!(held, back);
         let empty = LifecycleLedger::from_json(r#"{"records":{}}"#).expect("empty ledger parses");
         assert!(empty.is_empty());
+    }
+}
+
+// ── Dispatch bound (#4451) ────────────────────────────────────────────────
+
+#[cfg(test)]
+mod dispatch_bound_tests {
+    use super::*;
+
+    const BOUND: u64 = 3;
+
+    fn queue_with(entries: &[u64]) -> QueueFile {
+        QueueFile {
+            entries: entries.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    /// One dispatch cycle: run the tick over the ledger, then make the
+    /// tick's decisions durable.
+    fn dispatch_once(ledger: &mut LifecycleLedger, queue: &QueueFile, at: u64) -> DispatchTick {
+        let tick = DispatchTick::run_bounded(queue, ledger, BOUND);
+        tick.apply_to_ledger(ledger, at);
+        tick
+    }
+
+    #[test]
+    fn fresh_dispatches_flag_in_flight_without_advancing_the_count() {
+        let mut ledger = LifecycleLedger::new();
+        let queue = queue_with(&[101, 102]);
+
+        let tick = dispatch_once(&mut ledger, &queue, 100);
+        assert_eq!(tick.fresh_count(), 2);
+        // A running dispatch has not failed yet: only a no-patch outcome
+        // advances the count.
+        assert_eq!(ledger.attempts_of(101), 0);
+        assert_eq!(ledger.in_flight_since(101), Some(100));
+
+        // The next tick must not redispatch a run that is still going: the
+        // "no patch because in flight" state is explicit, not inferred from
+        // the absence of a file.
+        let next = DispatchTick::run_bounded(&queue, &ledger, BOUND);
+        assert_eq!(next.in_flight_count(), 2);
+        assert!(next.dispatched().is_empty());
+        assert_eq!(
+            next.skipped()[0].reason,
+            SkipReason::InFlight { dispatched_at: 100 }
+        );
+        assert_eq!(
+            next.lines()[0],
+            "dispatch tick: nothing dispatched — 2 entries skipped (2 in flight)"
+        );
+        // Nothing new to record: a second pass writes nothing, and a running
+        // dispatch has not failed, so the count has not advanced.
+        assert_eq!(next.apply_to_ledger(&mut ledger, 110), 0);
+        assert_eq!(ledger.attempts_of(101), 0);
+    }
+
+    #[test]
+    fn failed_outcomes_advance_the_count_and_clear_in_flight() {
+        let mut ledger = LifecycleLedger::new();
+        let queue = queue_with(&[101]);
+
+        for (attempt, at) in [100, 110, 120].into_iter().enumerate() {
+            let tick = dispatch_once(&mut ledger, &queue, at);
+            assert_eq!(tick.fresh_count(), 1, "attempt {attempt} dispatches");
+            // While in flight, a second tick must not redispatch the run.
+            let mid = DispatchTick::run_bounded(&queue, &ledger, BOUND);
+            assert_eq!(
+                mid.skipped()[0].reason,
+                SkipReason::InFlight { dispatched_at: at }
+            );
+            // The run ends without a patch.
+            let count = ledger.record_failed(101, at + 5).expect("failed recorded");
+            assert_eq!(count, (attempt + 1) as u64);
+            assert_eq!(ledger.in_flight_since(101), None);
+        }
+
+        // Three dispatches, no patch: the fourth is refused and the entry is
+        // held, with the count and the reason, not redispatched.
+        let held_tick = DispatchTick::run_bounded(&queue, &ledger, BOUND);
+        assert!(held_tick.dispatched().is_empty());
+        assert_eq!(
+            held_tick.skipped()[0].reason,
+            SkipReason::AttemptBoundExceeded {
+                attempts: 3,
+                bound: BOUND
+            }
+        );
+        assert_eq!(
+            held_tick.lines()[0],
+            "dispatch tick: nothing dispatched — 1 entries skipped (1 over dispatch bound)"
+        );
+        assert_eq!(held_tick.apply_to_ledger(&mut ledger, 200), 1);
+        let reason = ledger
+            .record_of(101)
+            .and_then(|record| record.held_reason.as_deref())
+            .expect("the hold is durable");
+        assert!(reason.contains("3 dispatches with no patch"), "{reason}");
+        assert!(reason.contains("bound 3"), "{reason}");
+
+        // The bound is checked before the hold: every later run keeps
+        // reporting the skip as over the bound, never as a plain hold.
+        let again = DispatchTick::run_bounded(&queue, &ledger, BOUND);
+        assert_eq!(
+            again.skipped()[0].reason,
+            SkipReason::AttemptBoundExceeded {
+                attempts: 3,
+                bound: BOUND
+            }
+        );
+        assert_eq!(again.over_bound_count(), 1);
+    }
+
+    #[test]
+    fn release_rearms_a_bound_held_entry_with_a_fresh_budget() {
+        let mut ledger = LifecycleLedger::new();
+        let queue = queue_with(&[101]);
+        for at in [100, 110, 120] {
+            let _ = dispatch_once(&mut ledger, &queue, at);
+            ledger.record_failed(101, at + 5).expect("failed recorded");
+        }
+        let bound_tick = DispatchTick::run_bounded(&queue, &ledger, BOUND);
+        assert_eq!(bound_tick.over_bound_count(), 1);
+        bound_tick.apply_to_ledger(&mut ledger, 200);
+
+        // Triage: the operator releases the hold. The entry gets a fresh
+        // budget, not a continuation of the old count.
+        assert!(ledger.release(101, 210));
+        assert_eq!(ledger.attempts_of(101), 0);
+        let rearmed = DispatchTick::run_bounded(&queue, &ledger, BOUND);
+        assert_eq!(rearmed.fresh_count(), 1);
+
+        // Without the release, the bound holds: releasing is the only path
+        // back to dispatch.
+        let mut stuck = LifecycleLedger::new();
+        for at in [100, 110, 120] {
+            let _ = dispatch_once(&mut stuck, &queue, at);
+            stuck.record_failed(101, at + 5).expect("failed recorded");
+        }
+        let stuck_tick = DispatchTick::run_bounded(&queue, &stuck, BOUND);
+        stuck_tick.apply_to_ledger(&mut stuck, 200);
+        let still_bound = DispatchTick::run_bounded(&queue, &stuck, BOUND);
+        assert_eq!(
+            still_bound.over_bound_count(),
+            1,
+            "without release the bound holds"
+        );
+    }
+
+    #[test]
+    fn a_produced_stamp_resets_attempts_and_clears_in_flight() {
+        let mut ledger = LifecycleLedger::new();
+        let queue = queue_with(&[101]);
+        dispatch_once(&mut ledger, &queue, 100);
+        ledger.record_failed(101, 110).expect("failed recorded");
+        assert_eq!(ledger.attempts_of(101), 1);
+
+        // The patch lands: the no-patch loop is broken and the count is
+        // evidence no longer needed.
+        assert!(ledger.record(101, EntryState::Produced, 120));
+        assert_eq!(ledger.attempts_of(101), 0);
+        assert_eq!(ledger.in_flight_since(101), None);
+        let tick = DispatchTick::run_bounded(&queue, &ledger, BOUND);
+        assert_eq!(tick.convert_count(), 1);
+        assert!(tick.skipped().is_empty());
+    }
+
+    #[test]
+    fn over_bound_is_reported_even_when_other_entries_dispatch() {
+        let mut ledger = LifecycleLedger::new();
+        let queue = queue_with(&[101, 102]);
+        for at in [100, 110, 120] {
+            ledger.record_failed(101, at).expect("failed recorded");
+        }
+
+        let tick = DispatchTick::run_bounded(&queue, &ledger, BOUND);
+        assert_eq!(tick.fresh_count(), 1, "102 is still dispatched");
+        assert_eq!(tick.over_bound_count(), 1);
+        assert_eq!(
+            tick.lines()[0],
+            "dispatch tick: 1 dispatched (1 fresh, 0 convert), 1 skipped (1 over dispatch bound)"
+        );
+    }
+
+    #[test]
+    fn hold_preserves_the_attempt_count_and_in_flight_flag() {
+        let mut ledger = LifecycleLedger::new();
+        assert!(ledger.record_attempt(101, 100));
+        assert_eq!(ledger.record_failed(101, 105), Some(1));
+        assert!(ledger.record_attempt(101, 110));
+        assert_eq!(ledger.record_failed(101, 115), Some(2));
+
+        // A manual hold preserves the failures; the in-flight flag too.
+        assert!(ledger.record_attempt(101, 120));
+        assert!(ledger.hold(101, "waiting on dependency", 125));
+        assert_eq!(ledger.attempts_of(101), 2);
+        assert_eq!(ledger.in_flight_since(101), Some(120));
+
+        // A failed outcome advances the count and clears the flag.
+        assert_eq!(ledger.record_failed(101, 130), Some(3));
+        assert_eq!(ledger.in_flight_since(101), None);
+    }
+
+    #[test]
+    fn failed_is_refused_for_terminal_and_stale_stamps() {
+        let mut ledger = LifecycleLedger::new();
+        assert!(ledger.record(110, EntryState::Converted, 100));
+        assert_eq!(ledger.record_failed(110, 110), None);
+
+        let mut stale = LifecycleLedger::new();
+        assert!(stale.record_attempt(101, 200));
+        assert_eq!(stale.record_failed(101, 100), None, "stale stamp refused");
+        assert_eq!(stale.attempts_of(101), 0);
+    }
+
+    #[test]
+    fn attempt_fields_survive_the_durable_form_and_absent_fields_default() {
+        let mut ledger = LifecycleLedger::new();
+        assert!(ledger.record_attempt(101, 100));
+        assert_eq!(ledger.record_failed(101, 105), Some(1));
+        assert!(ledger.record_attempt(101, 110));
+        assert!(ledger.hold(
+            101,
+            "dispatch bound: 1 dispatches with no patch (bound 3)",
+            120
+        ));
+
+        let text = ledger.to_json();
+        let back = LifecycleLedger::from_json(&text).expect("ledger json parses");
+        assert_eq!(ledger, back);
+        assert_eq!(back.attempts_of(101), 1);
+        assert_eq!(back.in_flight_since(101), Some(110));
+
+        // A ledger written before #4451 has no attempt fields at all: it
+        // parses, and the entry reads as untried, never as failed.
+        let old =
+            LifecycleLedger::from_json(r#"{"records":{"101":{"state":"queued","recorded_at":5}}}"#)
+                .expect("pre-4451 ledger parses");
+        assert_eq!(old.attempts_of(101), 0);
+        assert_eq!(old.in_flight_since(101), None);
+        let tick = DispatchTick::run_bounded(&queue_with(&[101]), &old, BOUND);
+        assert_eq!(tick.fresh_count(), 1);
     }
 }
