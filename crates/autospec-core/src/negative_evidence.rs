@@ -45,6 +45,27 @@
 //!    read** ([`CoverageLimit`]). "GitHub code search does not index private
 //!    repositories and returns zero, not an error" is a fact worth stating
 //!    once rather than rediscovering.
+//!
+//! A second incident (issue #4446) is about the pattern rather than the
+//! tool: `grep 'worktree add\|worktree_add\|create_worktree\|add_worktree'` over
+//! a file that creates the executor worktree at four call sites, spelled
+//! `git_with_path(repo, &["worktree", "add", "--quiet"], ...)` — an argv
+//! slice, in which `worktree add` as adjacent words never appears and never
+//! could. All four alternates shared one assumption (the tokens are adjacent
+//! in the source), so the "four-way" search was one failed test. The
+//! invariants here make that checkable too:
+//!
+//! 5. **A negative grep is a property of the pattern until proven a property
+//!    of the code.** Discharge it in two steps, in this order: search the
+//!    **broadest single token** the concept must contain ([`DischargeSteps`],
+//!    [`discharge`]) — it cannot be over-narrowed by a guess about form —
+//!    then narrow. Step 1 empty: the negative is real
+//!    ([`DischargeVerdict::NegativeIsReal`]). Step 1 hits, step 2 empty: the
+//!    pattern removed them
+//!    ([`DischargeVerdict::PatternRemovedThem`]).
+//! 6. **Alternates that share one structural assumption provide one test,
+//!    not several** ([`Alternates`]). Adjacency, word order, casing, "it is
+//!    a function name": the assumption, not the spelling, is what failed.
 
 /// How the question is answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,5 +341,175 @@ impl CoverageLimit {
     /// The line to record it under: `limit: <tool> — <limit>`.
     pub fn line(&self) -> String {
         format!("coverage limit: {} — {}", self.tool, self.limit)
+    }
+}
+
+// ── Issue #4446: a negative grep is a property of the pattern until proven a
+// property of the code ─────────────────────────────────────────────────────
+
+/// A multi-alternate search pattern, and the structural assumption its
+/// alternates share, if any (issue #4446).
+///
+/// The incident pattern — `worktree add|worktree_add|create_worktree|
+/// add_worktree` — looks like four tests of four spellings. Every alternate
+/// encodes the same assumption: the two tokens are adjacent in the source
+/// text, as prose, snake_case, or a function name. The codebase spells the
+/// operation as an argv slice (`&["worktree", "add"]`), where adjacency never
+/// appears. Breadth across spellings of one wrong assumption is one degree
+/// of freedom, not four.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alternates {
+    /// The alternates as written (`["worktree add", "worktree_add", ...]`).
+    pub alternates: Vec<String>,
+    /// The structural assumption every alternate encodes (adjacency, word
+    /// order, casing, "it is a function name"). `None` when the alternates
+    /// do not share one — in which case each alternate really tests a
+    /// different form.
+    pub shared_assumption: Option<String>,
+}
+
+impl Alternates {
+    /// Construct the pattern record. At least two alternates are mandatory:
+    /// a one-token pattern has no breadth to misread, and an empty pattern
+    /// is not a pattern.
+    pub fn new(alternates: Vec<String>, shared_assumption: Option<String>) -> Option<Self> {
+        if alternates.len() < 2 || alternates.iter().any(|a| a.trim().is_empty()) {
+            return None;
+        }
+        Some(Self {
+            alternates,
+            shared_assumption,
+        })
+    }
+
+    /// How many independent tests this pattern actually runs.
+    ///
+    /// Alternates that share one structural assumption all pass or fail on
+    /// that assumption, so the pattern is one test however many spellings it
+    /// looks like. Without a shared assumption, each alternate tests a
+    /// different form and the count is honest.
+    pub fn effective_tests(&self) -> usize {
+        match &self.shared_assumption {
+            Some(_) => 1,
+            None => self.alternates.len(),
+        }
+    }
+
+    /// The smell, when the pattern looks like several tests and is one.
+    ///
+    /// `None` when the alternates do not share a structural assumption: the
+    /// breadth is real and there is nothing to flag.
+    pub fn smell(&self) -> Option<String> {
+        match &self.shared_assumption {
+            Some(assumption) => Some(format!(
+                "smell: the {} alternates share one assumption ({assumption}) — one test, not {}",
+                self.alternates.len(),
+                self.alternates.len()
+            )),
+            None => None,
+        }
+    }
+}
+
+/// The two-step discharge of a negative search (issue #4446).
+///
+/// The step order is what matters: step 1 searches the **broadest single
+/// token** the concept must contain — here just `worktree` — which cannot be
+/// over-narrowed by a guess about form. Step 2 runs the narrow pattern, as
+/// written. Reporting the negative as a property of the code requires
+/// showing the search was capable of finding the thing; that is what these
+/// two hit counts, in this order, show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DischargeSteps {
+    /// The broadest single token the concept must contain (step 1).
+    pub broad_token: String,
+    /// Hits step 1 returned over the source.
+    pub broad_hits: usize,
+    /// The narrow pattern, as written (step 2).
+    pub pattern: String,
+    /// Hits step 2 returned over the source.
+    pub pattern_hits: usize,
+}
+
+/// What the two-step discharge shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DischargeVerdict {
+    /// Step 1 returned nothing: the broadest token the concept must contain
+    /// is absent, so the negative is real — nothing the pattern could have
+    /// removed.
+    NegativeIsReal {
+        /// The broadest token (step 1).
+        token: String,
+        /// The narrow pattern (step 2).
+        pattern: String,
+    },
+    /// Step 1 returned hits and step 2 returned none: the narrowing is what
+    /// removed them. The finding is about the pattern, not about the code,
+    /// and the negative may not be reported as a property of the code.
+    PatternRemovedThem {
+        /// The broadest token (step 1).
+        token: String,
+        /// The narrow pattern (step 2).
+        pattern: String,
+        /// How many hits step 1 returned and the pattern removed.
+        broad_hits: usize,
+    },
+    /// Step 2 returned hits: the thing was found. There is no negative to
+    /// discharge.
+    Found {
+        /// The narrow pattern (step 2).
+        pattern: String,
+        /// How many hits the pattern returned.
+        pattern_hits: usize,
+    },
+}
+
+impl DischargeVerdict {
+    /// One-line rendering for a review, a closeout, or an investigation
+    /// record.
+    pub fn line(&self) -> String {
+        match self {
+            Self::NegativeIsReal { token, pattern } => format!(
+                "OK: the broadest token '{token}' returned 0 and '{pattern}' returned 0 — the negative is real; nothing the pattern could have removed"
+            ),
+            Self::PatternRemovedThem {
+                token,
+                pattern,
+                broad_hits,
+            } => format!(
+                "FAIL: '{token}' returned {broad_hits} hit(s) and '{pattern}' returned 0 — the pattern removed them; the finding is about the pattern, not the code"
+            ),
+            Self::Found { pattern, pattern_hits } => format!(
+                "OK: '{pattern}' returned {pattern_hits} hit(s) — the thing was found; there is no negative to discharge"
+            ),
+        }
+    }
+}
+
+/// Run the two-step discharge in the order that matters (issue #4446).
+///
+/// Step 1 empty → [`DischargeVerdict::NegativeIsReal`]: the negative is
+/// real. Step 1 hits, step 2 empty →
+/// [`DischargeVerdict::PatternRemovedThem`]: the narrowing removed the hits,
+/// and that is a finding about the pattern. Step 2 hits →
+/// [`DischargeVerdict::Found`]: there was no negative to begin with.
+pub fn discharge(steps: &DischargeSteps) -> DischargeVerdict {
+    if steps.pattern_hits > 0 {
+        return DischargeVerdict::Found {
+            pattern: steps.pattern.clone(),
+            pattern_hits: steps.pattern_hits,
+        };
+    }
+    if steps.broad_hits == 0 {
+        DischargeVerdict::NegativeIsReal {
+            token: steps.broad_token.clone(),
+            pattern: steps.pattern.clone(),
+        }
+    } else {
+        DischargeVerdict::PatternRemovedThem {
+            token: steps.broad_token.clone(),
+            pattern: steps.pattern.clone(),
+            broad_hits: steps.broad_hits,
+        }
     }
 }
