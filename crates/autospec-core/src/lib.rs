@@ -113,6 +113,7 @@ pub mod progress_contract;
 pub mod progress_signal;
 pub mod prompt_blocks;
 pub mod prose_closure;
+pub mod queue_gap;
 pub mod rag;
 pub mod rebase_review;
 pub mod rebaseline;

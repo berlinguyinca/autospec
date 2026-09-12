@@ -1050,3 +1050,199 @@ fn guard_archives_fleet_shaped_status_file() {
     assert!(report.contains("  archived to "), "{report}");
     assert!(!issue_dir.exists(), "archived issue dir must be gone");
 }
+
+// ── #4450: the eligible-vs-queued gap ──────────────────────────────────
+//
+// 178 open labelled issues, 90 queued, 75 already covered by a branch or a PR,
+// and 37 in none of the three sets — filed, labelled, and invisible to dispatch.
+// The queue looked healthy because a queue that stopped accepting work looks
+// like a queue that is keeping up. These pin that `queue-gap` prints all four
+// counts every run (zero included), exits 1 on a gap without correcting it, and
+// treats a required component with no implementation as an error that names it.
+
+fn write_issue_list(harness: &Harness, name: &str, text: &str) -> String {
+    let path = harness.temp.join(name);
+    std::fs::write(&path, text).expect("issue list written");
+    path.display().to_string()
+}
+
+#[test]
+fn queue_gap_prints_all_four_counts_when_the_gap_is_zero() {
+    let harness = Harness::new("autospec-dispatch-queue-gap-zero");
+    harness.write_queue(&stamped(0, &["10", "11", "12"]));
+    let eligible = write_issue_list(&harness, "eligible.txt", "10\n11\n12\n");
+    let covered = write_issue_list(&harness, "covered.txt", "12\n");
+
+    let output = harness.dispatch(&[
+        "queue-gap",
+        "--admitted-file",
+        &eligible,
+        "--covered-file",
+        &covered,
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let out = stdout(&output);
+    assert!(
+        out.contains("queue gap: eligible 3, queued 3, has_branch_or_pr 1, missing 0"),
+        "{out}"
+    );
+}
+
+#[test]
+fn queue_gap_defect_exits_one_names_the_issues_and_writes_nothing() {
+    let harness = Harness::new("autospec-dispatch-queue-gap-defect");
+    // The incident in miniature: 4384 and 4385 are filed and labelled but in
+    // neither the queue nor a branch/PR, and nothing said so.
+    let queue_before = stamped(0, &["4382", "4383"]);
+    harness.write_queue(&queue_before);
+    let eligible = write_issue_list(&harness, "eligible.txt", "4382\n4383\n4384\n4385\n");
+    let covered = write_issue_list(&harness, "covered.txt", "4383\n");
+
+    let output = harness.dispatch(&[
+        "queue-gap",
+        "--admitted-file",
+        &eligible,
+        "--covered-file",
+        &covered,
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{} {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let out = stdout(&output);
+    assert!(out.contains("QUEUE GAP DEFECT"), "{out}");
+    assert!(
+        out.contains("eligible 4, queued 2, has_branch_or_pr 1, missing 2"),
+        "{out}"
+    );
+    assert!(out.contains("4384"), "{out}");
+    assert!(out.contains("4385"), "{out}");
+    assert!(out.contains("reported, not corrected"), "{out}");
+    assert_eq!(
+        harness.read_queue(),
+        queue_before,
+        "a reported gap must never be patched by appending to the queue"
+    );
+}
+
+#[test]
+fn queue_gap_requires_the_covered_file_rather_than_over_reporting() {
+    let harness = Harness::new("autospec-dispatch-queue-gap-no-covered");
+    harness.write_queue(&stamped(0, &["10"]));
+    let eligible = write_issue_list(&harness, "eligible.txt", "10\n11\n");
+
+    let output = harness.dispatch(&["queue-gap", "--admitted-file", &eligible]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{} {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("--covered-file"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn queue_gap_missing_component_is_an_error_naming_step_and_command() {
+    let harness = Harness::new("autospec-dispatch-queue-gap-component");
+    harness.write_queue(&stamped(0, &["10"]));
+    let eligible = write_issue_list(&harness, "eligible.txt", "10\n");
+    let covered = write_issue_list(&harness, "covered.txt", "");
+    // The loop step's refresher does not exist under the deployment root.
+    let absent = harness.temp.join("bin/refresh-queue.sh");
+
+    let output = harness.dispatch(&[
+        "queue-gap",
+        "--admitted-file",
+        &eligible,
+        "--covered-file",
+        &covered,
+        "--require-step",
+        &format!("refresh-queue={}", absent.display()),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{} {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let out = stdout(&output);
+    assert!(out.contains("MISSING COMPONENT"), "{out}");
+    assert!(out.contains("refresh-queue"), "{out}");
+    assert!(out.contains("never a no-op"), "{out}");
+    assert!(out.contains("components: 1 required, 1 missing"), "{out}");
+    // The four counts are still printed on the failing run.
+    assert!(out.contains("missing 0"), "{out}");
+}
+
+#[test]
+fn queue_gap_resolved_component_and_zero_gap_exit_clean() {
+    let harness = Harness::new("autospec-dispatch-queue-gap-component-present");
+    harness.write_queue(&stamped(0, &["10"]));
+    let eligible = write_issue_list(&harness, "eligible.txt", "10\n");
+    let covered = write_issue_list(&harness, "covered.txt", "");
+    let present = harness.temp.join("refresh-queue.sh");
+    std::fs::write(&present, "#!/usr/bin/env bash\n").expect("component written");
+
+    let output = harness.dispatch(&[
+        "queue-gap",
+        "--admitted-file",
+        &eligible,
+        "--covered-file",
+        &covered,
+        "--require-step",
+        &format!("refresh-queue={}", present.display()),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let out = stdout(&output);
+    assert!(out.contains("components: 1 required, 0 missing"), "{out}");
+    assert!(!out.contains("MISSING COMPONENT"), "{out}");
+}
+
+#[test]
+fn queue_gap_says_loudly_when_no_component_was_declared() {
+    let harness = Harness::new("autospec-dispatch-queue-gap-no-component");
+    harness.write_queue(&stamped(0, &["10"]));
+    let eligible = write_issue_list(&harness, "eligible.txt", "10\n");
+    let covered = write_issue_list(&harness, "covered.txt", "");
+
+    let output = harness.dispatch(&[
+        "queue-gap",
+        "--admitted-file",
+        &eligible,
+        "--covered-file",
+        &covered,
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stdout(&output).contains("no required components declared"),
+        "{}",
+        stdout(&output)
+    );
+}

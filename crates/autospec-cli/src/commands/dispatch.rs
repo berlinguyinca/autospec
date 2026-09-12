@@ -9,6 +9,13 @@
 //! - `reconcile` — the admission reconciliation: report the count of admitted
 //!   but unschedulable issues; zero is the expected answer, nonzero a failure.
 //!   Exit 0 clean, 1 defect (#3927).
+//! - `queue-gap` — the eligible-vs-queued reconciliation (#4450): computes
+//!   `eligible - queued - has_branch_or_pr` and prints all four counts on every
+//!   run, including the run where the difference is zero. A non-empty difference
+//!   is reported as a defect and never silently appended to the queue, and a
+//!   required component whose implementation is absent is an error naming what
+//!   was missing — no step is a no-op because its script is not there. Exit 0
+//!   clean, 1 gap defect or missing component.
 //! - `stamp` — the producer's call, just before it renames the artifact into
 //!   place: writes `refreshed-at`/`refreshed-by` atomically and beats for the
 //!   producing hop.
@@ -72,6 +79,10 @@ use autospec_core::dispatch_pipeline::{
     DEFAULT_INTERVAL_SECS, DEFAULT_MAX_DISPATCH_ATTEMPTS, DEFAULT_MAX_STALE_INTERVALS,
     QUEUE_ARTIFACT,
 };
+use autospec_core::procedure::{CommandResolver, Procedure, Step};
+use autospec_core::queue_gap::{
+    missing_components, MissingComponent, QueueGap, MISSING_COMPONENTS_NONE,
+};
 use autospec_core::refresh_queue_contract::{
     admit_schedule, assess_artifact, ArtifactStaleness, ScheduleManifest, SchedulingVerdict,
     WalkSummary,
@@ -133,6 +144,10 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
         "schedule",
         "Audit the refresh-queue schedule: manifest coverage, artifact staleness, credential admission (#4320)",
     ),
+    (
+        "queue-gap",
+        "Reconcile eligible vs queued vs branch/PR-covered: four counts every run (exit 1 on a gap or a missing component) (#4450)",
+    ),
 ];
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -146,6 +161,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         }
         "check" => check(rest),
         "reconcile" => reconcile(rest),
+        "queue-gap" => queue_gap(rest),
         "guard" => guard(rest),
         "stage" => super::dispatch_spec::stage(rest),
         "freshness" => super::dispatch_spec::freshness(rest),
@@ -177,7 +193,9 @@ fn print_help() {
     }
     println!("OPTIONS:");
     println!("    --queue <PATH>        Queue artifact (default $HOME/.autospec/{QUEUE_ARTIFACT})");
-    println!("    --admitted-file <PATH>  check/reconcile: the tracker's admitted set, one issue number per line");
+    println!("    --admitted-file <PATH>  check/reconcile/queue-gap: the tracker's admitted (eligible) set, one issue number per line");
+    println!("    --covered-file <PATH>   queue-gap: issues a branch or PR already covers, one issue number per line (required)");
+    println!("    --require-step <NAME=COMMAND>  queue-gap: a component the step needs; repeatable. An unresolved COMMAND fails the run.");
     println!("    --state-file <PATH>   Liveness ledger (default $HOME/.autospec/dispatch-liveness.json)");
     println!(
         "    --topology <PATH>     Topology JSON (default: built-in filing-to-dispatch chain)"
@@ -236,6 +254,7 @@ fn print_help() {
     println!("    {OK_EXIT}  ok        queue fresh (proceed or genuinely idle) and every hop live");
     println!("    {HOLD_EXIT}  hold      queue missing/unstamped/stale, clock rewind, silent hop, or topology defect");
     println!("    {HOLD_EXIT}  stall     tick: queue non-empty but nothing dispatched (every skip named); mark: stamp refused");
+    println!("    {HOLD_EXIT}  gap       queue-gap: eligible work in neither the queue nor a branch/PR, or a required component is absent");
     println!("    2  diagnostic usage error, unreadable artifact, or unparseable ledger");
 }
 
@@ -300,12 +319,155 @@ fn reconcile(args: &[String]) -> Result<(), CommandFailure> {
 /// admitted set is a diagnostic, not an empty one, because the label is the
 /// authoritative gate and an absent label set is not proof there is no work.
 fn read_admitted(path: &Path) -> Result<Vec<u64>, CommandFailure> {
+    read_number_list(path, "admitted", "the label set is required")
+}
+
+/// The same tolerant list reader for any issue-number file, with the reason the
+/// list is required named by the caller. A file that cannot be read is never
+/// read as an empty set: an unreadable input would turn "unknown" into "no gap".
+fn read_number_list(
+    path: &Path,
+    what: &str,
+    why_required: &str,
+) -> Result<Vec<u64>, CommandFailure> {
     let text = fs::read_to_string(path).map_err(|error| {
         CommandFailure::diagnostic(format!(
-            "cannot read admitted file {path:?}: {error} (the label set is required)"
+            "cannot read {what} file {path:?}: {error} ({why_required})"
         ))
     })?;
     Ok(QueueFile::parse(&text).entries)
+}
+
+/// `queue-gap` — the eligible-vs-queued reconciliation (#4450).
+///
+/// The measured incident: 178 open issues carried the eligibility label, 90
+/// were queued, 75 already had a branch or a PR, and 37 were in none of the
+/// three sets — filed, labelled, and invisible. Nothing compared the sets, so
+/// nothing said so: a queue that has quietly stopped accepting work looks
+/// exactly like a queue that is keeping up.
+///
+/// The step prints all four counts on every run — zero included, because the
+/// zero is the evidence the reconciler ran — and exits 1 on a non-empty
+/// difference without correcting it, so the reason issues stopped flowing stays
+/// diagnosable instead of being papered over by an append.
+///
+/// `--require-step NAME=COMMAND` declares a component the step depends on (the
+/// loop step that told an agent to run a refresher script which did not exist is
+/// the named case). A declared command that resolves to no implementation — a
+/// path relative to the current directory, or an absolute one — fails the run
+/// with a line naming both the step and the command.
+fn queue_gap(args: &[String]) -> Result<(), CommandFailure> {
+    let eligible_path = opt_string(args, "--admitted-file")?
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            CommandFailure::diagnostic(
+                "queue-gap needs --admitted-file <PATH> (the eligible set: open issues carrying the eligibility label)",
+            )
+        })?;
+    let covered_path = opt_string(args, "--covered-file")?
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            CommandFailure::diagnostic(
+                "queue-gap needs --covered-file <PATH> (issues a branch or PR already covers); \
+                 without it the gap cannot be computed and would be over-reported",
+            )
+        })?;
+    let eligible = read_number_list(&eligible_path, "eligible", "the gap cannot be computed without it")?;
+    let has_branch_or_pr =
+        read_number_list(&covered_path, "covered", "the gap cannot be computed without it")?;
+    // A queue file that is absent contributes no queued issues: every eligible
+    // issue is then missing, which is the loudest answer, not a silent one.
+    let queued = match read_queue(&queue_path(args)?)? {
+        Some(queue) => queue.entries,
+        None => Vec::new(),
+    };
+
+    let gap = QueueGap::new(eligible, queued, has_branch_or_pr);
+    let procedure = required_procedure(args)?;
+    let resolver = CommandResolver::in_dir(".");
+    let absent = missing_components(&procedure, &|command| resolver.resolves(command));
+
+    if super::is_json(args) {
+        let report = QueueGapReport {
+            gap: gap.clone(),
+            required_components: procedure
+                .steps
+                .iter()
+                .map(|step| step.name.clone())
+                .collect(),
+            missing_components: absent.clone(),
+            defect: gap.is_defect() || !absent.is_empty(),
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|error| CommandFailure::diagnostic(error.to_string()))?
+        );
+    } else {
+        println!("{}", gap.line());
+        if procedure.steps.is_empty() {
+            println!("{MISSING_COMPONENTS_NONE}");
+        } else {
+            println!(
+                "components: {} required, {} missing",
+                procedure.steps.len(),
+                absent.len()
+            );
+            for component in &absent {
+                println!("{}", component.line());
+            }
+        }
+    }
+
+    verdict_exit(gap.is_defect() || !absent.is_empty())
+}
+
+/// The `--json` report for `queue-gap`: the gap, the declared components, and
+/// the absences that made the run a defect.
+#[derive(Serialize)]
+pub(crate) struct QueueGapReport {
+    pub gap: QueueGap,
+    pub required_components: Vec<String>,
+    pub missing_components: Vec<MissingComponent>,
+    pub defect: bool,
+}
+
+/// Build the [`Procedure`] the reconcile requires from its `--require-step` flags.
+///
+/// Each flag carries `NAME=COMMAND`; a manual step cannot be declared here, so
+/// every declaration is a component that must resolve. With no flags the
+/// procedure is empty and the run says out loud that nothing was verified.
+fn required_procedure(args: &[String]) -> Result<Procedure, CommandFailure> {
+    let mut steps = Vec::new();
+    for spec in opt_all(args, "--require-step") {
+        let (name, command) = spec.split_once('=').ok_or_else(|| {
+            CommandFailure::diagnostic(format!(
+                "--require-step needs NAME=COMMAND, got {spec:?}"
+            ))
+        })?;
+        validate_step_name(name)?;
+        if command.trim().is_empty() {
+            return Err(CommandFailure::diagnostic(format!(
+                "--require-step {name} names no command: declare the implementation to resolve, \
+                 or drop the step (an unimplemented step is never a no-op)"
+            )));
+        }
+        steps.push(Step::run(name, command));
+    }
+    Ok(Procedure::new("dispatch-queue-gap", steps))
+}
+
+/// Every value passed to a repeatable flag, in the order given.
+fn opt_all(args: &[String], flag: &str) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter_map(|(index, arg)| {
+            (arg == flag)
+                .then(|| args.get(index + 1))
+                .flatten()
+                .cloned()
+        })
+        .collect()
 }
 
 /// `guard` — the pre-dispatch gate against unconverted output (#3764).

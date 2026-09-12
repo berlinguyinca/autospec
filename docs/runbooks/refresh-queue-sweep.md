@@ -96,6 +96,15 @@ from the stamped queue and the heartbeat line, never from a log's mtime
   --admitted-file <tsv>` reports the admitted-but-unschedulable count;
   nonzero means the queue is behind and the refresh hop must repopulate
   it (issue #3927).
+- **Filed issues never reached dispatch** — 178 labelled issues, 90
+  queued, 75 covered by a branch or PR, and 37 in none of the three sets,
+  reported by nothing (issue #4450). `autospec dispatch queue-gap
+  --admitted-file <path> --covered-file <path>` prints all four counts
+  (`eligible`, `queued`, `has_branch_or_pr`, `missing`) on every run and
+  exits 1 on a non-empty gap without appending the missing issues away.
+  Declare the implementation the step depends on with
+  `--require-step NAME=COMMAND` and an absent one fails the run by name
+  (issue #3772).
 - **Entry point does not resolve** — `scripts/refresh-queue.sh` missing
   from the checkout is a checkout defect, not a missing tool
   (issue #3978). Re-fetch the repo before drawing any conclusion from the
