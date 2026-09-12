@@ -71,14 +71,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 175); // +1: #3483; +2: #3485; +1: #3497; +2: #3535; +1: #3716; +1: #3893; +1: #3210; +1: #3856
+    assert_eq!(frozen_catalog_ids().len(), 176); // +1: #3483; +2: #3485; +1: #3497; +2: #3535; +1: #3716; +1: #3893; +1: #3210; +1: #3856; +1: skill-CLI reference gate (#3813)
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 175);
+    assert_eq!(ids.len(), 176);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 
@@ -942,6 +942,24 @@ fn catalog_assigns_watchdog_gc_to_a_typed_external_batch() {
             ExternalCheck::WatchdogWorktreeGc
         )),
         "check_watchdog_worktree_gc must have a typed external owner"
+    );
+}
+
+#[test]
+fn catalog_assigns_skill_cli_commands_to_a_rust_owner() {
+    // #3813: a skill referencing a nonexistent `autospec` subcommand must
+    // fail validate; the owner resolves references against the command
+    // table the binary dispatches on.
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_skill_cli_commands")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::RustNative(StructuralCheck::SkillCliCommands)),
+        "check_skill_cli_commands must have a direct Rust owner"
     );
 }
 

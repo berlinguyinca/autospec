@@ -570,3 +570,53 @@ fn release_and_qa_verdict_contracts_pass_in_this_repository() {
     StructuralValidator::validate_qa_verdict_contract(&root)
         .expect("repository QA verdict artifact contract passes");
 }
+
+#[test]
+fn skill_cli_references_resolve_against_the_command_table() {
+    StructuralValidator::validate_skill_cli_commands(&fixture("skill-cli-commands"))
+        .expect("every referenced subcommand has a dispatch arm");
+}
+
+#[test]
+fn skill_cli_reference_to_a_missing_subcommand_fails_with_file_and_line() {
+    // The #3806 shape: a consumer requirement naming a subcommand before the
+    // producer shipped. The gate names the file, the line, and the token.
+    let failure =
+        StructuralValidator::validate_skill_cli_commands(&fixture("skill-cli-commands-unknown"))
+            .expect_err("a reference to a nonexistent subcommand fails");
+
+    assert_eq!(
+        failure,
+        "skills/demo/SKILL.md:7: autospec managed-project: unknown autospec subcommand — no dispatch arm in crates/autospec-cli"
+    );
+}
+
+#[test]
+fn skill_cli_references_fail_closed_when_the_command_table_is_absent() {
+    let root = std::env::temp_dir().join(format!(
+        "autospec-skill-cli-no-table-{}",
+        std::process::id()
+    ));
+    let skills = root.join("skills/demo");
+    std::fs::create_dir_all(&skills).unwrap();
+    std::fs::write(
+        skills.join("SKILL.md"),
+        "# demo\n\n```bash\nautospec validate\n```\n",
+    )
+    .unwrap();
+
+    let failure =
+        StructuralValidator::validate_skill_cli_commands(&root).expect_err("no table, no pass");
+
+    assert!(
+        failure.contains("cannot resolve skill CLI references"),
+        "{failure}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn skill_cli_references_resolve_in_this_repository() {
+    StructuralValidator::validate_skill_cli_commands(&workspace_root())
+        .expect("every skill CLI reference in this repository resolves");
+}

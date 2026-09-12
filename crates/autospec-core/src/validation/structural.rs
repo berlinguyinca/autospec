@@ -239,6 +239,7 @@ impl StructuralValidator {
             StructuralCheck::ReferencePointerIntegrity => super::reference_pointer::validate(root),
             StructuralCheck::StartupPreflight => Self::validate_startup_preflight(root),
             StructuralCheck::RustOutputMacros => super::output_macros::validate(root),
+            StructuralCheck::SkillCliCommands => Self::validate_skill_cli_commands(root),
         }
     }
 
@@ -246,6 +247,61 @@ impl StructuralValidator {
         Self::validate_required_trio_files(root)?;
         Self::validate_trio_lockstep(root)?;
         Self::validate_duo_lockstep(root)
+    }
+
+    // #3813: a skill is a program whose interpreter is an agent. A reference
+    // to a CLI subcommand that no dispatch arm accepts is an unresolved
+    // symbol, and nothing else in the gate set checks it — the trio can be
+    // internally consistent (all three harness variants agree, goldens
+    // match) while every reference to the CLI stays unverified. This check
+    // extracts every `autospec <subcommand>` / `${AUTOSPEC_BIN...}
+    // <subcommand>` invocation in `skills/**` and asserts each first-level
+    // subcommand resolves against the command table the binary dispatches
+    // on. It would have failed PR #3806, whose mandate named `portfolio`
+    // before #3432 shipped the command.
+    pub fn validate_skill_cli_commands(root: &Path) -> Result<(), String> {
+        let commands = cli_command_names(root)?;
+        let skills_root = root.join("skills");
+        if !skills_root.is_dir() {
+            return Ok(());
+        }
+        let mut failures = Vec::new();
+        for path in files_under(&skills_root)? {
+            let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+                continue;
+            };
+            let Ok(text) = read(&path) else {
+                continue;
+            };
+            let relative = display_path(root, &path)?;
+            for (line_number, line) in match extension {
+                // Fenced code blocks are where skills write real commands;
+                // prose ("the autospec suite", "an autospec design/spec PR")
+                // is never linted as an invocation. Shell files are scanned
+                // whole, comment lines skipped.
+                "md" => markdown_scannable_lines(&text),
+                "sh" | "bats" => text
+                    .split('\n')
+                    .enumerate()
+                    .filter(|(_, line)| !line.trim_start().starts_with('#'))
+                    .map(|(index, line)| (index + 1, line))
+                    .collect(),
+                _ => Vec::new(),
+            } {
+                for token in cli_invocation_tokens(line) {
+                    if !commands.contains(&token) {
+                        failures.push(format!(
+                            "{relative}:{line_number}: autospec {token}: unknown autospec subcommand — no dispatch arm in crates/autospec-cli"
+                        ));
+                    }
+                }
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     pub fn validate_trio_lockstep(root: &Path) -> Result<(), String> {
@@ -2638,6 +2694,271 @@ fn files_under(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     }
     files.sort();
     Ok(files)
+}
+
+/// The first-level subcommands the `autospec` binary accepts, read from the
+/// single declaration site the dispatch is built from: the pre-table arms in
+/// `crates/autospec-cli/src/main.rs` (`Some("project")`, `Some("portfolio")`)
+/// plus the `commands!` table in `crates/autospec-cli/src/commands/mod.rs`
+/// (one entry per command; `module as "display"` renames the dispatch name).
+/// A built binary accepts exactly this set and nothing else, so resolving
+/// against it needs no build. Fail closed when the table is absent: a
+/// reference that cannot be resolved is not a passing reference.
+fn cli_command_names(root: &Path) -> Result<BTreeSet<String>, String> {
+    let main_rs = root.join("crates/autospec-cli/src/main.rs");
+    let mod_rs = root.join("crates/autospec-cli/src/commands/mod.rs");
+    if !main_rs.is_file() || !mod_rs.is_file() {
+        return Err(
+            "crates/autospec-cli command table missing; cannot resolve skill CLI references"
+                .to_string(),
+        );
+    }
+    let mut names = BTreeSet::new();
+    for line in read(&main_rs)?.lines() {
+        let Some(rest) = line.trim().strip_prefix("Some(\"") else {
+            continue;
+        };
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        let candidate = &rest[..end];
+        if is_cli_command_name(candidate) {
+            names.insert(candidate.to_string());
+        }
+    }
+    for line in commands_table_lines(&read(&mod_rs)?) {
+        let Some(arrow) = line.find(" => ") else {
+            continue;
+        };
+        let lhs = line[..arrow].trim();
+        let candidate = match lhs.split_once(" as ") {
+            Some((_module, display)) => display.trim().trim_matches('"').to_string(),
+            None => lhs.to_string(),
+        };
+        if is_cli_command_name(&candidate) {
+            names.insert(candidate);
+        }
+    }
+    Ok(names)
+}
+
+/// The lines of the `commands! { ... }` table body, excluding the macro
+/// definition itself (whose `=>` patterns are grammar, not commands).
+fn commands_table_lines(document: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut in_table = false;
+    for line in document.lines() {
+        let trimmed = line.trim();
+        if in_table {
+            if trimmed == "}" {
+                break;
+            }
+            lines.push(line);
+        } else if trimmed == "commands! {" {
+            in_table = true;
+        }
+    }
+    lines
+}
+
+fn is_cli_command_name(candidate: &str) -> bool {
+    let mut chars = candidate.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// The scannable lines of a markdown skill file: fenced code blocks with a
+/// bash-family (or no) info string. A `json`, `mermaid`, or `toml` block
+/// never runs.
+fn markdown_scannable_lines(document: &str) -> Vec<(usize, &str)> {
+    let mut lines = Vec::new();
+    let mut in_fence = false;
+    let mut scannable_fence = false;
+    for (index, line) in document.split('\n').enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            if in_fence {
+                in_fence = false;
+            } else {
+                let info = trimmed.trim_start_matches('`').trim();
+                let language = info.split_whitespace().next().unwrap_or("");
+                scannable_fence = matches!(
+                    language.to_ascii_lowercase().as_str(),
+                    "" | "bash" | "sh" | "shell" | "zsh" | "console" | "text"
+                );
+                in_fence = true;
+            }
+            continue;
+        }
+        if in_fence && scannable_fence {
+            lines.push((index + 1, line));
+        }
+    }
+    lines
+}
+
+/// First-level subcommand tokens of `autospec` / `$AUTOSPEC_BIN`
+/// invocations on one line. An invocation only counts in *command
+/// position* — line start, after `;` `&` `|` or a backtick, after `$( `,
+/// after `=` for a variable reference (the `VAR=$(...)` / `VAR="${...}"`
+/// assignment form), or after a shell control word — so prose ("the
+/// autospec suite", "an autospec design/spec PR") is never a candidate.
+/// The token after the binary name is only a command name when the
+/// character following it is an argument boundary, which excludes
+/// `design/spec`, `skills.`, and `autospec:portfolio-item`.
+fn cli_invocation_tokens(line: &str) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while let Some((start, end)) = next_binary_marker(&chars, index) {
+        let is_variable = chars[start] == '$';
+        if is_cli_command_position(&chars, start, is_variable) {
+            // Optional whitespace, then one quote, then a lowercase-starting
+            // command-name run.
+            let mut i = end;
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            if i < chars.len() && (chars[i] == '"' || chars[i] == '\'') {
+                i += 1;
+            }
+            if i < chars.len() && chars[i].is_ascii_lowercase() {
+                let token_start = i;
+                while i < chars.len()
+                    && (chars[i].is_ascii_lowercase()
+                        || chars[i].is_ascii_digit()
+                        || chars[i] == '-')
+                {
+                    i += 1;
+                }
+                let bounded = chars.get(i).is_none_or(|c| {
+                    !c.is_ascii_alphanumeric() && !matches!(c, '_' | '-' | '/' | '.')
+                });
+                if bounded {
+                    tokens.push(chars[token_start..i].iter().collect());
+                }
+            }
+        }
+        index = end;
+    }
+    tokens
+}
+
+/// The next `autospec` binary-name marker at or after `from`: the literal
+/// `autospec` (word-bounded, so `autospec-split` and `homebrew-autospec` do
+/// not qualify) or a `$AUTOSPEC_BIN` / `${AUTOSPEC_BIN...}` reference,
+/// whose token starts at the `$`. Returns the `(start, end)` of the
+/// binary-name token. The literal inside `${AUTOSPEC_BIN:-autospec}` is
+/// never a candidate on its own: the reference starts earlier, and the scan
+/// resumes past its end.
+fn next_binary_marker(chars: &[char], from: usize) -> Option<(usize, usize)> {
+    let text: String = chars.iter().collect();
+    let mut best: Option<(usize, usize)> = None;
+
+    let mut cursor = from;
+    while let Some(found) = text[cursor..].find("AUTOSPEC_BIN") {
+        let a = cursor + found; // index of the 'A'
+        let dollar = if a == 0 {
+            None
+        } else {
+            match (chars.get(a - 1), chars.get(a - 2)) {
+                (Some('$'), _) => Some(a - 1),
+                (Some('{'), Some('$')) => Some(a - 2),
+                _ => None,
+            }
+        };
+        match dollar {
+            Some(start) if chars.get(a - 1) == Some(&'{') => {
+                // `${AUTOSPEC_BIN...}` — the token ends at the closing brace.
+                let end = text[a..]
+                    .find('}')
+                    .map_or(a + "AUTOSPEC_BIN".len(), |close| a + close + 1);
+                consider_marker(&mut best, start, end);
+                cursor = end.max(cursor + 1);
+            }
+            Some(start) => {
+                // `$AUTOSPEC_BIN...` — only the bare name is the binary
+                // variable; `$AUTOSPEC_BIN_DIR` is a different variable.
+                if chars
+                    .get(a + "AUTOSPEC_BIN".len())
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+                {
+                    cursor = a + "AUTOSPEC_BIN".len();
+                    continue;
+                }
+                let end = a + "AUTOSPEC_BIN".len();
+                consider_marker(&mut best, start, end);
+                cursor = end.max(cursor + 1);
+            }
+            None => cursor = a + 1,
+        }
+    }
+
+    cursor = from;
+    while let Some(found) = text[cursor..].find("autospec") {
+        let s = cursor + found;
+        let e = s + "autospec".len();
+        let word_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+        let bounded_before = s
+            .checked_sub(1)
+            .map(|prev| !word_char(chars[prev]))
+            .unwrap_or(true);
+        let bounded_after = chars.get(e).is_none_or(|c| !word_char(*c));
+        if bounded_before && bounded_after {
+            consider_marker(&mut best, s, e);
+            cursor = e;
+        } else {
+            cursor = s + 1;
+        }
+    }
+
+    best
+}
+
+fn consider_marker(best: &mut Option<(usize, usize)>, start: usize, end: usize) {
+    if best.as_ref().is_none_or(|(earliest, _)| start < *earliest) {
+        *best = Some((start, end));
+    }
+}
+
+/// Command position at `chars[start]`: line start, after `;` `&` `|` or a
+/// backtick, after `$( `, after `=` for a variable reference, or after a
+/// shell control word (`if "..." portfolio --help`). Whitespace and quotes
+/// between the marker and the binary name are transparent.
+fn is_cli_command_position(chars: &[char], start: usize, is_variable: bool) -> bool {
+    let mut i = start;
+    loop {
+        if i == 0 {
+            return true;
+        }
+        i -= 1;
+        let c = chars[i];
+        if c.is_whitespace() || chars[i] == '"' || chars[i] == '\'' {
+            continue;
+        }
+        if matches!(c, ';' | '&' | '|' | '`') {
+            return true;
+        }
+        if c == '(' && i > 0 && chars[i - 1] == '$' {
+            return true;
+        }
+        if is_variable && c == '=' {
+            // `VAR=$(...)` / `VAR="${...}"` — the reference assigns a
+            // command substitution, which is command position.
+            return true;
+        }
+        // A word: only a shell control word puts the marker in command
+        // position.
+        let mut j = i;
+        while j > 0 && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+            j -= 1;
+        }
+        let word: String = chars[j..=i].iter().collect();
+        return matches!(
+            word.as_str(),
+            "if" | "elif" | "else" | "while" | "until" | "then" | "do"
+        );
+    }
 }
 
 fn has_ignored_flag_scan_component(root: &Path, path: &Path) -> bool {

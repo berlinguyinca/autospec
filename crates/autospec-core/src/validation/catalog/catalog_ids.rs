@@ -346,4 +346,5 @@ pub(super) const STANDARD_CHECK_IDS: &[&str] = &[
     "check_generated_artifact_integrity",
     "check_cross_language_boundaries",
     "check_shell_lint",
+    "check_skill_cli_commands",
 ];

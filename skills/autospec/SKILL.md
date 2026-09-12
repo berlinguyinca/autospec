@@ -299,11 +299,32 @@ Phase 3 pre-impl gate below.
 
 ## Phase 3 portfolio admission gate
 
-Phase 3 decomposes into issues only through the typed portfolio transaction.
-One verified primary Project must exist before any issue is admitted; the
-apply transaction is the sole provisioning/materialization entry point —
-there are no separate public record or add commands, and no bare `gh issue
-create` fallback for planned issues.
+Phase 3 decomposes into issues through the typed portfolio transaction when
+the binary exposes it; when it does not, the documented `gh issue create`
+path applies. When the portfolio path applies, one verified primary Project
+must exist before any issue is admitted, and the apply transaction is the
+sole provisioning/materialization entry point — there are no separate
+public record or add commands, and no bare `gh issue create` fallback for
+planned issues.
+
+**Probe the capability, do not assert it.** Binaries older than the
+portfolio commands (#3432) do not expose `portfolio`; a missing subcommand
+is a degraded capability, not a Phase 3 blocker, and the fallback must stay
+open while the primary is unavailable:
+
+```bash
+if "${AUTOSPEC_BIN:-autospec}" portfolio --help >/dev/null 2>&1; then
+  PORTFOLIO_AVAILABLE=1
+else
+  PORTFOLIO_AVAILABLE=0
+  printf '%s\n' 'NOTE: autospec portfolio unavailable; using gh issue create path' >&2
+fi
+```
+
+Steps 1-2 run only when `PORTFOLIO_AVAILABLE=1`. When it is 0, file the
+planned issues through the `gh issue create` path used for draft issues
+(each starts as `needs-classify`, never `auto-implement`), and the
+`## Delivery portfolio` handoff in step 3 is omitted for that run.
 
 1. **Freeze the plan (pure validation).** Render the planned YAML manifest —
    source spec, `project_owner`, target repositories, local parent sets,
@@ -315,9 +336,10 @@ create` fallback for planned issues.
    ```
 
    Validation is pure: manifest lint, safety lint, DAG validation, and
-   per-repository read/write capability probes. A non-zero exit blocks Phase
-   3 — fix the manifest and re-run. A repository that cannot accept issues
-   is a blocking prerequisite, never a silently omitted lane.
+   per-repository read/write capability probes. A non-zero exit here (the
+   probe passed, so this is a validation failure, not a missing command)
+   blocks Phase 3 — fix the manifest and re-run. A repository that cannot
+   accept issues is a blocking prerequisite, never a silently omitted lane.
 2. **Apply before filing.** The apply transaction then files, in order: the
    primary umbrella; secondary repository trackers; implementation and
    prerequisite children; the source-repository audit. Every issue starts as
