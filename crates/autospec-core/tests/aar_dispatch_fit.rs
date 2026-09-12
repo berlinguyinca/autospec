@@ -9,8 +9,8 @@
 
 use autospec_core::aar::dispatch_fit::{
     dispatch, mismatched_workers, parse_context_class, redispatch, slots_for_prompt,
-    status_json_with_grant, status_json_with_prompt_size, ContextGrant, DispatchVerdict, Endpoint,
-    MismatchedWorker, NO_ENDPOINT_LARGE_ENOUGH,
+    status_json_with_grant, status_json_with_prompt_size, ContextClass, ContextGrant,
+    DispatchVerdict, Endpoint, MismatchedWorker, NO_ENDPOINT_LARGE_ENOUGH,
 };
 
 /// The exact card line from the issue.
@@ -110,11 +110,14 @@ fn dispatch_prefers_the_largest_context_endpoint_regardless_of_order() {
 
 /// A slot between the pack floor and the ceiling is not enough: it holds the
 /// typical prompt but truncates a ceiling-sized one, so the card is held and
-/// the worker is reported as mismatched (#3749).
+/// the worker is reported as mismatched (#3749). The reported count is the
+/// working context — per-slot minus the output reserve — the room the prompt
+/// actually has (#4351).
 #[test]
 fn a_slot_between_floor_and_ceiling_holds_the_card() {
     let class = parse_context_class(CARD_LINE).unwrap();
-    // 4 slots of 65,536 hold the 65,000 floor but not the 82,000 ceiling.
+    // 4 slots of 65,536 hold the 65,000 floor but not the 82,000 ceiling; the
+    // working context is 65,536 minus the 16,384 output reserve.
     let verdict = dispatch(&class, &[endpoint("4-slot", 4)]);
     let DispatchVerdict::Hold {
         code, mismatched, ..
@@ -125,7 +128,7 @@ fn a_slot_between_floor_and_ceiling_holds_the_card() {
     assert_eq!(code, NO_ENDPOINT_LARGE_ENOUGH);
     assert_eq!(mismatched.len(), 1);
     assert_eq!(mismatched[0].name, "4-slot");
-    assert_eq!(mismatched[0].context_per_slot_tokens, 65_536);
+    assert_eq!(mismatched[0].context_per_slot_tokens, 49_152);
     assert_eq!(mismatched[0].required_tokens, 82_000);
 }
 
@@ -141,7 +144,7 @@ fn a_fleet_with_no_fitting_slot_holds_the_issue() {
     };
     assert_eq!(code, NO_ENDPOINT_LARGE_ENOUGH);
     assert!(
-        rationale.contains("32,768") || rationale.contains("32768"),
+        rationale.contains("16,384") || rationale.contains("16384"),
         "rationale names the largest available slot: {rationale}"
     );
 }
@@ -243,7 +246,9 @@ fn redispatch_holds_when_only_the_lost_class_remains() {
     };
     assert_eq!(mismatched.len(), 1);
     assert_eq!(mismatched[0].name, "4-slot");
-    assert_eq!(mismatched[0].context_per_slot_tokens, 65_536);
+    // The reported count is the working context: 65,536 minus the 16,384
+    // output reserve (#4351).
+    assert_eq!(mismatched[0].context_per_slot_tokens, 49_152);
 }
 
 #[test]
@@ -302,30 +307,67 @@ fn slots_for_prompt_derives_the_parallel_flag() {
     assert_eq!(slots_for_prompt(window, 0), 1);
 }
 
-/// The consumer-side invariant of #3749: for every slot count the launcher
-/// might have chosen, dispatch grants exactly the slots that hold the
-/// ceiling and holds the card for the rest.
+/// The consumer-side invariant of #3749, strengthened by #4351: for every
+/// slot count the launcher might have chosen, dispatch grants exactly the
+/// slots whose *working* context (per-slot minus the completion reserve)
+/// holds the ceiling and holds the card for the rest — a slot that holds the
+/// ceiling but not the ceiling plus the reserve 400s at the boundary.
 #[test]
-fn the_consumer_never_dispatches_below_the_prompt_ceiling() {
+fn the_consumer_never_dispatches_below_the_prompt_ceiling_plus_completion() {
     let class = parse_context_class(CARD_LINE).unwrap();
     for slots in 1..=8u32 {
-        let verdict = dispatch(&class, &[endpoint(&format!("{slots}-slot"), slots)]);
-        let per_slot = 262_144 / slots;
-        if per_slot >= class.ceiling_tokens() {
+        let endpoint = endpoint(&format!("{slots}-slot"), slots);
+        let working = endpoint.working_context_per_slot();
+        let verdict = dispatch(&class, &[endpoint]);
+        if working >= class.ceiling_tokens() {
             assert!(
                 matches!(verdict, DispatchVerdict::Grant(_)),
-                "a {slots}-slot endpoint ({per_slot} tokens/slot) holds the \
-                 82,000 ceiling and must be granted"
+                "a {slots}-slot endpoint ({working} working tokens/slot) holds \
+                 the 82,000 ceiling plus its completion reserve and must be granted"
             );
         } else {
             assert_eq!(
                 held_code(&verdict),
                 NO_ENDPOINT_LARGE_ENOUGH,
-                "a {slots}-slot endpoint ({per_slot} tokens/slot) is below \
-                 the ceiling and must hold"
+                "a {slots}-slot endpoint ({working} working tokens/slot) cannot \
+                 hold the ceiling plus its completion reserve and must hold"
             );
         }
     }
+}
+
+/// A slot that holds the prompt ceiling but not the ceiling plus the
+/// completion reserve is held, not granted: granting it would accept the
+/// request and then refuse it with a 400 at the boundary (issue #4351 — the
+/// 67,529-token compaction request that 400'd on a 65,536 slot).
+#[test]
+fn a_slot_short_only_on_the_completion_reserve_is_held_not_granted() {
+    // A 65,536 slot with a 4,096-token completion reserve leaves 61,440 of
+    // working context. A 62,000-token prompt ceiling fits the full slot (the
+    // old check granted it, then the gateway 400'd) but not the working
+    // context, so it must be held.
+    let class = ContextClass {
+        name: "C62".to_string(),
+        tier: None,
+        pack_min_tokens: 60_000,
+        pack_max_tokens: 62_000,
+    };
+    let slot = Endpoint {
+        name: "edge-slot".to_string(),
+        context_window_tokens: 65_536,
+        parallel_slots: 1,
+        output_reserve_tokens: 4_096,
+    };
+    assert_eq!(slot.context_per_slot(), 65_536);
+    assert_eq!(slot.working_context_per_slot(), 61_440);
+    // The full slot holds the ceiling, so the pre-#4351 check granted it.
+    assert!(slot.context_per_slot() >= class.pack_max_tokens);
+    // The working slot does not, so the card is held instead of 400'ing.
+    assert!(slot.working_context_per_slot() < class.pack_max_tokens);
+    assert_eq!(
+        held_code(&dispatch(&class, &[slot])),
+        NO_ENDPOINT_LARGE_ENOUGH
+    );
 }
 
 /// Undersized capacity is reported as mismatched workers, not silently
@@ -335,17 +377,19 @@ fn mismatched_workers_report_the_unusable_capacity() {
     let required = 82_000u32;
     // fleet(): 8-slot 32,768 / 4-slot 65,536 / 2-slot 131,072.
     let workers = mismatched_workers(&fleet(), required);
+    // Each count is the working context (per-slot minus the 16,384 output
+    // reserve), the room the prompt actually has (#4351).
     assert_eq!(
         workers,
         vec![
             MismatchedWorker {
                 name: "4-slot".to_string(),
-                context_per_slot_tokens: 65_536,
+                context_per_slot_tokens: 49_152,
                 required_tokens: required,
             },
             MismatchedWorker {
                 name: "8-slot".to_string(),
-                context_per_slot_tokens: 32_768,
+                context_per_slot_tokens: 16_384,
                 required_tokens: required,
             },
         ]
@@ -374,11 +418,11 @@ fn a_hold_names_every_mismatched_worker() {
     assert_eq!(code, NO_ENDPOINT_LARGE_ENOUGH);
     assert_eq!(mismatched.len(), 2);
     assert!(
-        rationale.contains("8-slot-a (32768 tokens)"),
+        rationale.contains("8-slot-a (16384 tokens)"),
         "rationale names every mismatched worker: {rationale}"
     );
     assert!(
-        rationale.contains("8-slot-b (32768 tokens)"),
+        rationale.contains("8-slot-b (16384 tokens)"),
         "rationale names every mismatched worker: {rationale}"
     );
     assert!(
