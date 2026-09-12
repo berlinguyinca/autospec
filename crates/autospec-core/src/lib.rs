@@ -85,6 +85,7 @@ pub mod immutable_base;
 pub mod initiative;
 pub mod insights;
 pub mod integration;
+pub mod io_coverage;
 pub mod issue_lock;
 pub mod item_sweep;
 pub mod kv_overcommit;
