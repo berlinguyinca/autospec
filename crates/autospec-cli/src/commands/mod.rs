@@ -153,6 +153,7 @@ commands! {
     evaluator => "Manage versioned evaluators, epochs, and promotions", direct;
     initiative => "Inspect cross-repository initiatives", direct;
     issue => "Stamp and promote the canonical GitHub issue", direct;
+    issue_skeleton as "issue-skeleton" => "Render a structured YAML skeleton into a team-lensed issue body", status_code;
     insights => "Inspect the continuous improvement engine (spec §44)", status_code;
     lint => "Lint issue and implementation policy inputs", direct;
     claim => "Manage GitHub-backed issue claim state", direct;
