@@ -127,7 +127,12 @@ EOF
             while IFS= read -r _upi_ref; do
                 [ -n "$_upi_ref" ] || continue
                 [ "$_upi_ref" = "$_upi_lno" ] && continue
-                printf '%s\n' "$_upi_testlines" | grep -qxF "$_upi_ref" && continue
+                # Here-string, not a pipe: a verdict taken from a pipeline's
+                # tail is the tail's status and hides any failure upstream of
+                # it (scripts/lint-pipeline-verdict.sh). The grep is the only
+                # command whose status matters here, so give it its input
+                # directly and the pipeline disappears.
+                grep -qxF "$_upi_ref" <<<"$_upi_testlines" && continue
                 _upi_wired=1
                 break
             done <<EOF
