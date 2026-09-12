@@ -43,6 +43,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > Each child body must be a **self-contained mini-spec** sized for execution by a 32B-class local LLM, with these sections in order:
 >
 > - **Goal** — 1 sentence outcome.
+> - **Implementation language** — exactly `Go` or `Rust`, resolved from the repository, never a per-issue judgement call (issue #4447). The mapping is settled and stated in `AGENTS.d/`: `metabolomics-us/*` -> Go; `InferWeave/*` and `berlinguyinca/autospec` -> Rust. Every child names it, because an agent that is not told the language defaults to shell and a gate that rejects without redirecting makes backlog, not code. If `{repo}` is not one of those namespaces, **refuse to file the child** — an issue that reaches an agent without a named language is a defect, not something the agent guesses at.
 > - **Source spec** — `<spec-path>` + `<spec-github-url>` of the design doc this issue derives from.
 > - **Team personality** — copy the spec's selected team name, roles, and issue-relevant emphasis. If the selected spec lacks this section, infer it from the request, past specs, repository labels, and memory; if confidence is low, stop and ask the operator to choose from the five starter combinations in Phase 2 before filing issues.
 > - **Review counter-team** — copy the spec's counter-team name, roles, and issue-relevant blind spots to challenge. If the selected spec lacks this section, derive a different review emphasis from the Team personality and issue risk before filing.

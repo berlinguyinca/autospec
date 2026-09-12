@@ -93,7 +93,7 @@ fn at_the_ceiling_holds_and_one_over_regresses() {
     // Exactly at the ceiling is not a regression: a change that removes one
     // line and adds one must pass.
     let held = verdict(&s, 3);
-    assert!(!held.is_regression(), "{}", held.message());
+    assert!(!held.is_regression(), "{}", held.message("Rust"));
     assert_eq!(
         held,
         RatchetVerdict::Held {
@@ -121,10 +121,14 @@ fn the_regression_message_names_the_two_acceptable_responses() {
     // tell an agent what to do instead, or it will simply raise the ceiling.
     let tmp = Tmp::new("t");
     write(tmp.path(), "a.sh", "echo one\n");
-    let msg = verdict(&measure(tmp.path()).unwrap(), 0).message();
+    let msg = verdict(&measure(tmp.path()).unwrap(), 0).message("Rust");
     assert!(
         msg.contains("crates/"),
-        "must point at the Rust alternative: {msg}"
+        "must point at the compiled alternative: {msg}"
+    );
+    assert!(
+        msg.contains("write it in Rust"),
+        "must name the language the patch should have been written in: {msg}"
     );
     assert!(
         msg.contains("remove more shell"),
@@ -133,6 +137,41 @@ fn the_regression_message_names_the_two_acceptable_responses() {
     assert!(
         msg.contains("deliberately"),
         "raising the ceiling must be a decision: {msg}"
+    );
+}
+
+#[test]
+fn the_regression_message_redirects_to_the_resolved_language() {
+    // Issue #4447: a gate that rejects without redirecting makes backlog, not
+    // code. A rejected agent must be told the language the patch should have
+    // been written in, resolved from the repository — Go for metabolomics-us/*,
+    // Rust for InferWeave/* and berlinguyinca/autospec.
+    use autospec_core::implementation_language::implementation_language;
+
+    let tmp = Tmp::new("t");
+    write(tmp.path(), "a.sh", "echo one\n");
+    let regressed = verdict(&measure(tmp.path()).unwrap(), 0);
+
+    let go = implementation_language("metabolomics-us/inferweave-gateway")
+        .expect("metabolomics-us/* resolves to Go")
+        .as_str();
+    let go_msg = regressed.message(go);
+    assert!(
+        go_msg.contains("implementation language is Go"),
+        "must name Go for a metabolomics-us repo: {go_msg}"
+    );
+    assert!(
+        go_msg.contains("write it in Go"),
+        "must redirect to Go: {go_msg}"
+    );
+
+    let rust = implementation_language("berlinguyinca/autospec")
+        .expect("berlinguyinca/autospec resolves to Rust")
+        .as_str();
+    let rust_msg = regressed.message(rust);
+    assert!(
+        rust_msg.contains("implementation language is Rust"),
+        "must name Rust for this repository: {rust_msg}"
     );
 }
 
@@ -174,7 +213,7 @@ fn the_repository_stays_under_its_shell_ceiling() {
     assert!(
         !v.is_regression(),
         "{}\n\nshell={} bats={} files={}",
-        v.message(),
+        v.message("Rust"),
         surface.lines.get("shell").copied().unwrap_or(0),
         surface.lines.get("bats").copied().unwrap_or(0),
         surface.total_files()

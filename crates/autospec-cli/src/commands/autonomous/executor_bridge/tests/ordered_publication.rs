@@ -15,6 +15,10 @@ fn bound_continuation_publication_is_ordered_and_restart_safe() {
     // Break caught: proactive receipts existed locally but never became ordered GitHub work.
     let _environment = test_environment();
     let (fixture, mut state, _, _) = implementation_proof_fixture("continuation-publication");
+    // Generated continuation children resolve their implementation language from
+    // the repository (issue #4447); the fixture repo must be one with a settled
+    // language or the generator refuses to file them.
+    state.identity.repository = "berlinguyinca/autospec".to_string();
     let state_path = fixture.root.join("state/invocation.json");
     let event_log = fixture.root.join("events.jsonl");
     let store = fixture.root.join("continuation-gh");

@@ -83,7 +83,12 @@ impl RatchetVerdict {
     /// The operator-facing explanation. A ratchet that only says "failed"
     /// teaches nothing; this says what grew, by how much, and what the two
     /// acceptable responses are.
-    pub fn message(&self) -> String {
+    ///
+    /// `language` is the name of the implementation language the patch should
+    /// have been written in, resolved from the repository (see
+    /// `crate::implementation_language`). Naming it redirects a rejected agent
+    /// to the alternative instead of merely stopping it (issue #4447).
+    pub fn message(&self, language: &str) -> String {
         match self {
             RatchetVerdict::Held {
                 total,
@@ -99,11 +104,11 @@ impl RatchetVerdict {
                 excess,
             } => format!(
                 "shell ratchet REGRESSED: {total} lines against a ceiling of {ceiling}, \
-                 {excess} over. This repository's product is Rust; new pipeline logic belongs \
-                 in crates/. Either write it in Rust, or remove more shell than this change \
-                 adds. If the shell is genuinely unavoidable (a harness entry point, process \
-                 supervision), say so in the PR and raise the ceiling deliberately -- the \
-                 ceiling is a decision, not a formality."
+                 {excess} over. This repository's implementation language is {language}; new \
+                 pipeline logic belongs in crates/. Either write it in {language}, or remove \
+                 more shell than this change adds. If the shell is genuinely unavoidable (a \
+                 harness entry point, process supervision), say so in the PR and raise the \
+                 ceiling deliberately -- the ceiling is a decision, not a formality."
             ),
         }
     }
