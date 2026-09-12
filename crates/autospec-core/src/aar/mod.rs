@@ -19,6 +19,7 @@
 //! worktree.
 
 pub mod admission_obligation;
+pub mod admission_throughput;
 pub mod capsule;
 pub mod classify;
 pub mod context;
@@ -50,6 +51,10 @@ pub mod vertical_slice;
 pub use admission_obligation::{
     check_covers, provisional_status, CheckPlacement, ConditionBehavior, MisplacedCheck,
     ProvisionalStatus, DEFAULT_MEASUREMENT_WINDOW_SECS,
+};
+pub use admission_throughput::{
+    decide_admission, nonce_prefix, probe_prompt, prompt_shape, AdmissionBranch, AdmissionDecision,
+    ProbeMeasurement, PromptShape,
 };
 pub use capsule::{RolePolicy, TaskCapsule};
 pub use classify::{
