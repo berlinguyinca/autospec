@@ -172,7 +172,7 @@ case "$command_name" in
             | write_json_atomic "$state_file"
         info "armed $RUN_ID; resume_at=$RESUME_AT"
         if [ "$NO_DAEMON" -eq 0 ]; then
-            nohup bash "$0" daemon --run-id "$RUN_ID" --state-dir "$STATE_DIR" > "$daemon_log" 2>&1 &
+            setsid bash "$0" daemon --run-id "$RUN_ID" --state-dir "$STATE_DIR" > "$daemon_log" 2>&1 &
             daemon_pid="$!"
             update_state "$state_file" --argjson pid "$daemon_pid" '.daemon_pid = $pid'
             info "daemon pid=$daemon_pid interval=${INTERVAL_SECONDS}s"
@@ -224,7 +224,7 @@ case "$command_name" in
         fi
         (
             cd "$repo_dir"
-            nohup bash -lc "$resume_command" > "$run_log" 2>&1 &
+            setsid bash -lc "$resume_command" > "$run_log" 2>&1 &
             printf '%s\n' "$!" > "${run_log}.pid"
         )
         child_pid="$(cat "${run_log}.pid" 2>/dev/null || echo "")"

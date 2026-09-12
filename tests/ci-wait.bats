@@ -6,6 +6,10 @@
 # regression: gh 2.67.0 reports in-progress checks with conclusion "" (not
 # null), so the poller must count status != COMPLETED as pending and never
 # write state=pass while a check is still running.
+#
+# #4094 adds: setsid session isolation, a terminal line on every exit
+# (completed / failed / signalled + signal name), and the reader's died
+# verdict when a sentinel is pending but its process is no longer alive.
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -50,6 +54,7 @@ fake_sleep() {
 wait_for_state() {
     local pr="$1" want="$2" i state
     for i in $(seq 1 50); do
+        # linter:allow-VACUOUS_OR_TRUE polling helper: the sentinel may not exist yet on early iterations
         state="$(jq -r '.state' "$HOME/.autospec/ci-state/$pr.signal" 2>/dev/null || true)"
         [ "$state" = "$want" ] && return 0
         "$REAL_SLEEP" 0.2
@@ -91,10 +96,103 @@ EOF
     state="$(jq -r '.state' "$HOME/.autospec/ci-state/$PR.signal")"
     [ "$state" = "pending" ]
 
-    # Stop the poller; a pending verdict must survive the kill.
-    kill "$(cat "$HOME/.autospec/ci-state/$PR.pid")" 2>/dev/null || true
+    # A live pending poller reads as pending (exit 2), never as died.
+    run bash "$REPO_ROOT/scripts/ci-wait-poll.sh" "$PR"
+    [ "$status" -eq 2 ]
+    [ "$output" = "pending" ]
+
+    # #4094 replaced "pending survives the kill" with "a killed poller
+    # settles to died": the exit trap finalizes the sentinel and writes a
+    # terminal line naming the signal, so the reader never guesses from a
+    # stale state or a dead process.
+    kill -TERM "$(cat "$HOME/.autospec/ci-state/$PR.pid")" 2>/dev/null || :
+    # (best-effort: the poller may already have exited; wait_for_state below asserts the settle)
+    wait_for_state "$PR" died
     state="$(jq -r '.state' "$HOME/.autospec/ci-state/$PR.signal")"
-    [ "$state" = "pending" ]
+    [ "$state" = "died" ]
+    local log
+    log="$HOME/.autospec/ci-state/$PR.log"
+    grep -q 'ci-wait: terminal: signalled .* state=died signal=TERM' "$log"
+}
+
+# --- #4094 AC1: setsid session isolation ---
+
+@test "setsid: the poller owns its own session (pgid == pid)" {
+    PR=401
+    cat > "$WORK/rollup.json" <<'EOF'
+[{"name":"build-test","status":"IN_PROGRESS","conclusion":""}]
+EOF
+    export CI_WAIT_TEST_ROLLUP="$WORK/rollup.json"
+    fake_sleep
+
+    run bash "$SCRIPT" "$PR"
+    [ "$status" -eq 0 ]
+
+    wait_gh_called || { echo "poller never fetched"; return 1; }
+    local pid pgid
+    pid="$(cat "$HOME/.autospec/ci-state/$PR.pid")"
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [ -n "$pgid" ]
+    [ "$pgid" = "$pid" ]
+}
+
+# --- #4094 AC2: terminal line on every exit ---
+
+@test "AC2: clean pass exit writes a completed terminal line" {
+    PR=402
+    cat > "$WORK/rollup.json" <<'EOF'
+[{"name":"build-test","status":"COMPLETED","conclusion":"SUCCESS"}]
+EOF
+    export CI_WAIT_TEST_ROLLUP="$WORK/rollup.json"
+
+    run bash "$SCRIPT" "$PR"
+    [ "$status" -eq 0 ]
+
+    wait_for_state "$PR" pass
+    local log i
+    log="$HOME/.autospec/ci-state/$PR.log"
+    # The terminal line is written by the EXIT trap right after the verdict.
+    for i in $(seq 1 50); do
+        grep -q 'ci-wait: terminal: completed .* state=pass rc=0' "$log" 2>/dev/null && return 0
+        "$REAL_SLEEP" 0.1
+    done
+    cat "$log" >&2
+    return 1
+}
+
+# --- #4094 AC3/AC4: the reader distinguishes running from died ---
+
+@test "AC4: SIGKILL leaves no terminal line; the reader reports died, not pending" {
+    PR=403
+    cat > "$WORK/rollup.json" <<'EOF'
+[{"name":"build-test","status":"IN_PROGRESS","conclusion":""}]
+EOF
+    export CI_WAIT_TEST_ROLLUP="$WORK/rollup.json"
+    fake_sleep
+
+    run bash "$SCRIPT" "$PR"
+    [ "$status" -eq 0 ]
+
+    wait_gh_called || { echo "poller never fetched"; return 1; }
+    "$REAL_SLEEP" 0.3
+
+    # SIGKILL cannot be trapped: no terminal line, no died settle by the trap.
+    kill -9 "$(cat "$HOME/.autospec/ci-state/$PR.pid")" 2>/dev/null || :
+    # (best-effort: the poller may already have exited; the assertions below verify the dead state)
+    "$REAL_SLEEP" 0.3
+
+    local log pid
+    log="$HOME/.autospec/ci-state/$PR.log"
+    pid="$(cat "$HOME/.autospec/ci-state/$PR.pid")"
+    # The reader is handed a log with no terminal line…
+    [ -f "$log" ]
+    ! grep -q 'ci-wait: terminal:' "$log"
+    # …and no live process…
+    ! kill -0 "$pid" 2>/dev/null
+    # …so it must report died (exit 4), not pending/running (exit 2).
+    run bash "$REPO_ROOT/scripts/ci-wait-poll.sh" "$PR"
+    [ "$status" -eq 4 ]
+    [ "$output" = "died" ]
 }
 
 # --- fail ---

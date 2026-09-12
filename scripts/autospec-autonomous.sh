@@ -943,7 +943,7 @@ print(p.pid)
 PY
     else
         AUTOSPEC_REPO_DIR="$_repo_dir" \
-            nohup sh -c "$_command" >"$_log" 2>&1 &
+            setsid sh -c "$_command" >"$_log" 2>&1 &
         printf '%s\n' "$!"
     fi
 }
@@ -1100,7 +1100,7 @@ PY
         CONDUCTOR_SCRIPTS_DIR="$SCRIPT_DIR" \
         AUTOSPEC_SCRIPTS_DIR="$SCRIPT_DIR" \
         CONDUCTOR_REPO="$_repo" \
-            nohup "$0" run-foreground >"$_log" 2>&1 &
+            setsid "$0" run-foreground >"$_log" 2>&1 &
         _pid="$!"
     fi
 

@@ -115,7 +115,7 @@ if [[ "$no_monitor" -eq 0 ]]; then
     mkdir -p "$monitor_log_dir"
     boot_log="${monitor_log_dir}/${session}.boot.log"
 
-    nohup python3 -m autospec_context_monitor \
+    setsid python3 -m autospec_context_monitor \
         --tmux-session "$session" \
         --harness "$harness" \
         --cwd "$PWD" \

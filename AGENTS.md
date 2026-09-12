@@ -919,8 +919,17 @@ Replaces synchronous `gh pr checks --watch` with a fire-and-forget background po
 | `scripts/ci-wait-cleanup.sh` | Kills poller; removes sentinel files | `<PR>` |
 
 Signal file: `~/.autospec/ci-state/<PR>.signal` — JSON `{pr, state, checks, settled_at}`.
-State values: `pending | pass | fail | stalled`.
-Exit codes from `ci-wait-poll.sh`: 0=pass, 1=fail/stalled, 2=pending, 3=no sentinel.
+State values: `pending | pass | fail | stalled | died`.
+Exit codes from `ci-wait-poll.sh`: 0=pass, 1=fail/stalled, 2=pending, 3=no sentinel, 4=died.
+
+The poller is launched with `setsid` (own session, not a `nohup` child of the
+caller), records its PID in `<PR>.pid`, and writes a terminal line to `<PR>.log`
+on **every** exit — completed, failed, or signalled (with the signal name) — via
+an EXIT trap that settles a still-`pending` sentinel to `died`. The reader
+reports `pending` only when the recorded PID is alive (`kill -0`); a pending
+sentinel with no live process reports `died` (exit 4), never "running". Liveness
+comes from the process, never the log's last-write time — the #3995 rule applied
+to the pass itself (#4094).
 
 ## Batch size policy
 
