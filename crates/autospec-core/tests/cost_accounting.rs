@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use autospec_core::cost::{scan_out_dir, summarize};
+use autospec_core::cost::{archive_run, scan_out_dir, summarize};
 
 /// 2026-09-01T00:00:00Z
 const BASE: i64 = 1_788_220_800;
@@ -229,6 +229,106 @@ fn json_report_is_an_object_with_schema_version() {
     assert_eq!(value["schema_version"], 1);
     assert_eq!(value["cumulative"]["records"], 1);
     assert!(value["window"].is_null());
+}
+
+/// #3940 correction: a re-dispatch must not destroy the previous run's
+/// outcome. Run 1 (a failure) is archived before the re-dispatch overwrites
+/// it, and the cost accounting must count both runs — the per-run records
+/// are immutable, so the report can no longer be biased toward the run that
+/// finally succeeded (the 702-logs-vs-341-records undercount).
+#[test]
+fn redispatch_archives_the_previous_run_and_the_accounting_counts_both() {
+    let dir = Dir::new("redispatch");
+    // Run 1: the failure the re-dispatch exists to replace.
+    let finished_1 = iso_z(BASE);
+    dir.write(
+        "issue-3813",
+        &[
+            ("status", "NEW-TEST-FAILURES"),
+            ("agent_secs", "7200"),
+            ("finished_at", finished_1.as_str()),
+        ],
+    );
+    // The re-dispatch archives run 1 instead of rm -rf'ing it.
+    let dest = archive_run(&dir.path, "issue-3813").expect("archive run 1");
+    let dest = dest.expect("run 1 had a record to preserve");
+    assert!(
+        dest.ends_with("archive/issue-3813/run-1"),
+        "{}",
+        dest.display()
+    );
+    assert!(dest.join("status.txt").is_file());
+    // Run 2: the run that finally succeeded.
+    let finished_2 = iso_z(BASE + 3600);
+    dir.write(
+        "issue-3813",
+        &[
+            ("status", "VERIFIED"),
+            ("agent_secs", "3600"),
+            ("finished_at", finished_2.as_str()),
+        ],
+    );
+    let scan = scan_out_dir(&dir.path).expect("scan");
+    assert_eq!(scan.archived, 1);
+    let report = summarize("out", &scan, None, 10.0);
+    let cum = &report.cumulative;
+    // Both runs are in the total: 3h, not the 1h the last run alone says.
+    assert_eq!(cum.records, 2);
+    assert!((cum.total_gpu_hours - 3.0).abs() < 0.001);
+    assert_eq!(cum.by_status.len(), 2);
+    let ntf = cum
+        .by_status
+        .iter()
+        .find(|bucket| bucket.status == "NEW-TEST-FAILURES")
+        .expect("failure bucket present");
+    assert_eq!(ntf.runs, 1);
+    assert!((ntf.gpu_hours - 2.0).abs() < 0.001);
+    // The failure's hours still surface against its defect issue (#3857),
+    // even though the issue itself ended VERIFIED.
+    assert_eq!(cum.defects.len(), 1);
+    assert_eq!(cum.defects[0].issue, "#3857");
+    assert!((cum.defects[0].gpu_hours - 2.0).abs() < 0.001);
+    // Per issue: both runs, the failure's cost beside the success's outcome.
+    let issue = &cum.by_issue[0];
+    assert_eq!(issue.issue, "issue-3813");
+    assert_eq!(issue.runs, 2);
+    assert!((issue.gpu_hours - 3.0).abs() < 0.001);
+    assert_eq!(issue.latest_status.as_deref(), Some("VERIFIED"));
+    let text = report.to_text();
+    assert!(
+        text.contains("per-run records: 1 run(s) read from pre-redispatch archives"),
+        "{text}"
+    );
+    // A third re-dispatch archives run-2, not run-1.
+    let dest2 = archive_run(&dir.path, "issue-3813")
+        .expect("archive run 2")
+        .unwrap();
+    assert!(
+        dest2.ends_with("archive/issue-3813/run-2"),
+        "{}",
+        dest2.display()
+    );
+}
+
+/// The operator habit — moving the whole run directory into the archive
+/// before a re-dispatch — is a per-run record layout too, and the
+/// accounting must read it.
+#[test]
+fn manual_move_into_the_archive_is_a_per_run_record() {
+    let dir = Dir::new("manual-move");
+    let archived = dir.path.join("archive/issue-7");
+    fs::create_dir_all(&archived).expect("archive dir");
+    fs::write(
+        archived.join("status.txt"),
+        "status: TIMEOUT\nagent_secs: 25200\n",
+    )
+    .expect("archived status.txt");
+    dir.write("issue-7", &[("status", "VERIFIED"), ("agent_secs", "3600")]);
+    let scan = scan_out_dir(&dir.path).expect("scan");
+    assert_eq!(scan.archived, 1);
+    let report = summarize("out", &scan, None, 10.0);
+    assert_eq!(report.cumulative.records, 2);
+    assert!((report.cumulative.total_gpu_hours - 8.0).abs() < 0.001);
 }
 
 #[test]
