@@ -152,6 +152,7 @@ pub mod warned_output;
 pub mod weight_acquisition;
 pub mod wire_fixture;
 pub mod work_selection;
+pub mod worker_disposition;
 pub mod workload_validation;
 
 // Test-only fixture-executable publisher (issue #3500). Compiled only when the
