@@ -35,6 +35,7 @@
 //!    outstanding set and reported — stale claims included — never absorbed.
 
 use super::closure::{reconcile_tracker, reconciled_open_count, TrackerDiscrepancy};
+use crate::false_negative::{self, Measured};
 use std::collections::BTreeSet;
 
 /// Conventional branch-name markers after which an issue number may appear.
@@ -229,6 +230,12 @@ pub struct BacklogReport {
     /// Open, patched issues with no open-or-merged PR: the convertible
     /// backlog. Derived from authoritative issue identity only.
     pub outstanding: BTreeSet<u64>,
+    /// The zero-control for `outstanding` (issue #4449): `Some` only when
+    /// `outstanding` is empty. A proven zero is evidence the backlog is
+    /// drained; an unmeasured zero means the measurement never saw a
+    /// candidate — the report names that instead of printing a plausible
+    /// "convertible 0" a reader cannot tell from a healthy idle pass.
+    pub outstanding_zero: Option<Measured<u64>>,
     /// Issue numbers with an open or merged PR, per authoritative fields.
     pub issues_with_pr: BTreeSet<u64>,
     /// Patches on disk at snapshot time.
@@ -270,7 +277,7 @@ impl BacklogReport {
     /// reconciliation (#4044) alongside the raw one:
     /// `backlog: convertible 215 (patches on disk 409, issues open 372, open after reconcile 372, issues with a PR 194, in flight 3)`.
     pub fn summary_line(&self) -> String {
-        format!(
+        let mut line = format!(
             "backlog: convertible {} (patches on disk {}, issues open {}, open after reconcile {}, issues with a PR {}, in flight {})",
             self.convertible(),
             self.patches_on_disk,
@@ -278,7 +285,16 @@ impl BacklogReport {
             self.issues_open_effective,
             self.issues_with_pr.len(),
             self.in_flight.len()
-        )
+        );
+        // An unmeasured zero must not pass for a drained backlog on the
+        // line the conversion loop logs (issue #4449).
+        if let Some(zero) = &self.outstanding_zero {
+            if zero.is_unmeasured() {
+                line.push_str(" — ");
+                line.push_str(&zero.line());
+            }
+        }
+        line
     }
 
     /// Every way this report's derivations disagree, reported rather than
@@ -332,6 +348,13 @@ impl BacklogReport {
                     .join(", ")
             ));
         }
+        // An unmeasured zero backlog is reported, not absorbed (issue
+        // #4449): "convertible 0" on an empty input is not a measurement.
+        if let Some(zero) = &self.outstanding_zero {
+            if zero.is_unmeasured() {
+                found.push(zero.line());
+            }
+        }
         found
     }
 }
@@ -384,11 +407,16 @@ pub fn compute_backlog(snapshot: &BacklogSnapshot) -> Result<BacklogReport, Stri
         .filter(|pr| pr.state != PrState::Closed)
         .filter_map(|pr| pr.authoritative_issue())
         .collect();
-    let open_patched: BTreeSet<u64> = snapshot
-        .open_issues
-        .intersection(&snapshot.patched_issues)
-        .copied()
-        .collect();
+    // The candidate set goes through the positive-controlled set operation
+    // (issue #4449): when it comes back empty, the verdict says which input
+    // was empty — and that is what the zero report below carries.
+    let open_patched_measured = false_negative::set_intersection(
+        "open issues",
+        snapshot.open_issues.iter().copied(),
+        "patches on disk",
+        snapshot.patched_issues.iter().copied(),
+    );
+    let open_patched = open_patched_measured.as_set().cloned().unwrap_or_default();
     // In-flight (issue #4214): a claim means a pass is converting the issue
     // right now — open, patched, no PR yet. A claim that a PR already
     // covers is subsumed by that PR (the pass finished; the release may lag
@@ -408,8 +436,20 @@ pub fn compute_backlog(snapshot: &BacklogSnapshot) -> Result<BacklogReport, Stri
         .difference(&open_patched)
         .copied()
         .collect();
-    let prless: BTreeSet<u64> = open_patched.difference(&issues_with_pr).copied().collect();
-    let outstanding: BTreeSet<u64> = prless.difference(&in_flight).copied().collect();
+    let prless_measured = false_negative::set_difference(
+        "open patched issues",
+        open_patched.iter().copied(),
+        "issues with a PR",
+        issues_with_pr.iter().copied(),
+    );
+    let prless = prless_measured.as_set().cloned().unwrap_or_default();
+    let outstanding_measured = false_negative::set_difference(
+        "convertible candidates",
+        prless.iter().copied(),
+        "in-flight conversion claims",
+        in_flight.iter().copied(),
+    );
+    let outstanding = outstanding_measured.as_set().cloned().unwrap_or_default();
     known_answer_check(&outstanding, &snapshot.known_merged)?;
 
     // The audit covers every branch name, whatever the PR state: it is a
@@ -423,8 +463,30 @@ pub fn compute_backlog(snapshot: &BacklogSnapshot) -> Result<BacklogReport, Stri
         .collect();
 
     let tracker_discrepancies = reconcile_tracker(&snapshot.open_issues, &snapshot.prs);
+    // The zero-control (issue #4449): a zero backlog is evidence only when
+    // the measurement saw candidates to compare. Built on an empty candidate
+    // set, it was never measured — the summary line and the discrepancies
+    // say so instead of printing a "convertible 0" that reads like a
+    // drained backlog.
+    let outstanding_zero = if outstanding.is_empty() {
+        Some(match &open_patched_measured {
+            Measured::NonEmpty(candidates) => Measured::proven_empty(format!(
+                "{} open issue(s) had a patch on disk and each was compared against the PR and in-flight sets",
+                candidates.len()
+            )),
+            Measured::ProvenEmpty { control } => Measured::unmeasured(format!(
+                "no open issue had a patch on disk — {control} — so 'convertible 0' was never measured against a candidate"
+            )),
+            Measured::Unmeasured { why } => Measured::unmeasured(format!(
+                "no open issue had a patch on disk — {why}"
+            )),
+        })
+    } else {
+        None
+    };
     Ok(BacklogReport {
         outstanding,
+        outstanding_zero,
         issues_with_pr,
         in_flight,
         stale_claims,
