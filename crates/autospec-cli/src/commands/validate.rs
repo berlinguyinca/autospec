@@ -34,6 +34,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
 }
 
 fn run_direct(options: &ValidationOptions) -> Result<(), String> {
+    // Install before the first spawn: an interrupt must find every live
+    // fixture process group registered and killable (#2568). Non-unix
+    // platforms report no guarantee and keep the historical behaviour.
+    autospec_core::validation::interrupt_guard::install();
     let root = std::env::current_dir()
         .map_err(|error| format!("could not determine validation root: {error}"))?;
     let catalog = ValidationCatalog::standard();

@@ -29,4 +29,4 @@ tokio = { version = "=1.53.1", default-features = false, features = ["macros", "
 yaml-edit = "=0.2.3" # why: parse manifest v2 resources without losing YAML structure
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", default-features = false, features = ["fs"] } # why: safe descriptor-relative runtime-state operations
+nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal"] } # why: safe descriptor-relative runtime-state operations; process+signal back the interrupt guard (#2568)

@@ -2,6 +2,7 @@ pub mod affected;
 pub mod catalog;
 pub mod command;
 pub mod external;
+pub mod interrupt_guard;
 pub mod measurement;
 pub mod options;
 pub mod output_macros;
