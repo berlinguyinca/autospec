@@ -105,6 +105,7 @@ pub mod positive_control;
 pub mod post_merge;
 pub mod procedure;
 pub mod progress_contract;
+pub mod progress_signal;
 pub mod prompt_blocks;
 pub mod prose_closure;
 pub mod rag;
