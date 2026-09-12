@@ -504,6 +504,11 @@ fn admission_refuses_when_identity_itself_was_never_established() {
 /// times out behind production traffic. Its identity was established, so
 /// admission proceeds and it re-registers instead of expiring at its TTL
 /// into `no worker for model`.
+///
+/// And (issue #4411) the admission is *provisional*: the liveness step never
+/// completed, so the worker was never measured and the success-path checks
+/// never ran against it. The bypass is not an exit — it carries the
+/// obligation to be measured within a bounded window.
 #[test]
 fn a_busy_worker_whose_identity_was_established_may_re_register() {
     let probe = cheap_probe();
@@ -517,12 +522,36 @@ fn a_busy_worker_whose_identity_was_established_may_re_register() {
 
     let verdict = admit(&probe, &busy, "qwen3.8-27b");
 
-    assert_eq!(verdict, AdmissionVerdict::Admitted);
+    assert_eq!(verdict, AdmissionVerdict::AdmittedProvisionally);
+    assert!(verdict.is_admitted());
+    assert!(verdict.requires_measurement());
     // And the liveness loop reads the same timeout the same way.
     assert_eq!(
         classify_probe(&probe, &ProbeSignal::DeadlineExceeded).pool_action(),
         PoolAction::Keep
     );
+}
+
+/// A worker whose liveness step completed was measured: its admission is
+/// not provisional and carries no obligation.
+#[test]
+fn a_measured_admission_is_not_provisional() {
+    let probe = cheap_probe();
+    let measured = RegistrationProbe {
+        identity: ProbeSignal::Live {
+            identity: Some("worker-7".to_string()),
+        },
+        observed_models: vec!["qwen3.8-27b".to_string()],
+        liveness: ProbeSignal::Live {
+            identity: Some("worker-7".to_string()),
+        },
+    };
+
+    let verdict = admit(&probe, &measured, "qwen3.8-27b");
+
+    assert_eq!(verdict, AdmissionVerdict::Admitted);
+    assert!(verdict.is_admitted());
+    assert!(!verdict.requires_measurement());
 }
 
 /// A definitive failure on either step — identity or liveness — refuses,

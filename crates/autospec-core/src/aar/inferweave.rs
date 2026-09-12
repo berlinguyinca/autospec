@@ -614,15 +614,35 @@ impl RefusalReason {
 /// The admission decision for a (re-)registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionVerdict {
-    /// The worker may (re-)register; it serves the requested model.
+    /// The worker may (re-)register; it serves the requested model and the
+    /// liveness step completed, so the checks on the success path actually
+    /// ran against it.
     Admitted,
+    /// The worker may (re-)register **provisionally**: the liveness step
+    /// timed out ("busy is not dead") and the measurement it carries never
+    /// completed, so a check sitting on the success path — such as a
+    /// throughput floor — never ran against this worker (issue #4411). The
+    /// bypass is not an exit: the worker is marked never measured and the
+    /// measurement must succeed within a bounded window before the worker
+    /// counts as healthy (see [`admission_obligation`](super::admission_obligation)).
+    AdmittedProvisionally,
     /// Registration is refused.
     Refused { reason: RefusalReason },
 }
 
 impl AdmissionVerdict {
     pub fn is_admitted(&self) -> bool {
-        matches!(self, AdmissionVerdict::Admitted)
+        matches!(
+            self,
+            AdmissionVerdict::Admitted | AdmissionVerdict::AdmittedProvisionally
+        )
+    }
+
+    /// Whether the admission carries a measurement obligation: a worker
+    /// admitted through the timeout branch was never measured, and the
+    /// bounded window decides when "never measured" becomes "unmeasurable".
+    pub fn requires_measurement(&self) -> bool {
+        matches!(self, AdmissionVerdict::AdmittedProvisionally)
     }
 }
 
@@ -658,6 +678,14 @@ pub fn serves_model(observed: &[String], model: &str) -> bool {
 /// then rests on what the identity step actually established, and an
 /// identity that was never established refuses: the permissive branch
 /// decides only from an observation.
+///
+/// The permissive branch is not an exit (issue #4411): when the liveness
+/// step timed out, the measurement it carries never ran, and any check
+/// placed on the success path — the incident's throughput floor — was
+/// bypassed by the very workers it existed to catch. Such an admission
+/// returns [`AdmissionVerdict::AdmittedProvisionally`]: the worker is
+/// admitted, marked never measured, and must complete the measurement
+/// within a bounded window before it counts as healthy.
 pub fn admit(
     probe: &LivenessProbe,
     registration: &RegistrationProbe,
@@ -684,6 +712,17 @@ pub fn admit(
             RefusalReason::DoesNotServeModel
         };
         return AdmissionVerdict::Refused { reason };
+    }
+
+    // "Busy is not dead" is a bypass that carries an obligation, not an
+    // exit: the liveness step never completed, so the worker was never
+    // measured and the success-path checks never ran against it. Admit it
+    // provisionally; the bounded window in
+    // [`admission_obligation`](super::admission_obligation) decides when a
+    // worker that can never complete a measurement stops counting as
+    // healthy (issue #4411).
+    if let ProbeVerdict::Inconclusive = liveness {
+        return AdmissionVerdict::AdmittedProvisionally;
     }
 
     AdmissionVerdict::Admitted
