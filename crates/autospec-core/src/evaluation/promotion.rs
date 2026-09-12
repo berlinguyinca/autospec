@@ -109,8 +109,9 @@ pub struct PromotionEvent {
     pub trial: Option<ChallengerTrialId>,
     pub approvals: Vec<Approval>,
     pub state: PromotionState,
-    /// Records whose evaluator version is displaced by this event. Filled in
-    /// at commit time via `stale_candidates`; a plan carries an empty list.
+    /// Records whose evaluator version is displaced by this event. Supplied
+    /// by the caller (the displaced `slot@version`'s `Active` records) and
+    /// stored verbatim on the event; a pin carries an empty list.
     pub invalidated_evaluations: Vec<EvaluationId>,
 }
 
@@ -139,6 +140,10 @@ fn derive_promotion_id(basis: &str, previous: &EpochId, successor: &EpochId) -> 
 /// - the slot requires human approval and no human approval exists for the
 ///   exact challenger version from this trial.
 ///
+/// `invalidated` is the caller's list of records this promotion displaces;
+/// it is stored verbatim on the event (the caller computes it from the
+/// displaced `slot@version`'s `Active` records).
+///
 /// On success the event's `from` is the epoch's pinned version, its `to` the
 /// challenger, and its `epoch` the successor built via
 /// [`EvaluatorEpoch::successor`] (which independently re-checks the version
@@ -147,6 +152,7 @@ pub fn plan_promotion(
     epoch: &EvaluatorEpoch,
     trial: &ChallengerTrial,
     policy: &PromotionPolicy,
+    invalidated: &[EvaluationId],
     approvals: &[Approval],
     now: u64,
 ) -> Result<PromotionEvent, EvaluationError> {
@@ -232,7 +238,7 @@ pub fn plan_promotion(
         trial: Some(trial.id.clone()),
         approvals: approvals.to_vec(),
         state: PromotionState::Pending,
-        invalidated_evaluations: Vec::new(),
+        invalidated_evaluations: invalidated.to_vec(),
     })
 }
 
@@ -355,8 +361,8 @@ mod tests {
         for verdict in [ChallengerVerdict::Inconclusive, ChallengerVerdict::Rejected] {
             let mut trial = qualified_trial(&epoch, &policy);
             trial.verdict = verdict;
-            let err =
-                plan_promotion(&epoch, &trial, &policy, &[human_approval(&trial)], 3).unwrap_err();
+            let err = plan_promotion(&epoch, &trial, &policy, &[], &[human_approval(&trial)], 3)
+                .unwrap_err();
             assert_eq!(err.kind, EvaluationErrorKind::FailClosed);
             assert!(err.to_string().contains(verdict.as_str()), "{}", err);
         }
@@ -369,13 +375,13 @@ mod tests {
         let mut trial = qualified_trial(&epoch, &policy);
         trial.incumbent.version = 99; // epoch pins 1
         let err =
-            plan_promotion(&epoch, &trial, &policy, &[human_approval(&trial)], 3).unwrap_err();
+            plan_promotion(&epoch, &trial, &policy, &[], &[human_approval(&trial)], 3).unwrap_err();
         assert_eq!(err.kind, EvaluationErrorKind::FailClosed);
         assert!(err.to_string().contains("stale"), "{}", err);
 
         // And when the slot is unpinned at all: that is a pin, not a promotion.
         let genesis = EvaluatorEpoch::genesis(policy.policy_digest(), 1);
-        let err = plan_promotion(&genesis, &trial, &policy, &[], 3).unwrap_err();
+        let err = plan_promotion(&genesis, &trial, &policy, &[], &[], 3).unwrap_err();
         assert_eq!(err.kind, EvaluationErrorKind::FailClosed);
     }
 
@@ -388,7 +394,7 @@ mod tests {
             require_human_approval_slots: BTreeSet::new(),
             ..PromotionPolicy::default()
         };
-        let err = plan_promotion(&epoch, &trial, &drifted, &[], 3).unwrap_err();
+        let err = plan_promotion(&epoch, &trial, &drifted, &[], &[], 3).unwrap_err();
         assert_eq!(err.kind, EvaluationErrorKind::FailClosed);
         assert!(err.to_string().contains("policy"), "{}", err);
     }
@@ -399,25 +405,25 @@ mod tests {
         let epoch = epoch_with_pin(&policy);
         let trial = qualified_trial(&epoch, &policy);
         // No approvals at all.
-        assert!(plan_promotion(&epoch, &trial, &policy, &[], 3).is_err());
+        assert!(plan_promotion(&epoch, &trial, &policy, &[], &[], 3).is_err());
         // A policy-kind approval does not count.
         let policy_approval = Approval {
             kind: ApprovalKind::Policy,
             ..human_approval(&trial)
         };
-        assert!(plan_promotion(&epoch, &trial, &policy, &[policy_approval], 3).is_err());
+        assert!(plan_promotion(&epoch, &trial, &policy, &[], &[policy_approval], 3).is_err());
         // A human approval for the wrong version does not count.
         let wrong_version = Approval {
             version: trial.challenger.version + 1,
             ..human_approval(&trial)
         };
-        assert!(plan_promotion(&epoch, &trial, &policy, &[wrong_version], 3).is_err());
+        assert!(plan_promotion(&epoch, &trial, &policy, &[], &[wrong_version], 3).is_err());
         // A human approval tied to a different trial does not count.
         let other_trial = Approval {
             trial: Some(trial_id("trial-other")),
             ..human_approval(&trial)
         };
-        assert!(plan_promotion(&epoch, &trial, &policy, &[other_trial], 3).is_err());
+        assert!(plan_promotion(&epoch, &trial, &policy, &[], &[other_trial], 3).is_err());
     }
 
     #[test]
@@ -427,7 +433,7 @@ mod tests {
         let mut trial = qualified_trial(&epoch, &policy);
         trial.challenger.version = trial.incumbent.version; // same version
         let err =
-            plan_promotion(&epoch, &trial, &policy, &[human_approval(&trial)], 3).unwrap_err();
+            plan_promotion(&epoch, &trial, &policy, &[], &[human_approval(&trial)], 3).unwrap_err();
         assert_eq!(err.kind, EvaluationErrorKind::FailClosed);
         assert!(err.to_string().contains("not newer"), "{}", err);
     }
@@ -475,8 +481,8 @@ mod tests {
         let trial = qualified_trial(&epoch, &policy);
         let approvals = vec![human_approval(&trial)];
 
-        let first = plan_promotion(&epoch, &trial, &policy, &approvals, 3).unwrap();
-        let second = plan_promotion(&epoch, &trial, &policy, &approvals, 42).unwrap();
+        let first = plan_promotion(&epoch, &trial, &policy, &[], &approvals, 3).unwrap();
+        let second = plan_promotion(&epoch, &trial, &policy, &[], &approvals, 42).unwrap();
         assert_eq!(
             first.id, second.id,
             "the same plan must yield the same promotion id"
@@ -492,7 +498,7 @@ mod tests {
             })
         );
         assert_eq!(first.to, trial.challenger);
-        assert_eq!(first.trial, Some(trial.id));
+        assert_eq!(first.trial, Some(trial.id.clone()));
         assert_eq!(
             first.epoch.version_of(Architecture),
             Some(trial.challenger.version)
@@ -501,13 +507,23 @@ mod tests {
         assert_eq!(first.epoch.promotion, Some(first.id.clone()));
         first.epoch.validate().unwrap();
 
+        // Caller-supplied `invalidated` is stored verbatim on the event; the
+        // promotion id does not depend on the invalidation set.
+        let invalidated = vec![
+            EvaluationId::parse("evaluation-000001").unwrap(),
+            EvaluationId::parse("evaluation-000002").unwrap(),
+        ];
+        let stamped = plan_promotion(&epoch, &trial, &policy, &invalidated, &approvals, 3).unwrap();
+        assert_eq!(stamped.invalidated_evaluations, invalidated);
+        assert_eq!(stamped.id, first.id);
+
         // A different trial basis derives a different id.
         let other = ChallengerTrial {
             id: trial_id("trial-2"),
             ..trial
         };
         let other_event =
-            plan_promotion(&epoch, &other, &policy, &[human_approval(&other)], 3).unwrap();
+            plan_promotion(&epoch, &other, &policy, &[], &[human_approval(&other)], 3).unwrap();
         assert_ne!(first.id, other_event.id);
     }
 
@@ -516,7 +532,8 @@ mod tests {
         let policy = policy();
         let epoch = epoch_with_pin(&policy);
         let trial = qualified_trial(&epoch, &policy);
-        let event = plan_promotion(&epoch, &trial, &policy, &[human_approval(&trial)], 3).unwrap();
+        let event =
+            plan_promotion(&epoch, &trial, &policy, &[], &[human_approval(&trial)], 3).unwrap();
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(
             serde_json::from_str::<PromotionEvent>(&json).unwrap(),
