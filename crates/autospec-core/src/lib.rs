@@ -137,6 +137,7 @@ pub mod shared_write_target;
 pub mod size_dependent_timeout;
 pub mod spec;
 pub mod spec_outcome;
+pub mod spot_measurement;
 pub mod staged_spec;
 pub mod state;
 pub mod stored_output;
