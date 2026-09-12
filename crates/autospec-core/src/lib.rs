@@ -91,6 +91,7 @@ pub mod kv_overcommit;
 pub mod lint;
 pub mod log_freshness;
 pub mod loop_actuation;
+pub mod loop_reset;
 pub mod managed_project;
 pub mod memo_key;
 pub mod merge_gate;
