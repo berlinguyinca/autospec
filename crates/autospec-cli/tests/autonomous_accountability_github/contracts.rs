@@ -185,23 +185,25 @@ fn recovery_events_replay_into_the_active_existing_epic_projection() {
     }
 
     let projection = store.render().unwrap();
-    assert!(projection
-        .markdown
-        .contains("Heartbeat publication deferred"));
-    assert!(projection.markdown.contains("Startup claim recovered"));
-    assert!(projection.markdown.contains("**What:**"));
-    assert!(projection.markdown.contains("**Why:**"));
-    assert!(projection.markdown.contains("**Evidence:**"));
-    assert!(projection
-        .markdown
-        .contains("deferred_42_1 --> recovered_42_2"));
-    assert!(projection
-        .markdown
-        .contains("deferred_42_3 --> recovered_42_4"));
-    assert!(!projection.markdown.contains("deferred_42_5 -->"));
-    assert!(!projection
-        .markdown
-        .contains("recovered_42_2 --> deferred_42_1"));
+
+    let events = parse_timeline_events(&projection.markdown);
+    for event in &events {
+        assert!(!event.what.is_empty());
+        assert!(!event.why.is_empty());
+        assert!(!event.evidence.is_empty());
+    }
+    assert!(events
+        .iter()
+        .any(|event| event.what.starts_with("Heartbeat publication deferred")));
+    assert!(events
+        .iter()
+        .any(|event| event.what.starts_with("Startup claim recovered")));
+
+    let edges = parse_mermaid_flowchart_edges(&projection.markdown);
+    assert!(has_edge(&edges, "deferred_42_1", "recovered_42_2"));
+    assert!(has_edge(&edges, "deferred_42_3", "recovered_42_4"));
+    assert!(!edges.iter().any(|(source, _)| source == "deferred_42_5"));
+    assert!(!has_edge(&edges, "recovered_42_2", "deferred_42_1"));
     assert_eq!(
         store.recovery_projection().0,
         accountability::RecoveryState::Active
@@ -215,6 +217,70 @@ fn recovery_events_replay_into_the_active_existing_epic_projection() {
         reopened.recovery_projection().0,
         accountability::RecoveryState::Active
     );
+}
+
+struct TimelineEvent {
+    what: String,
+    why: String,
+    evidence: String,
+}
+
+/// Parse the `## Decision timeline` section structurally: each `### Event N`
+/// block carries exactly one `**What:**`, `**Why:**`, and `**Evidence:**` field line.
+fn parse_timeline_events(markdown: &str) -> Vec<TimelineEvent> {
+    let mut events = Vec::new();
+    for block in markdown.split("### Event ").skip(1) {
+        let field = |label: &str| {
+            block
+                .lines()
+                .find_map(|line| line.strip_prefix(label))
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        events.push(TimelineEvent {
+            what: field("**What:**"),
+            why: field("**Why:**"),
+            evidence: field("**Evidence:**"),
+        });
+    }
+    events
+}
+
+fn has_edge(edges: &[(String, String)], source: &str, target: &str) -> bool {
+    edges
+        .iter()
+        .any(|(edge_source, edge_target)| edge_source == source && edge_target == target)
+}
+
+/// Strip a mermaid `[label]` suffix from a node reference, keeping the bare id.
+fn mermaid_node_id(token: &str) -> &str {
+    token.split('[').next().unwrap_or(token).trim()
+}
+
+/// Parse the mermaid `flowchart` fenced block structurally, returning
+/// `(source, target)` edge node ids with `[label]` brackets stripped. The
+/// run-state `stateDiagram-v2` block is deliberately excluded.
+fn parse_mermaid_flowchart_edges(markdown: &str) -> Vec<(String, String)> {
+    let mut edges = Vec::new();
+    for (index, block) in markdown.split("```").enumerate() {
+        if index % 2 == 0
+            || !block
+                .lines()
+                .any(|line| line.trim().starts_with("flowchart "))
+        {
+            continue;
+        }
+        for line in block.lines() {
+            if let Some((source, target)) = line.trim().split_once(" --> ") {
+                edges.push((
+                    mermaid_node_id(source).to_owned(),
+                    mermaid_node_id(target).to_owned(),
+                ));
+            }
+        }
+    }
+    edges
 }
 
 #[test]
