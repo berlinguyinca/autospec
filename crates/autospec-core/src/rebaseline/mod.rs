@@ -12,7 +12,7 @@
 //! patch, so the cost of one merge is multiplied by the number of patches in
 //! flight, and the merge rate is the project's own success rate. Nothing in
 //! the pipeline makes the base move slower; the only lever is work happening
-//! closer to the trunk. Four rules this module encodes, plus the two
+//! closer to the trunk. Five rules this module encodes, plus the two
 //! classifications that let the converter stop guessing:
 //!
 //! 1. **An agent re-baselines before it finalises** ([`pre_finalise_plan`]).
@@ -33,19 +33,28 @@
 //!    A base that is the tip has drifted zero commits; a base that is not the
 //!    tip is never zero behind. The exposure ratio says whether the pipeline
 //!    is running faster than the trunk moves at all.
+//! 5. **Both results, or the attribution is a guess** (issue #4070,
+//!    [`dual`]): the run verifies the patch against its dispatch base *and*
+//!    against the current trunk tip, recording each result with the commit it
+//!    was checked against. Green on base and red on head is `SUPERSEDED` — a
+//!    drift loss routed to a fast re-attempt, never a defect that blocks the
+//!    issue — and the conversion pass reports drift losses in a bucket of
+//!    their own, alongside the drift rate the loss is really a function of.
 //!
 //! Everything here is pure and testable: no I/O, no git, no clock. The caller
 //! measures the base against the tip and acts on the verdict.
 //!
 //! The module is split by rule: `finalise` (re-baseline before emit),
 //! `patch_meta` (the emit names its base), `verdict` (what a hold and a
-//! clean-but-stale apply are worth). This file holds the measurement every
-//! other rule is computed from.
+//! clean-but-stale apply are worth), `dual` (both results and the drift
+//! loss). This file holds the measurement every other rule is computed from.
 
+mod dual;
 mod finalise;
 mod patch_meta;
 mod verdict;
 
+pub use dual::{tally, CheckReceipt, DriftRate, DualVerdict, DualVerification, LossTally};
 pub use finalise::{
     pre_finalise_plan, receipt_currency, FinalisePlan, RebaselineStep, ReceiptCurrency,
 };
