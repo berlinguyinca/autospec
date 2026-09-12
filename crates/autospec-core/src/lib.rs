@@ -84,6 +84,7 @@ pub mod graph;
 pub mod growth;
 pub mod guard_extraction;
 pub mod heartbeat;
+pub mod held_backlog;
 pub mod held_conflicts;
 pub mod hold_memo;
 pub mod host_set;
