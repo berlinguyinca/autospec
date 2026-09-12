@@ -154,7 +154,7 @@ fn an_unreadable_subtree_does_not_fail_the_measurement() {
 /// attempt, from a line count that included blank lines; the measurement and
 /// the ceiling must come from the same counter, which is why this is pinned
 /// to `measure()` rather than to a shell one-liner.
-const REPOSITORY_CEILING: usize = 228_805;
+const REPOSITORY_CEILING: usize = 227_188;
 
 #[test]
 fn the_repository_stays_under_its_shell_ceiling() {

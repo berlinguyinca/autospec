@@ -28,7 +28,13 @@ const COUNTED: &[(&str, &str)] = &[("sh", "shell"), ("bats", "bats")];
 
 /// Directories never counted: build output, VCS metadata, and vendored code
 /// that is not ours to port.
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", "vendor"];
+// `fixtures` is skipped because this ratchet measures the pipeline, not test
+// data -- as the module doc above already states. A fixture that demonstrates a
+// skill invoking a shell script is an input to a test, not pipeline logic, and
+// counting it makes the ratchet refuse the Rust checker that reads it. That is
+// what happened: a patch adding a Rust structural validator plus a 5-line
+// fixture script pushed the repository 5 lines over its ceiling.
+const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", "vendor", "fixtures"];
 
 /// A measurement of the repository's shell surface.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
