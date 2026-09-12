@@ -41,6 +41,7 @@ pub mod pi_events;
 pub mod policy;
 pub mod profile;
 pub mod reasoning;
+pub mod repair_controller;
 pub mod result_target;
 pub mod scheduling_contract;
 pub mod stuck_sampling;
@@ -125,6 +126,10 @@ pub use profile::{
 pub use reasoning::{
     select_reasoning, ReasoningBudget, ReasoningHistory, ReasoningLimits, ReasoningSelection,
     SamplingProfile, SamplingRegistry,
+};
+pub use repair_controller::{
+    AttemptRecord, BlockedHandoff, BuilderTier, FailureClass, RepairAction, RepairController,
+    RepairPolicy, RepairRejection, RepairRequest, REPAIR_SCHEMA_VERSION,
 };
 pub use result_target::{
     evaluate_result_target, median_wall_ms, GateStatus, GateVerdict, ResultTarget,
