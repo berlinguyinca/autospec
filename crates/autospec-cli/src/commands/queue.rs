@@ -967,20 +967,41 @@ fn plan_json(plan: &ReadyQueuePlan, constrained: bool) -> String {
     } else {
         format!(",\"diagnostics\":{diagnostics}")
     };
+    // A permanent (tier/class) label in the readiness predicate is a defect
+    // (#4475); it is reported only when present, so a sound frontier emits no
+    // extra field.
+    let predicate_defects = readiness_predicate_defects_json(plan);
+    let predicate_defects_field = if predicate_defects == "[]" {
+        String::new()
+    } else {
+        format!(",\"readiness_predicate_defects\":{predicate_defects}")
+    };
     format!(
-        "{{\"ready\":{},\"blocked\":{},\"claimed\":{},\"conflicts\":{},\"gate_counts\":{}{},\"scan_scope\":{},\"worker_cap\":{{\"max_repo_workers\":{},\"active_count\":{},\"remaining\":{},\"reached\":{}}},\"batch\":{}}}",
+        "{{\"ready\":{},\"blocked\":{},\"claimed\":{},\"conflicts\":{},\"gate_counts\":{}{}{},\"scan_scope\":{},\"worker_cap\":{{\"max_repo_workers\":{},\"active_count\":{},\"remaining\":{},\"reached\":{}}},\"batch\":{}}}",
         views_json(&plan.ready),
         views_json(&plan.blocked),
         issues_json(&plan.claimed),
         views_json(&plan.conflicts),
         gate_counts_json(plan),
         diagnostics_field,
+        predicate_defects_field,
         json_string(if constrained { "slice" } else { "repository" }),
         plan.worker_cap.max_repo_workers,
         plan.worker_cap.active_count,
         plan.worker_cap.remaining,
         json_bool(plan.worker_cap.reached),
         views_json(&plan.batch),
+    )
+}
+
+fn readiness_predicate_defects_json(plan: &ReadyQueuePlan) -> String {
+    format!(
+        "[{}]",
+        plan.readiness_predicate_defects
+            .iter()
+            .map(|label| json_string(label))
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 
@@ -1025,13 +1046,14 @@ fn discovery_missing_safety_diagnostic_json(view: &QueueIssueView) -> String {
 fn gate_counts_json(plan: &ReadyQueuePlan) -> String {
     let counts = &plan.gate_counts;
     format!(
-        "{{\"open\":{},\"candidate\":{},\"reviewed\":{},\"blocked\":{},\"duplicates\":{},\"dependency_blocked\":{},\"linked_pr_blocked\":{},\"path_conflicted\":{},\"capability_blocked\":{},\"zero_output_review\":{},\"ready\":{},\"claimed\":{},\"selected\":{}}}",
+        "{{\"open\":{},\"candidate\":{},\"reviewed\":{},\"blocked\":{},\"duplicates\":{},\"dependency_blocked\":{},\"decision_blocked\":{},\"linked_pr_blocked\":{},\"path_conflicted\":{},\"capability_blocked\":{},\"zero_output_review\":{},\"ready\":{},\"claimed\":{},\"selected\":{}}}",
         counts.open,
         counts.candidate,
         counts.reviewed,
         counts.blocked,
         counts.duplicates,
         counts.dependency_blocked,
+        counts.decision_blocked,
         counts.linked_pr_blocked,
         counts.path_conflicted,
         counts.capability_blocked,

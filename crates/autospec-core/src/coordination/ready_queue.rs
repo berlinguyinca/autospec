@@ -9,7 +9,7 @@ use crate::coordination::withdrawal::WithdrawalDecision;
 use crate::state::json::{JsonParser, JsonValue};
 
 mod labels;
-use labels::{BLOCKING_LABELS, SERIAL_LABELS};
+use labels::{permanent_labels_in_predicate, BLOCKING_LABELS, SERIAL_LABELS};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteIssue {
     pub number: u64,
@@ -396,6 +396,11 @@ pub struct QueueGateCounts {
     pub blocked: usize,
     pub duplicates: usize,
     pub dependency_blocked: usize,
+    /// Open issues blocked because a human decision is outstanding
+    /// (`autospec:needs-human`), counted separately from [`dependency_blocked`]
+    /// so "0 resolvable" is not reported when the real count of open questions
+    /// is non-zero (#4475).
+    pub decision_blocked: usize,
     pub linked_pr_blocked: usize,
     pub path_conflicted: usize,
     pub ready: usize,
@@ -414,6 +419,10 @@ pub struct ReadyQueuePlan {
     pub worker_cap: WorkerCap,
     pub batch: Vec<QueueIssueView>,
     pub gate_counts: QueueGateCounts,
+    /// Permanent (tier/class) labels found in the readiness predicate, if any.
+    /// Always empty for a sound predicate; non-empty is a defect the frontier
+    /// reports rather than silently excluding work (#4475).
+    pub readiness_predicate_defects: Vec<String>,
 }
 
 impl ReadyQueuePlan {
@@ -668,6 +677,15 @@ pub fn plan_ready_queue_with_trusted_actors(
             .cloned()
             .collect()
     };
+    // #4475 invariant: a label that gates readiness must be removable. A
+    // permanent (tier/class) label in the readiness predicate is a defect — it
+    // would delete the issue from the plan regardless of dependency state — so
+    // the frontier reports it rather than silently excluding the work.
+    let predicate_labels: Vec<&str> = BLOCKING_LABELS.iter().map(|(label, _)| *label).collect();
+    let readiness_predicate_defects = permanent_labels_in_predicate(&predicate_labels)
+        .into_iter()
+        .map(|label| label.to_string())
+        .collect();
     let mut plan = ReadyQueuePlan {
         ready,
         blocked,
@@ -676,6 +694,7 @@ pub fn plan_ready_queue_with_trusted_actors(
         worker_cap,
         batch,
         gate_counts: QueueGateCounts::default(),
+        readiness_predicate_defects,
     };
     plan.gate_counts = queue_gate_counts(&plan, open_count, candidate_count, reviewed_count);
     plan
@@ -783,6 +802,11 @@ fn queue_gate_counts(
                     Some("blocked_dependencies") | Some("blocked_cycle")
                 )
             })
+            .count(),
+        decision_blocked: plan
+            .blocked
+            .iter()
+            .filter(|view| view.reason.as_deref() == Some("autospec_needs_human"))
             .count(),
         linked_pr_blocked: plan
             .blocked
