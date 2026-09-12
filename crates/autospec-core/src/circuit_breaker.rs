@@ -22,6 +22,10 @@
 //!    resets the stuck timer, so a legitimately long request that keeps
 //!    producing is never punished by wall-clock alone. The bound belongs
 //!    next to the "busy is not dead" rule: [`BreakerConfig::stuck_timeout`].
+//!    This is the one progress judgement in the module: the operational
+//!    liveness scan ([`WorkerOutcome::liveness`], [`Fleet::liveness_report`])
+//!    consumes it rather than reimplementing a probe-timeout test
+//!    (issue #4459).
 //! 4. **A routing decision must be able to exclude a peer, and say that it
 //!    did** ([`WorkerOutcome::routing_decision`],
 //!    [`Fleet::routing_report`]). The open circuit is reported with its age
@@ -51,6 +55,59 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
+
+/// The outcome of the scan's own probe of a worker (the `/props` request a
+/// health scan sends).
+///
+/// The probe is characterisation, not judgement: the liveness verdict
+/// below is carried by the progress sample — decode advancing across the
+/// stuck window — whenever one exists, and the probe only speaks for a
+/// worker the progress measure has already suspected, i.e. one with no
+/// in-flight work to sample (issue #4459).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    /// The endpoint answered the probe.
+    Answered,
+    /// The probe timed out. A timeout alone reports *unknown*, never *bad*:
+    /// under load a probe queues behind real work, so the busiest workers
+    /// fail it first.
+    TimedOut,
+}
+
+/// The three-valued liveness verdict for one worker (issue #4459).
+///
+/// A liveness check distinguishes "slow" from "dead" by construction, not
+/// by timeout: three states, because acting on them differs — a busy worker
+/// (queue depth high, decode advancing) is left alone, a wedged one (slots
+/// saturated, decode flat) is restarted, and an unknown one is re-sampled
+/// before any action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LivenessVerdict {
+    /// Decode is advancing (a busy worker under load) or the worker is
+    /// idle and answering. Route to it; a probe timeout here is ignored —
+    /// progress is the only exoneration, and this worker has progress.
+    Healthy,
+    /// Slots are saturated and decode is flat for the stuck window: the
+    /// progress measure — [`WorkerOutcome::stuck`], the gateway's own stuck
+    /// detector — says this worker is wedged.
+    Wedged,
+    /// No progress sample exists to exonerate or condemn (no in-flight
+    /// work to sample) and the probe timed out — or was never sent. A
+    /// timeout alone is unknown, never a verdict of "not answering"; it is
+    /// resolved by a progress sample before any action.
+    Unknown,
+}
+
+impl LivenessVerdict {
+    /// The verdict as reported: `healthy`, `wedged`, `unknown`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            LivenessVerdict::Healthy => "healthy",
+            LivenessVerdict::Wedged => "wedged",
+            LivenessVerdict::Unknown => "unknown",
+        }
+    }
+}
 
 /// The outcome of a real request to a worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,6 +547,74 @@ impl WorkerOutcome {
         now.saturating_sub(self.state_since)
     }
 
+    /// The liveness verdict for this worker (issue #4459).
+    ///
+    /// One implementation, shared with the operational scan: with in-flight
+    /// work the progress sample *is* the judgement — decode advancing means
+    /// [`LivenessVerdict::Healthy`], decode flat for
+    /// [`BreakerConfig::stuck_timeout`] means [`LivenessVerdict::Wedged`] —
+    /// exactly [`WorkerOutcome::stuck`], the gateway's own stuck detector,
+    /// so a fix to the invariant lands in one place. The probe is ignored
+    /// here: a probe that times out behind real traffic is a property of
+    /// the probe, not of the worker. With no in-flight work there is no
+    /// progress sample: an answering probe is healthy, a timed-out (or
+    /// missing) probe is [`LivenessVerdict::Unknown`], never a verdict of
+    /// "not answering".
+    pub fn liveness(&self, probe: Option<ProbeOutcome>, now: Duration) -> LivenessVerdict {
+        if self.in_flight > 0 {
+            return match self.stuck(now) {
+                Some(_) => LivenessVerdict::Wedged,
+                None => LivenessVerdict::Healthy,
+            };
+        }
+        match probe {
+            Some(ProbeOutcome::Answered) => LivenessVerdict::Healthy,
+            Some(ProbeOutcome::TimedOut) | None => LivenessVerdict::Unknown,
+        }
+    }
+
+    /// The per-worker liveness report line: the verdict first, then the
+    /// evidence that carried it — busy (in-flight, decode advancing),
+    /// wedged (saturated, decode flat), or unknown (no progress sample;
+    /// the probe result, if any, stated as characterisation). The three
+    /// states stay visibly distinct in the line, because acting on them
+    /// differs.
+    pub fn liveness_line(&self, probe: Option<ProbeOutcome>, now: Duration) -> String {
+        let verdict = self.liveness(probe, now);
+        let mut line = format!("{} [{}]: {}", self.worker, self.model, verdict.label());
+        match verdict {
+            LivenessVerdict::Healthy if self.in_flight > 0 => {
+                let no_token = self
+                    .no_token_for(now)
+                    .map(fmt_dur)
+                    .unwrap_or_else(|| "0s".to_string());
+                line.push_str(&format!(
+                    " (busy: {} in-flight, no token for {no_token})",
+                    self.in_flight
+                ));
+            }
+            LivenessVerdict::Healthy => line.push_str(" (idle, probe answered)"),
+            LivenessVerdict::Wedged => {
+                let no_token = self.no_token_for(now).map(fmt_dur).unwrap_or_default();
+                line.push_str(&format!(
+                    " ({} in-flight, no token for {no_token})",
+                    self.in_flight
+                ));
+            }
+            LivenessVerdict::Unknown => {
+                let note = match probe {
+                    Some(ProbeOutcome::TimedOut) => "probe timed out, no in-flight work to sample",
+                    Some(ProbeOutcome::Answered) => unreachable!("answered probe is healthy"),
+                    None => "no probe on record, no in-flight work to sample",
+                };
+                line.push_str(&format!(
+                    " ({note} — resolve with a progress sample before acting)"
+                ));
+            }
+        }
+        line
+    }
+
     /// The last N per-worker outcomes, oldest first. History, not an
     /// aggregate.
     pub fn recent_outcomes(&self) -> &[Outcome] {
@@ -754,6 +879,36 @@ impl Fleet {
     /// success.
     pub fn summary_lines(&self, now: Duration) -> Vec<String> {
         self.workers.values().map(|w| w.line(now)).collect()
+    }
+
+    /// The fleet liveness scan (issue #4459): one line per worker, each
+    /// verdict carried by the progress sample when one exists and the
+    /// probe as characterisation otherwise, plus a summary that never
+    /// collapses busy into bad. `probes` maps worker id to the scan's
+    /// probe outcome; a worker with no entry is unprobed, which is
+    /// [`LivenessVerdict::Unknown`] when it has no in-flight work.
+    pub fn liveness_report(
+        &self,
+        probes: &BTreeMap<String, ProbeOutcome>,
+        now: Duration,
+    ) -> String {
+        let mut lines: Vec<String> = self
+            .workers
+            .values()
+            .map(|w| w.liveness_line(probes.get(&w.worker).copied(), now))
+            .collect();
+        let (mut healthy, mut wedged, mut unknown) = (0usize, 0usize, 0usize);
+        for w in self.workers.values() {
+            match w.liveness(probes.get(&w.worker).copied(), now) {
+                LivenessVerdict::Healthy => healthy += 1,
+                LivenessVerdict::Wedged => wedged += 1,
+                LivenessVerdict::Unknown => unknown += 1,
+            }
+        }
+        lines.push(format!(
+            "FLEET healthy={healthy} wedged={wedged} unknown={unknown}"
+        ));
+        lines.join("\n")
     }
 }
 
