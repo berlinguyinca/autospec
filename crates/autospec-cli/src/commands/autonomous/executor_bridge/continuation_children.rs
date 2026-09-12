@@ -120,8 +120,16 @@ fn continuation_child_document(
         receipt.content_digest,
         ordinal
     );
+    // Generated issues name the language an agent should write (issue #4447).
+    let language = autospec_core::implementation_language::implementation_language(
+        &receipt.repository,
+    )
+    .ok_or_else(|| {
+        format!("no implementation language settled for repository {:?}", receipt.repository)
+    })?
+    .as_str();
     let mut body = format!(
-        "{marker}\n\n## Goal\n\n{}.\n\n## Acceptance criteria\n\n- [ ] {}\n",
+        "{marker}\n\n## Goal\n\n{}.\n\n## Implementation language\n\n{language}\n\n## Acceptance criteria\n\n- [ ] {}\n",
         criterion.trim_end_matches(['.', '?', '!']),
         criterion
     );
