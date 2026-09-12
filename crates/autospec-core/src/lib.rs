@@ -38,6 +38,7 @@ pub mod conflict_resolution;
 pub mod construction_sites;
 pub mod context;
 pub mod conversion_gate;
+pub mod conversion_pass;
 pub mod coordination;
 pub mod cost;
 pub mod cron_log_contract;

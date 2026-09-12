@@ -157,6 +157,7 @@ commands! {
     lint => "Lint issue and implementation policy inputs", direct;
     claim => "Manage GitHub-backed issue claim state", direct;
     cost => "Account GPU-hours by terminal status: runs, share, rework, defect cost, threshold flags", diagnostic;
+    convert => "The patch-to-PR conversion pass: plan (default) or --apply to convert fresh agent patches", direct;
     parent => "Reconcile decomposed parent issue state", direct;
     queue => "Compute the safe GitHub issue queue", direct;
     repair_loop as "repair-loop" => "Observe repair loops: rate, consecutive-sweep escalation, defect tickets", direct;
