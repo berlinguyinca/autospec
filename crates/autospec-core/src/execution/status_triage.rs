@@ -11,10 +11,17 @@
 //! - a run that **timed out** never reached the gate at all. The local
 //!   gate cannot speak about the patch, and the only response is to
 //!   re-dispatch;
-//! - a run that reported a **fmt or build failure** recorded a
-//!   deterministic negative — a property of the submission, not of the
-//!   run. A local re-run reproduces the same failure; the patch should
-//!   be held with the agent's own evidence;
+//! - a run that reported a **fmt failure, alone** recorded a
+//!   deterministic negative the pass can repair: formatting is
+//!   deterministic and mechanical, so the pass formats the patch
+//!   itself and re-checks it locally before judging. The recorded
+//!   `FMT-DIRTY` verdict never short-circuits the local check — the
+//!   local result is authoritative;
+//! - a run that reported a **build failure** (or a fmt failure
+//!   together with one) recorded a deterministic negative no
+//!   normalisation can repair — a property of the submission, not of
+//!   the run. A local re-run reproduces the same failure; the patch is
+//!   held with the agent's own evidence;
 //! - a run that reported **test failures** recorded an untrusted signal:
 //!   tests are flaky, and the agent ran against its own base, which may
 //!   have moved. The right response is to gate locally — re-verify
@@ -41,14 +48,25 @@
 //!    plain timeout does, but the response is to raise it for review —
 //!    a human or the monitor looks at why nothing came out — not to
 //!    silently re-queue it.
-//! 2. **Deterministic negatives are trusted; they hold, they do not
-//!    re-run** ([`TriageDecision::Hold`]). `fmt_rc != 0` holds the patch
-//!    as [`AgentHoldReason::Unformatted`]
-//!    (`AGENT-REPORTED-UNFORMATTED`); `build_rc != 0`, or
-//!    `status=BUILD-FAILED` / `TESTS-DO-NOT-COMPILE`, holds it as
-//!    [`AgentHoldReason::Unbuilt`] (`AGENT-REPORTED-UNBUILT`).
-//!    Formatting and compilation are deterministic: a local re-run
-//!    reproduces the failure the agent already paid to observe.
+//! 2. **Deterministic negatives are trusted; a repairable one is
+//!    repaired, not held** ([`TriageDecision::FormatAndRecheck`],
+//!    [`TriageDecision::Hold`]). A fmt failure alone (`fmt_rc != 0` or
+//!    `status=FMT-DIRTY`, with a green build) formats the patch and
+//!    re-checks it locally before judging: a stage that consults the
+//!    recorded verdict and runs its own local check for the same
+//!    property must not let the recorded verdict win — the local result
+//!    is authoritative. The re-check verifies that formatting did not
+//!    widen the changed-file set ([`format_scope_check`]) and decides
+//!    on the local exit code ([`post_format_decision`]). A fmt failure
+//!    together with a build failure, or a build failure alone
+//!    (`build_rc != 0`, or `status=BUILD-FAILED` /
+//!    `TESTS-DO-NOT-COMPILE`), holds the patch: no formatter repairs a
+//!    broken build. A fmt failure holds as
+//!    [`AgentHoldReason::Unformatted`] (`AGENT-REPORTED-UNFORMATTED`);
+//!    a build failure holds as [`AgentHoldReason::Unbuilt`]
+//!    (`AGENT-REPORTED-UNBUILT`). Formatting and compilation are
+//!    deterministic: the pass re-runs only what it can repair, and the
+//!    agent's report still saves the re-run for the rest.
 //! 3. **Test negatives are triggers, never holds**
 //!    ([`GateBasis::AgentReportedTestFailure`]). `test_rc != 0` or
 //!    `status=NEW-TEST-FAILURES` gates locally. The agent's test run was
@@ -195,7 +213,7 @@ fn parse_fmt_files(value: &str) -> Result<usize, String> {
         .map_err(|_| format!("fmt-files.txt expects a file count, got {value}"))
 }
 
-/// The four responses the pass can make to an agent report (#3715).
+/// The five responses the pass can make to an agent report (#3715).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriageDecision {
     /// Re-dispatch the issue; do not gate locally (rule 1).
@@ -215,6 +233,18 @@ pub enum TriageDecision {
         /// Which deterministic signal held the patch.
         reason: AgentHoldReason,
     },
+    /// Format the patch and re-check it locally before judging (rule 2).
+    ///
+    /// The agent's report recorded a fmt failure — `fmt_rc != 0` or a
+    /// `FMT-DIRTY` status — with no build failure in the same report.
+    /// The recorded verdict does not short-circuit the local check: the
+    /// pass formats the patch, verifies that formatting did not widen
+    /// the changed-file set ([`format_scope_check`]), and re-runs the
+    /// fmt check; the local result is authoritative
+    /// ([`post_format_decision`]). The decision is an action for the
+    /// caller, like [`TriageDecision::Redispatch`] — this module
+    /// performs no I/O, and the pass runs the formatter.
+    FormatAndRecheck,
     /// Gate locally against the current main (rules 3–5, 6).
     GateLocally {
         /// Why the local gate is running; the basis goes in the run
@@ -293,10 +323,17 @@ pub enum GateBasis {
 ///    reproduces the same emptiness, so the run is raised for review
 ///    rather than re-queued. It outranks every other signal just as the
 ///    plain timeout does.
-/// 2. `fmt_rc != 0` or `FMT-DIRTY` → [`TriageDecision::Hold`] as
-///    [`AgentHoldReason::Unformatted`]. Deterministic; a local re-run
-///    reproduces it. The status counts on its own because a fleet run
-///    that stops at formatting records the name and no `fmt_rc`.
+/// 2. `fmt_rc != 0` or `FMT-DIRTY`, with no build failure in the same
+///    report → [`TriageDecision::FormatAndRecheck`]. The recorded
+///    verdict does not short-circuit the local check: the pass formats
+///    the patch, verifies the changed-file set did not widen
+///    ([`format_scope_check`]), and re-checks locally; the local result
+///    is authoritative ([`post_format_decision`]). The status counts on
+///    its own because a fleet run that stops at formatting records the
+///    name and no `fmt_rc`. A fmt failure together with a build
+///    failure → [`TriageDecision::Hold`] as
+///    [`AgentHoldReason::Unformatted`]: a formatter cannot repair a
+///    broken build, and the fmt evidence leads the hold line.
 /// 3. `build_rc != 0` or `BUILD-FAIL` → [`TriageDecision::Hold`] as
 ///    [`AgentHoldReason::Unbuilt`]. Deterministic; same reason. The
 ///    legacy spellings `BUILD-FAILED` and `TESTS-DO-NOT-COMPILE` reach
@@ -355,15 +392,30 @@ pub fn triage(report: &AgentReport) -> TriageDecision {
             status: Status::TimeoutNoOutput.as_str().to_string(),
         };
     }
-    // 2. fmt: a deterministic negative; trust the agent's exit code, and
-    //    trust the name when the run recorded only the name.
-    if matches!(report.fmt_rc, Some(rc) if rc != 0) || canonical == Some(Status::FmtDirty) {
-        return TriageDecision::Hold {
-            reason: AgentHoldReason::Unformatted,
+    // 2. fmt: a deterministic negative the pass can repair. Trust the
+    //    agent's exit code, and trust the name when the run recorded
+    //    only the name. The recorded verdict does not short-circuit the
+    //    local check: the pass formats and re-checks locally before
+    //    judging, and the local result is authoritative (#4099). A fmt
+    //    failure together with a build failure in the same report is
+    //    not repairable by a formatter — it holds, with the fmt
+    //    evidence first, as before.
+    let fmt_failed =
+        matches!(report.fmt_rc, Some(rc) if rc != 0) || canonical == Some(Status::FmtDirty);
+    let build_failed = matches!(report.build_rc, Some(rc) if rc != 0)
+        || matches!(canonical, Some(Status::BuildFail));
+    if fmt_failed {
+        return if build_failed {
+            TriageDecision::Hold {
+                reason: AgentHoldReason::Unformatted,
+            }
+        } else {
+            TriageDecision::FormatAndRecheck
         };
     }
-    // 3. build: a deterministic negative; trust the agent's.
-    if matches!(report.build_rc, Some(rc) if rc != 0) || canonical == Some(Status::BuildFail) {
+    // 3. build: a deterministic negative no normalisation repairs; trust
+    //    the agent's.
+    if build_failed {
         return TriageDecision::Hold {
             reason: AgentHoldReason::Unbuilt,
         };
@@ -433,12 +485,7 @@ pub fn triage_report(content: &str) -> TriageDecision {
 /// `HELD: agent reported fmt_rc=1 (32 files), status=TIMEOUT`.
 pub fn held_line(report: &AgentReport, reason: AgentHoldReason) -> String {
     let evidence = match reason {
-        AgentHoldReason::Unformatted => match (report.fmt_rc, report.fmt_files) {
-            (Some(rc), Some(files)) => format!("fmt_rc={rc} ({files} files)"),
-            (Some(rc), None) => format!("fmt_rc={rc}"),
-            (None, Some(files)) => format!("fmt_files={files}"),
-            (None, None) => "fmt failure".to_string(),
-        },
+        AgentHoldReason::Unformatted => fmt_evidence(report),
         AgentHoldReason::Unbuilt => match report.build_rc {
             Some(rc) => format!("build_rc={rc}"),
             None => "build failure".to_string(),
@@ -447,6 +494,19 @@ pub fn held_line(report: &AgentReport, reason: AgentHoldReason) -> String {
     match report.status.as_deref() {
         Some(status) => format!("HELD: agent reported {evidence}, status={status}"),
         None => format!("HELD: agent reported {evidence}"),
+    }
+}
+
+/// The fmt evidence the agent's report carries, for a hold or a
+/// format-and-recheck line: `fmt_rc` with the file count when both are
+/// recorded, either alone when only one is, and the bare name when the
+/// run recorded neither.
+fn fmt_evidence(report: &AgentReport) -> String {
+    match (report.fmt_rc, report.fmt_files) {
+        (Some(rc), Some(files)) => format!("fmt_rc={rc} ({files} files)"),
+        (Some(rc), None) => format!("fmt_rc={rc}"),
+        (None, Some(files)) => format!("fmt_files={files}"),
+        (None, None) => "fmt failure".to_string(),
     }
 }
 
@@ -463,6 +523,16 @@ pub fn decision_line(decision: &TriageDecision, report: &AgentReport) -> String 
             )
         }
         TriageDecision::Hold { reason } => held_line(report, *reason),
+        TriageDecision::FormatAndRecheck => match report.status.as_deref() {
+            Some(status) => format!(
+                "FORMAT-AND-RECHECK: agent reported {}, status={status}; formatting and re-checking locally before judging",
+                fmt_evidence(report)
+            ),
+            None => format!(
+                "FORMAT-AND-RECHECK: agent reported {}; formatting and re-checking locally before judging",
+                fmt_evidence(report)
+            ),
+        },
         TriageDecision::GateLocally { basis } => {
             format!("GATE-LOCALLY: {}", basis_line(basis, report))
         }
@@ -491,6 +561,75 @@ fn basis_line(basis: &GateBasis, report: &AgentReport) -> String {
         GateBasis::ReportUnreadable { detail } => {
             format!("status file unreadable ({detail}); gating against current main")
         }
+    }
+}
+
+/// What the local fmt re-check means after the pass formatted the patch
+/// ([`TriageDecision::FormatAndRecheck`], #4099).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostFormatDecision {
+    /// The local fmt check passed and formatting did not widen the
+    /// changed-file set: proceed to the gate. The local result outranks
+    /// the recorded `FMT-DIRTY` verdict.
+    Gate,
+    /// The local fmt check still fails after the pass formatted the
+    /// patch: hold it. The formatter did not clean the tree, so this is
+    /// not a formatting defect the pass can repair.
+    HoldStillDirty,
+    /// The local fmt check passes, but the formatter touched files the
+    /// patch never changed: hold it, naming the widened files.
+    HoldWidened {
+        /// The files the formatter touched that were not in the patch's
+        /// changed set.
+        widened: Vec<String>,
+    },
+}
+
+/// Decide what the local fmt re-check means after the pass formatted
+/// the patch (#4099). The local result is authoritative: a recorded
+/// `FMT-DIRTY` verdict never holds a patch the local check clears, and
+/// a local check that still fails holds a patch the recorded verdict
+/// would have passed.
+///
+/// `local_fmt_rc` is the exit code of the local fmt check the pass ran
+/// after formatting; `widened` is the widened-file list from
+/// [`format_scope_check`] (empty when the changed-file set did not
+/// widen).
+pub fn post_format_decision(local_fmt_rc: i32, widened: Vec<String>) -> PostFormatDecision {
+    if local_fmt_rc != 0 {
+        return PostFormatDecision::HoldStillDirty;
+    }
+    if widened.is_empty() {
+        PostFormatDecision::Gate
+    } else {
+        PostFormatDecision::HoldWidened { widened }
+    }
+}
+
+/// Verify that formatting did not widen the changed-file set (#4099).
+///
+/// `changed_before` is the patch's changed files as recorded before the
+/// pass formatted; `changed_after` is the changed files after. The
+/// check passes when every file touched after formatting was already
+/// touched before — `changed_after ⊆ changed_before`. It fails with the
+/// files the formatter introduced (sorted, deduplicated), so the hold
+/// line can name them. Order and duplicates do not matter: this is a
+/// set inclusion.
+pub fn format_scope_check(
+    changed_before: &[String],
+    changed_after: &[String],
+) -> Result<(), Vec<String>> {
+    use std::collections::BTreeSet;
+    let before: BTreeSet<&String> = changed_before.iter().collect();
+    let widened: BTreeSet<String> = changed_after
+        .iter()
+        .filter(|path| !before.contains(path))
+        .cloned()
+        .collect();
+    if widened.is_empty() {
+        Ok(())
+    } else {
+        Err(widened.into_iter().collect())
     }
 }
 
@@ -669,13 +808,119 @@ worker: gpu-4090-03
     }
 
     #[test]
-    fn a_fmt_failure_holds_unformatted() {
+    fn a_fmt_only_failure_formats_and_rechecks() {
+        // The recorded verdict does not short-circuit the local check:
+        // the pass formats and re-checks before judging (#4099).
         assert_eq!(
             triage(&report(None, Some(0), Some(0), Some(1), Some(32))),
+            TriageDecision::FormatAndRecheck
+        );
+        // The status alone says the same thing.
+        assert_eq!(
+            triage(&report(Some("FMT-DIRTY"), Some(0), Some(0), None, None)),
+            TriageDecision::FormatAndRecheck
+        );
+    }
+
+    #[test]
+    fn a_fmt_failure_with_a_build_failure_still_holds() {
+        // A formatter cannot repair a broken build: the same report
+        // holds, with the fmt evidence first, as before.
+        assert_eq!(
+            triage(&report(None, Some(101), Some(0), Some(1), Some(32))),
             TriageDecision::Hold {
                 reason: AgentHoldReason::Unformatted
             }
         );
+        assert_eq!(
+            triage(&report(Some("FMT-DIRTY"), Some(101), None, Some(1), None)),
+            TriageDecision::Hold {
+                reason: AgentHoldReason::Unformatted
+            }
+        );
+    }
+
+    #[test]
+    fn a_recorded_fmt_dirty_verdict_yields_to_the_local_recheck() {
+        // AC3 (a): the run recorded FMT-DIRTY and the local re-check
+        // passes without widening the changed-file set — the local
+        // result is authoritative; the patch goes to the gate.
+        let report = report(Some("FMT-DIRTY"), Some(0), Some(0), Some(1), Some(32));
+        assert_eq!(triage(&report), TriageDecision::FormatAndRecheck);
+        assert!(format_scope_check(&["src/a.rs".into()], &["src/a.rs".into()]).is_ok());
+        assert_eq!(
+            post_format_decision(0, Vec::new()),
+            PostFormatDecision::Gate
+        );
+    }
+
+    #[test]
+    fn a_recorded_fmt_dirty_verdict_holds_when_formatting_widens() {
+        // AC3 (b): the run recorded FMT-DIRTY and the local re-check
+        // passes, but the formatter touched a file the patch never
+        // changed — the patch is held, naming the widened file.
+        let report = report(Some("FMT-DIRTY"), Some(0), Some(0), Some(1), Some(32));
+        assert_eq!(triage(&report), TriageDecision::FormatAndRecheck);
+        let widened = format_scope_check(
+            &["src/a.rs".into()],
+            &["src/a.rs".into(), "src/b.rs".into()],
+        )
+        .unwrap_err();
+        assert_eq!(widened, vec!["src/b.rs".to_string()]);
+        assert_eq!(
+            post_format_decision(0, widened),
+            PostFormatDecision::HoldWidened {
+                widened: vec!["src/b.rs".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn a_local_fmt_failure_after_formatting_holds_still_dirty() {
+        // The formatter did not clean the tree: the local re-check
+        // still fails, and the patch is held.
+        assert_eq!(
+            post_format_decision(1, Vec::new()),
+            PostFormatDecision::HoldStillDirty
+        );
+        // A still-dirty tree holds even if it also widened — the
+        // formatter failure is the primary defect.
+        assert_eq!(
+            post_format_decision(1, vec!["src/b.rs".to_string()]),
+            PostFormatDecision::HoldStillDirty
+        );
+    }
+
+    #[test]
+    fn the_format_scope_check_is_a_set_inclusion() {
+        let before = vec!["src/b.rs".to_string(), "src/a.rs".to_string()];
+        // A subset in any order passes.
+        assert!(format_scope_check(&before, &["src/a.rs".to_string()]).is_ok());
+        // Duplicates on either side do not matter.
+        assert!(format_scope_check(
+            &before,
+            &[
+                "src/a.rs".to_string(),
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string()
+            ]
+        )
+        .is_ok());
+        // Any file the formatter introduced fails, sorted and deduplicated.
+        let widened = format_scope_check(
+            &before,
+            &["src/c.rs".into(), "src/c.rs".into(), "src/a.rs".into()],
+        )
+        .unwrap_err();
+        assert_eq!(widened, vec!["src/c.rs".to_string()]);
+        let widened =
+            format_scope_check(&before, &["src/d.rs".into(), "src/c.rs".into()]).unwrap_err();
+        assert_eq!(
+            widened,
+            vec!["src/c.rs".to_string(), "src/d.rs".to_string()]
+        );
+        // An empty after-set passes: formatting can only narrow.
+        assert!(format_scope_check(&before, &[]).is_ok());
     }
 
     #[test]
@@ -905,6 +1150,19 @@ worker: gpu-4090-03
                 &unformatted
             ),
             "HELD: agent reported fmt_rc=1 (32 files), status=TIMEOUT"
+        );
+
+        let fmt_dirty = report(Some("FMT-DIRTY"), Some(0), Some(0), Some(1), Some(32));
+        assert_eq!(
+            decision_line(&TriageDecision::FormatAndRecheck, &fmt_dirty),
+            "FORMAT-AND-RECHECK: agent reported fmt_rc=1 (32 files), status=FMT-DIRTY; formatting and re-checking locally before judging"
+        );
+        assert_eq!(
+            decision_line(
+                &TriageDecision::FormatAndRecheck,
+                &report(None, Some(0), Some(0), Some(1), None)
+            ),
+            "FORMAT-AND-RECHECK: agent reported fmt_rc=1; formatting and re-checking locally before judging"
         );
 
         assert_eq!(

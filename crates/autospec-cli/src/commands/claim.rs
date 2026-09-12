@@ -1895,7 +1895,7 @@ fn active_record_counts_toward_worker_capacity(
     }
     if !record.pr.is_empty()
         || startup_heartbeat_exists(repo, issue)
-        || branch_attempt_is_live(repo, &record.branch).unwrap_or(true)
+        || branch_liveness(repo, &record.branch).live_or_unknown()
     {
         return Ok(true);
     }
@@ -1930,8 +1930,7 @@ fn recover_stale_startup_record(
             previous_claim_id: None,
         });
     }
-    if branch_attempt_is_live(repo, &selected.record.branch).unwrap_or(true)
-        || !server_lease_is_stale(&selected.server_updated_at, timeout_seconds)
+    if !server_lease_is_stale(&selected.server_updated_at, timeout_seconds)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
     {
         return Ok(RecoveryOutcome {
@@ -1939,6 +1938,25 @@ fn recover_stale_startup_record(
             reason: "claim_evidence_or_fresh_state".to_string(),
             previous_claim_id: None,
         });
+    }
+    match branch_liveness(repo, &selected.record.branch) {
+        BranchLiveness::Dead => {}
+        BranchLiveness::Live => {
+            return Ok(RecoveryOutcome {
+                recovered: false,
+                reason: "claim_evidence_or_fresh_state".to_string(),
+                previous_claim_id: None,
+            });
+        }
+        // The lookup failed; the reason names that instead of folding unknown
+        // into "the branch is live" (#4129).
+        BranchLiveness::Unknown => {
+            return Ok(RecoveryOutcome {
+                recovered: false,
+                reason: "branch_liveness_unknown".to_string(),
+                previous_claim_id: None,
+            });
+        }
     }
     if !quarantine_authoritative_stale_heartbeat_with_sync_hook(
         repo,
@@ -2017,28 +2035,33 @@ fn recover_authoritative_stale_startup(
             previous_claim_id: None,
         });
     }
-    let branch_blocked = match branch_attempt_is_live(repo, &selected.record.branch) {
-        Ok(blocked) => blocked,
-        Err(_) => {
+    let authorized_prior = match branch_liveness(repo, &selected.record.branch) {
+        BranchLiveness::Dead => None,
+        BranchLiveness::Live => {
+            let prior = heartbeat_predecessor::expired_prior_generation_heartbeat(
+                repo,
+                issue,
+                &selected.record,
+            )?;
+            if prior.is_none() {
+                return Ok(RecoveryOutcome {
+                    recovered: false,
+                    reason: "claim_evidence_or_fresh_state".to_string(),
+                    previous_claim_id: None,
+                });
+            }
+            prior
+        }
+        // The lookup failed; fail closed and name which occurred instead of
+        // defaulting unknown to "the branch is live" (#4129).
+        BranchLiveness::Unknown => {
             return Ok(RecoveryOutcome {
                 recovered: false,
-                reason: "claim_evidence_or_fresh_state".to_string(),
+                reason: "branch_liveness_unknown".to_string(),
                 previous_claim_id: None,
             });
         }
     };
-    let authorized_prior = if branch_blocked {
-        heartbeat_predecessor::expired_prior_generation_heartbeat(repo, issue, &selected.record)?
-    } else {
-        None
-    };
-    if branch_blocked && authorized_prior.is_none() {
-        return Ok(RecoveryOutcome {
-            recovered: false,
-            reason: "claim_evidence_or_fresh_state".to_string(),
-            previous_claim_id: None,
-        });
-    }
     if !quarantine_authoritative_stale_heartbeat(
         repo,
         issue,
@@ -7013,9 +7036,16 @@ fn observe_local_startup_pid(
     }
 }
 
-fn branch_ref_exists(branch: &str) -> bool {
+/// Whether the branch exists locally or on `origin`.
+///
+/// A `git` that cannot run, or an `origin` that cannot be reached, is an
+/// unknown answer surfaced as `Err`, never read as "the branch exists":
+/// defaulting the failure to "exists" pushed every caller into the remote
+/// lookup it was trying to avoid, and that lookup's failure is what callers'
+/// `unwrap_or(true)` then read as "live" (#4129).
+fn branch_ref_exists(branch: &str) -> Result<bool, CommandFailure> {
     if branch.trim().is_empty() {
-        return false;
+        return Ok(false);
     }
     for reference in [
         format!("refs/heads/{branch}"),
@@ -7025,18 +7055,35 @@ fn branch_ref_exists(branch: &str) -> bool {
             .args(["show-ref", "--verify", "--quiet", &reference])
             .status()
         {
-            Ok(status) if status.success() => return true,
-            Ok(_) => {}
-            Err(_) => return true,
+            Ok(status) if status.success() => return Ok(true),
+            // exit 1 is the "no such ref" answer, not a failure
+            Ok(status) if status.code() == Some(1) => {}
+            Ok(status) => {
+                return Err(CommandFailure::status(
+                    format!("git show-ref failed for {reference}"),
+                    status.code().unwrap_or(1),
+                ))
+            }
+            Err(error) => {
+                return Err(CommandFailure::transient(format!(
+                    "could not check {reference}: {error}"
+                )))
+            }
         }
     }
-    match Command::new("git")
+    let output = Command::new("git")
         .args(["ls-remote", "--heads", "origin", branch])
         .output()
-    {
-        Ok(output) if output.status.success() => !output.stdout.is_empty(),
-        Ok(_) | Err(_) => true,
+        .map_err(|error| {
+            CommandFailure::transient(format!("could not list remote branches: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(CommandFailure::status(
+            "git ls-remote failed",
+            output.status.code().unwrap_or(1),
+        ));
     }
+    Ok(!output.stdout.is_empty())
 }
 
 /// The single definition of whether a branch represents a live attempt at
@@ -7101,7 +7148,7 @@ fn attempt_liveness(repo: &str, branch: &str) -> Result<AttemptLiveness, Command
     // the lookup errored, callers' `unwrap_or(true)` read that as "live", and an
     // abandoned generation was never requeued (#4123). It also spends a `gh` call
     // per stale record in production for branches that are provably gone.
-    if !branch_ref_exists(branch) {
+    if !branch_ref_exists(branch)? {
         return Ok(AttemptLiveness::NoBranch);
     }
     if let Some(state) = branch_live_pr_state(repo, branch)? {
@@ -7115,9 +7162,50 @@ fn attempt_liveness(repo: &str, branch: &str) -> Result<AttemptLiveness, Command
     Ok(AttemptLiveness::Abandoned)
 }
 
-/// Whether a branch still represents a live attempt at its issue.
-fn branch_attempt_is_live(repo: &str, branch: &str) -> Result<bool, CommandFailure> {
-    Ok(attempt_liveness(repo, branch)?.is_live())
+/// The liveness answer with the lookup's failure kept separate from a
+/// definite verdict.
+///
+/// A defaulted boolean collapsed the two: `unwrap_or(true)` made "the branch
+/// is live" and "I could not tell" the same value, and every caller
+/// downstream reasoned about the wrong fact (#4129). The three states name
+/// which occurred, and a caller that folds unknown into a policy does so
+/// explicitly at the fold, not inside the predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BranchLiveness {
+    /// A worktree has the branch checked out, or an open or merged pull
+    /// request keeps it in play.
+    Live,
+    /// The branch is missing, or it exists without any open or merged pull
+    /// request: an abandoned attempt.
+    Dead,
+    /// The lookup could not complete. No verdict was reached; callers decide
+    /// their own policy for this state instead of inheriting a default.
+    Unknown,
+}
+
+impl BranchLiveness {
+    /// The predicate's result as its three states: `Err` is `Unknown`, never
+    /// a defaulted boolean.
+    fn from_result(result: Result<AttemptLiveness, CommandFailure>) -> Self {
+        match result {
+            Ok(state) if state.is_live() => Self::Live,
+            Ok(_) => Self::Dead,
+            Err(_) => Self::Unknown,
+        }
+    }
+
+    /// Fail-closed fold for callers whose policy is "unknown blocks like
+    /// live": recovering or requeueing over a branch the lookup could not
+    /// classify would overwrite an attempt that may still be in play.
+    fn live_or_unknown(self) -> bool {
+        matches!(self, Self::Live | Self::Unknown)
+    }
+}
+
+/// The production wiring of the liveness predicate: the three-state answer
+/// for a branch, `Unknown` when the lookup could not complete.
+pub(crate) fn branch_liveness(repo: &str, branch: &str) -> BranchLiveness {
+    BranchLiveness::from_result(attempt_liveness(repo, branch))
 }
 
 /// Which pull-request state (open or merged) still keeps the branch in play,

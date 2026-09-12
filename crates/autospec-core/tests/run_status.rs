@@ -605,11 +605,12 @@ fn triage_routes_the_statuses_the_runner_actually_writes() {
             reason: AgentHoldReason::Unbuilt
         }
     );
+    // FMT-DIRTY with a clean build: the recorded verdict is not trusted over a
+    // local repair the stage can run itself (#4099). The caller formats and
+    // re-checks before judging.
     assert_eq!(
         triage(&report(Some("FMT-DIRTY"), Some(0), Some(0), Some(1))),
-        TriageDecision::Hold {
-            reason: AgentHoldReason::Unformatted
-        }
+        TriageDecision::FormatAndRecheck
     );
     assert_eq!(
         triage(&report(Some("NO-OUTPUT"), None, None, None)),
@@ -690,6 +691,7 @@ fn every_emitted_status_has_a_triage_route() {
             TriageDecision::Redispatch { .. }
             | TriageDecision::RaiseForReview { .. }
             | TriageDecision::Hold { .. }
+            | TriageDecision::FormatAndRecheck
             | TriageDecision::GateLocally { .. } => {}
         }
     }

@@ -11,11 +11,14 @@
 //!   workload's prompt ceiling, and records the window and slot count in the
 //!   endpoint file.
 //! - [`dispatch`] picks the **largest-context** endpoint whose slot holds the
-//!   pack **ceiling** — not just the floor (issue #3749: a 65,536 slot holds
-//!   a C75 floor but truncates its 82K ceiling); when nothing fits the issue
-//!   is held with [`NO_ENDPOINT_LARGE_ENOUGH`] and the hold names the
-//!   mismatched workers ([`mismatched_workers`]) instead of silently skipping
-//!   them. A queued issue is recoverable, a silently truncated run is not.
+//!   pack **ceiling plus the completion reserve** — not just the floor, and
+//!   not just the ceiling (issue #3749: a 65,536 slot holds a C75 floor but
+//!   truncates its 82K ceiling; issue #4351: `max_tokens` is part of the
+//!   budget, so a slot short only on the completion reserve 400s at the
+//!   boundary); when nothing fits the issue is held with
+//!   [`NO_ENDPOINT_LARGE_ENOUGH`] and the hold names the mismatched workers
+//!   ([`mismatched_workers`]) instead of silently skipping them. A queued
+//!   issue is recoverable, a silently truncated run is not.
 //! - [`ContextGrant`] is the record merged into the run's status file by
 //!   [`status_json_with_grant`]; a grant short of the declared floor does not
 //!   count as an attempt ([`ContextGrant::counts_as_attempt`]), and
@@ -88,12 +91,16 @@ impl Endpoint {
     }
 
     /// Whether a single slot on this endpoint can hold the card's
-    /// worst-case prompt. The check is against the pack **ceiling** (issue
-    /// #3749): the launcher sizes slots to `floor(window / ceiling)` so a
-    /// slot below the ceiling will truncate a ceiling-sized prompt even
-    /// though it holds the floor.
+    /// worst-case prompt **plus its completion**. The prompt is checked
+    /// against the working context — the per-slot window minus the output
+    /// reservation — because `max_tokens` is part of the context budget, not
+    /// additional to it (issue #4351): a slot that holds the ceiling but not
+    /// the ceiling plus the completion reserve accepts the request and then
+    /// refuses it with a 400 at the boundary. As in issue #3749 the check is
+    /// against the pack **ceiling**, not the floor, so a slot that holds the
+    /// typical prompt but truncates a ceiling-sized one is not granted.
     pub fn fits(&self, class: &ContextClass) -> bool {
-        self.context_per_slot() >= class.pack_max_tokens
+        self.working_context_per_slot() >= class.pack_max_tokens
     }
 }
 
@@ -114,15 +121,19 @@ pub enum DispatchVerdict {
     },
 }
 
-/// An endpoint this workload cannot use: its per-slot window is below the
-/// workload's prompt ceiling. Undersized capacity must be *reported*, not
-/// counted as capacity, because dispatching into it truncates the prompt
-/// (issue #3749).
+/// An endpoint this workload cannot use: its working per-slot window (per-slot
+/// context minus the output reservation) is below the workload's prompt
+/// ceiling. Undersized capacity must be *reported*, not counted as capacity,
+/// because dispatching into it either truncates the prompt (issue #3749) or,
+/// when only the completion reserve is short, refuses it with a 400 at the
+/// boundary (issue #4351).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MismatchedWorker {
     /// Endpoint name (e.g. from the endpoint file).
     pub name: String,
-    /// Context per slot on this endpoint, in tokens.
+    /// Working context per slot on this endpoint, in tokens: the per-slot
+    /// window minus the output reservation — the room available for the
+    /// prompt.
     pub context_per_slot_tokens: u32,
     /// The per-slot window the workload requires (its prompt ceiling).
     pub required_tokens: u32,
@@ -266,16 +277,20 @@ pub fn slots_for_prompt(window_tokens: u32, prompt_ceiling_tokens: u32) -> u32 {
     }
 }
 
-/// The endpoints whose per-slot window is below `required_tokens`, i.e. the
-/// capacity this workload cannot use. Sorted by endpoint name so the report
-/// is stable regardless of fleet ordering.
+/// The endpoints whose *working* per-slot window (per-slot context minus the
+/// output reservation) is below `required_tokens`, i.e. the capacity this
+/// workload cannot use. A slot that holds the prompt ceiling but not the
+/// ceiling plus the completion reserve still 400s at the boundary (issue
+/// #4351), so the comparison is against the working window, matching
+/// [`Endpoint::fits`]. Sorted by endpoint name so the report is stable
+/// regardless of fleet ordering.
 pub fn mismatched_workers(endpoints: &[Endpoint], required_tokens: u32) -> Vec<MismatchedWorker> {
     let mut workers: Vec<MismatchedWorker> = endpoints
         .iter()
-        .filter(|e| e.context_per_slot() < required_tokens)
+        .filter(|e| e.working_context_per_slot() < required_tokens)
         .map(|e| MismatchedWorker {
             name: e.name.clone(),
-            context_per_slot_tokens: e.context_per_slot(),
+            context_per_slot_tokens: e.working_context_per_slot(),
             required_tokens,
         })
         .collect();
@@ -333,8 +348,9 @@ pub fn status_json_with_grant(
 }
 
 fn hold_rationale(class: &ContextClass, mismatched: &[MismatchedWorker]) -> String {
-    // On a hold every endpoint is mismatched (none holds the ceiling), so
-    // the largest mismatched slot is the largest slot available.
+    // On a hold every endpoint is mismatched (none holds the ceiling plus its
+    // completion reserve), so the largest mismatched slot is the largest slot
+    // available.
     let largest = mismatched
         .iter()
         .map(|w| w.context_per_slot_tokens)
@@ -350,7 +366,7 @@ fn hold_rationale(class: &ContextClass, mismatched: &[MismatchedWorker]) -> Stri
             .join(", ")
     };
     format!(
-        "declared {} prompt ceiling {} tokens (pack floor {}); no slot holds the ceiling; mismatched workers: {}; largest slot available is {} tokens",
+        "declared {} prompt ceiling {} tokens (pack floor {}); no slot holds the ceiling plus its completion reserve; mismatched workers: {}; largest working slot available is {} tokens",
         class.name, class.pack_max_tokens, class.pack_min_tokens, names, largest
     )
 }

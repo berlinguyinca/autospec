@@ -21,6 +21,7 @@ pub mod models;
 pub mod pr;
 pub mod proposals;
 pub mod quality;
+pub mod report;
 pub mod summarize;
 pub mod tools;
 
