@@ -110,6 +110,7 @@ pub mod prose_closure;
 pub mod rag;
 pub mod rebase_review;
 pub mod rebaseline;
+pub mod recovery_path;
 pub mod refresh_queue_contract;
 pub mod repair_loop;
 pub mod repairs;
