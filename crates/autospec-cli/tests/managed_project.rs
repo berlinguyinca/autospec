@@ -14,9 +14,13 @@ use commands::managed_project::portfolio::manifest::{
     PlanCompletionPolicy, PlanDraft, PlanItem, PlanItemRole, PortfolioPlan, RepositoryFacts,
 };
 use commands::managed_project::{
-    active_dependency_graph, journal_issue_projection, onboard_repositories, reconcile_issue,
-    resolve_or_create_project, retry_pending_projections, run_with_transport, tracked_issue_urls,
-    verify_managed_marker, ManagedProjectStore, OnboardingOptions, PortfolioRecoveryCapsule,
+    active_dependency_graph, journal_issue_projection, onboard_repositories, parse_created_field,
+    parse_remote_fields, plan_view_setup, provision_portfolio_shape, reconcile_issue,
+    required_managed_fields, resolve_managed_fields, resolve_or_create_project,
+    retry_pending_projections, run_with_transport, tracked_issue_urls, verify_managed_marker,
+    FieldOwnership, FieldPlanEntry, FieldResolutionError, ManagedFieldKind, ManagedProjectStore,
+    OnboardingOptions, PortfolioRecoveryCapsule, RemoteField, RemoteFieldOption, ViewSetup,
+    DELIVERY_OPTIONS,
 };
 use std::collections::VecDeque;
 use std::fs;
@@ -24,6 +28,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -5019,4 +5024,711 @@ fn portfolio_transactions_block_when_state_plan_digest_diverges() {
         assert_stable_portfolio_fields(&report, command, "blocked");
         assert_eq!(report["diagnostics"][0]["code"], "PLAN_DIGEST_MISMATCH");
     }
+}
+
+// ── Portfolio Project shape: fields, views, and issue items (#3429) ─────────
+
+const TEST_DELIVERY_OPTIONS: [&str; 10] = [
+    "Planned",
+    "Ready",
+    "Running",
+    "PR Open",
+    "Review",
+    "Verifying",
+    "Blocked",
+    "Failed",
+    "Unknown",
+    "Done",
+];
+const TEST_WORK_KIND_OPTIONS: [&str; 4] = ["Umbrella", "Implementation", "Audit", "Prerequisite"];
+const TEST_CI_OPTIONS: [&str; 4] = ["Not started", "Pending", "Passing", "Failing"];
+
+/// Recorded `gh project field-list --format json` fixture.
+fn field_list(fields: serde_json::Value) -> String {
+    serde_json::json!({ "fields": fields }).to_string()
+}
+
+fn field(id: &str, name: &str, data_type: &str, options: &[&str]) -> serde_json::Value {
+    if options.is_empty() {
+        serde_json::json!({ "id": id, "name": name, "dataType": data_type, "options": null })
+    } else {
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "dataType": data_type,
+            "options": options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| serde_json::json!({ "id": format!("PVO_{index}"), "name": option }))
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Recorded `gh project field-create --format json` fixture.
+fn created_field(id: &str, name: &str, data_type: &str, options: &[&str]) -> String {
+    format!("{{\"field\":{}}}", field(id, name, data_type, options))
+}
+
+fn repository_field() -> RemoteField {
+    RemoteField {
+        node_id: "PVI_repo".to_owned(),
+        name: "Repository".to_owned(),
+        data_type: "REPOSITORY".to_owned(),
+        options: Vec::new(),
+    }
+}
+
+/// A spec-portfolio store with the recovery capsule and a final project binding.
+fn bound_portfolio_store(fixture: &Fixture) -> ManagedProjectStore {
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_42",
+            42,
+            "https://github.com/orgs/berlinguyinca/projects/42",
+            "Spec — Autospec delivery",
+        )
+        .unwrap();
+    store
+}
+
+fn all_managed_fields_fixture() -> serde_json::Value {
+    serde_json::json!([
+        field(
+            "PVI_1",
+            "Autospec delivery",
+            "SINGLE_SELECT",
+            &TEST_DELIVERY_OPTIONS
+        ),
+        field("PVI_repo", "Repository", "REPOSITORY", &[]),
+        field(
+            "PVI_3",
+            "Work kind",
+            "SINGLE_SELECT",
+            &TEST_WORK_KIND_OPTIONS
+        ),
+        field("PVI_4", "Source spec", "TEXT", &[]),
+        field("PVI_5", "Depends on", "TEXT", &[]),
+        field("PVI_6", "Pull request", "TEXT", &[]),
+        field("PVI_7", "CI", "SINGLE_SELECT", &TEST_CI_OPTIONS),
+        field("PVI_8", "Last activity", "DATE", &[]),
+    ])
+}
+
+#[test]
+fn managed_project_delivery_shape_has_exactly_ten_delivery_options_and_builtin_repository() {
+    let fields = required_managed_fields();
+    assert_eq!(fields.len(), 8);
+    let delivery = fields
+        .iter()
+        .find(|field| field.name == "Autospec delivery")
+        .expect("Autospec delivery is a required field");
+    assert_eq!(delivery.options, DELIVERY_OPTIONS.as_slice());
+    assert_eq!(DELIVERY_OPTIONS.len(), 10);
+    assert_eq!(delivery.kind.data_type(), "SINGLE_SELECT");
+    assert!(!delivery.built_in);
+    let repository = fields
+        .iter()
+        .find(|field| field.name == "Repository")
+        .expect("Repository is a required field");
+    assert!(repository.built_in);
+    assert_eq!(repository.kind, ManagedFieldKind::Repository);
+    assert_eq!(repository.kind.data_type(), "REPOSITORY");
+    let operation_ids: Vec<String> = fields
+        .iter()
+        .filter(|field| !field.built_in)
+        .map(|field| field.operation_id())
+        .collect();
+    assert_eq!(
+        operation_ids.len(),
+        operation_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    );
+}
+
+#[test]
+fn managed_project_field_fixtures_parse_recorded_field_list_and_create_responses() {
+    let fields = parse_remote_fields(&field_list(serde_json::json!([
+        field(
+            "PVI_1",
+            "Autospec delivery",
+            "SINGLE_SELECT",
+            &["Planned", "Ready"]
+        ),
+        field("PVI_repo", "Repository", "REPOSITORY", &[]),
+    ])))
+    .unwrap();
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].options.len(), 2);
+    assert_eq!(fields[1].options.len(), 0);
+    let created =
+        parse_created_field(&created_field("PVI_9", "CI", "SINGLE_SELECT", &["Passing"])).unwrap();
+    assert_eq!(
+        created.options,
+        [RemoteFieldOption {
+            node_id: "PVO_0".to_owned(),
+            name: "Passing".to_owned(),
+        }]
+    );
+    assert!(parse_remote_fields("not json").is_err());
+    assert!(parse_created_field("not json").is_err());
+    assert!(parse_remote_fields("{}").is_err());
+    assert!(parse_remote_fields(&field_list(serde_json::json!([field(
+        "PVI_1",
+        "Autospec delivery",
+        "SINGLE_SELECT",
+        &["Planned"]
+    ),])))
+    .is_ok());
+}
+
+#[test]
+fn managed_project_field_resolver_verifies_builtin_repository_and_never_creates_it() {
+    let plan = resolve_managed_fields(&[repository_field()], &[]).unwrap();
+    let builtin = plan
+        .entries
+        .iter()
+        .find(|entry| matches!(entry, FieldPlanEntry::VerifiedBuiltIn { name, .. } if *name == "Repository"))
+        .expect("Repository verifies as built-in");
+    assert!(matches!(
+        builtin,
+        FieldPlanEntry::VerifiedBuiltIn { node_id, .. } if node_id == "PVI_repo"
+    ));
+    let creates: Vec<&str> = plan
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            FieldPlanEntry::Create { spec } => Some(spec.name),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(creates.len(), 7);
+    assert!(!creates.contains(&"Repository"));
+    // A missing built-in Repository field blocks; it is verified, never created.
+    assert!(matches!(
+        resolve_managed_fields(&[], &[]),
+        Err(FieldResolutionError::MissingBuiltInRepository)
+    ));
+    // A non-REPOSITORY field named Repository is incompatible, not adoptable.
+    let fake_repository = RemoteField {
+        node_id: "PVI_x".to_owned(),
+        name: "Repository".to_owned(),
+        data_type: "TEXT".to_owned(),
+        options: Vec::new(),
+    };
+    assert!(matches!(
+        resolve_managed_fields(&[fake_repository], &[]),
+        Err(FieldResolutionError::IncompatibleFieldType { expected, .. })
+            if expected == "REPOSITORY"
+    ));
+}
+
+#[test]
+fn managed_project_field_resolver_blocks_incompatible_ambiguous_human_owned_and_missing_options() {
+    // A same-name field without dispatched or acknowledged ownership is human-owned.
+    let human_owned = vec![
+        repository_field(),
+        RemoteField {
+            node_id: "PVI_h".to_owned(),
+            name: "Source spec".to_owned(),
+            data_type: "TEXT".to_owned(),
+            options: Vec::new(),
+        },
+    ];
+    assert!(matches!(
+        resolve_managed_fields(&human_owned, &[]),
+        Err(FieldResolutionError::HumanOwnedField { name }) if name == "Source spec"
+    ));
+
+    // An owned field with the wrong data type is incompatible.
+    let incompatible = vec![
+        repository_field(),
+        RemoteField {
+            node_id: "PVI_i".to_owned(),
+            name: "Work kind".to_owned(),
+            data_type: "TEXT".to_owned(),
+            options: Vec::new(),
+        },
+    ];
+    let ownership = vec![("field:work-kind".to_owned(), FieldOwnership::Acknowledged)];
+    assert!(matches!(
+        resolve_managed_fields(&incompatible, &ownership),
+        Err(FieldResolutionError::IncompatibleFieldType { name, expected, actual })
+            if name == "Work kind" && expected == "SINGLE_SELECT" && actual == "TEXT"
+    ));
+
+    // Two fields sharing a name are ambiguous before any managed field resolves.
+    let ambiguous = vec![
+        RemoteField {
+            node_id: "PVI_a".to_owned(),
+            name: "Autospec delivery".to_owned(),
+            data_type: "SINGLE_SELECT".to_owned(),
+            options: Vec::new(),
+        },
+        RemoteField {
+            node_id: "PVI_b".to_owned(),
+            name: "Autospec delivery".to_owned(),
+            data_type: "SINGLE_SELECT".to_owned(),
+            options: Vec::new(),
+        },
+        repository_field(),
+    ];
+    assert!(matches!(
+        resolve_managed_fields(&ambiguous, &[]),
+        Err(FieldResolutionError::AmbiguousField { name, matches: 2 })
+            if name == "Autospec delivery"
+    ));
+
+    // A missing managed option blocks: option sets are fixed at creation.
+    let missing_option = vec![
+        repository_field(),
+        RemoteField {
+            node_id: "PVI_c".to_owned(),
+            name: "CI".to_owned(),
+            data_type: "SINGLE_SELECT".to_owned(),
+            options: vec![
+                RemoteFieldOption {
+                    node_id: "PVO_0".to_owned(),
+                    name: "Not started".to_owned(),
+                },
+                RemoteFieldOption {
+                    node_id: "PVO_1".to_owned(),
+                    name: "Pending".to_owned(),
+                },
+                RemoteFieldOption {
+                    node_id: "PVO_2".to_owned(),
+                    name: "Passing".to_owned(),
+                },
+            ],
+        },
+    ];
+    let ownership = vec![("field:ci".to_owned(), FieldOwnership::Sent)];
+    assert!(matches!(
+        resolve_managed_fields(&missing_option, &ownership),
+        Err(FieldResolutionError::MissingManagedOption { field, option })
+            if field == "CI" && option == "Failing"
+    ));
+
+    // An acknowledged field that vanished from the remote Project blocks.
+    let ownership = vec![("field:ci".to_owned(), FieldOwnership::Acknowledged)];
+    assert!(matches!(
+        resolve_managed_fields(&[repository_field()], &ownership),
+        Err(FieldResolutionError::OwnedFieldMissing { name }) if name == "CI"
+    ));
+}
+
+#[test]
+fn managed_project_view_setup_is_manual_when_view_mutation_is_unsupported() {
+    let setup = plan_view_setup(
+        commands::managed_project::ViewCapability::Unsupported,
+        "https://github.com/orgs/berlinguyinca/projects/42",
+    );
+    match setup {
+        ViewSetup::Manual {
+            project_url,
+            fields,
+        } => {
+            assert_eq!(
+                project_url,
+                "https://github.com/orgs/berlinguyinca/projects/42"
+            );
+            assert_eq!(
+                fields,
+                [
+                    "Autospec delivery",
+                    "Repository",
+                    "Work kind",
+                    "Source spec",
+                    "Depends on",
+                    "Pull request",
+                    "CI",
+                    "Last activity",
+                ]
+            );
+        }
+        other => panic!("unsupported view mutation must not claim provisioned views: {other:?}"),
+    }
+}
+
+#[test]
+fn github_provision_portfolio_shape_creates_owned_fields_reports_manual_views_and_adds_items() {
+    let fixture = Fixture::new("provision-shape");
+    let policy = policy("berlinguyinca");
+    let mut store = bound_portfolio_store(&fixture);
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("source-tracker", 100))
+        .unwrap();
+
+    let mut github = ScriptedGithub::with([
+        // Recorded field list: only the built-in Repository field exists.
+        Ok(field_list(serde_json::json!([field(
+            "PVI_repo",
+            "Repository",
+            "REPOSITORY",
+            &[]
+        )]))),
+        // Creates in spec order; Repository is verified, never created.
+        Ok(created_field(
+            "PVI_1",
+            "Autospec delivery",
+            "SINGLE_SELECT",
+            &TEST_DELIVERY_OPTIONS,
+        )),
+        Ok(created_field(
+            "PVI_3",
+            "Work kind",
+            "SINGLE_SELECT",
+            &TEST_WORK_KIND_OPTIONS,
+        )),
+        Ok(created_field("PVI_4", "Source spec", "TEXT", &[])),
+        Ok(created_field("PVI_5", "Depends on", "TEXT", &[])),
+        Ok(created_field("PVI_6", "Pull request", "TEXT", &[])),
+        Ok(created_field(
+            "PVI_7",
+            "CI",
+            "SINGLE_SELECT",
+            &TEST_CI_OPTIONS,
+        )),
+        Ok(created_field("PVI_8", "Last activity", "DATE", &[])),
+        Ok(item_list(&[])),
+        Ok(String::new()),
+    ]);
+    let report = provision_portfolio_shape(&mut store, &mut github, &policy).unwrap();
+
+    let delivery_create = github
+        .calls
+        .iter()
+        .find_map(|call| match call {
+            GithubCommand::CreateProjectField {
+                name,
+                data_type,
+                single_select_options,
+                ..
+            } if name == "Autospec delivery" => {
+                Some((data_type.clone(), single_select_options.clone()))
+            }
+            _ => None,
+        })
+        .expect("Autospec delivery is created");
+    assert_eq!(delivery_create.0, "SINGLE_SELECT");
+    assert_eq!(delivery_create.1, TEST_DELIVERY_OPTIONS);
+    assert!(github
+        .calls
+        .iter()
+        .all(|call| !matches!(call, GithubCommand::CreateProjectField { name, .. } if name == "Repository")));
+
+    assert_eq!(report.fields.len(), 8);
+    assert!(matches!(
+        &report.view_setup,
+        ViewSetup::Manual { project_url, .. }
+            if project_url == "https://github.com/orgs/berlinguyinca/projects/42"
+    ));
+    assert_eq!(report.items_added, 1);
+    assert_eq!(report.items_present, 0);
+    assert!(store.snapshot().pending_projections.is_empty());
+    let states = store.portfolio_operation_states();
+    assert_eq!(
+        states
+            .iter()
+            .filter(|(_, state)| state == "acknowledged")
+            .count(),
+        7
+    );
+
+    // Second run: every field verifies as owned, the item is present, so the
+    // pass is a pure no-op — no field re-create, no duplicate item.
+    let mut second = ScriptedGithub::with([
+        Ok(field_list(all_managed_fields_fixture())),
+        Ok(item_list(&[
+            "https://github.com/berlinguyinca/autospec/issues/100",
+        ])),
+    ]);
+    let second_report = provision_portfolio_shape(&mut store, &mut second, &policy).unwrap();
+    assert!(second.calls.iter().all(|call| !matches!(
+        call,
+        GithubCommand::CreateProjectField { .. } | GithubCommand::AddToProject { .. }
+    )));
+    assert_eq!(second_report.items_present, 1);
+    assert_eq!(second_report.items_added, 0);
+    assert!(store.snapshot().pending_projections.is_empty());
+}
+
+#[test]
+fn github_provision_portfolio_shape_journals_rate_limited_field_create_and_retries() {
+    let fixture = Fixture::new("provision-shape-retry");
+    let policy = policy("berlinguyinca");
+    let mut store = bound_portfolio_store(&fixture);
+
+    let mut failing = ScriptedGithub::with([
+        Ok(field_list(serde_json::json!([field(
+            "PVI_repo",
+            "Repository",
+            "REPOSITORY",
+            &[]
+        )]))),
+        Err(GithubFailure::RetryAfter {
+            message: "rate limited".to_owned(),
+            delay: Duration::from_secs(1),
+        }),
+    ]);
+    assert!(provision_portfolio_shape(&mut store, &mut failing, &policy).is_err());
+    // The create was journaled as dispatched before the rate limit: resumable,
+    // never lost, never blindly replayed.
+    let states = store.portfolio_operation_states();
+    assert!(states.contains(&("field:autospec-delivery".to_owned(), "sent".to_owned())));
+    assert!(!states.iter().any(|(_, state)| state == "acknowledged"));
+
+    // Retry: GitHub lost the create, the field is still absent, so exactly one
+    // create is re-dispatched for it.
+    let mut retry = ScriptedGithub::with([
+        Ok(field_list(serde_json::json!([field(
+            "PVI_repo",
+            "Repository",
+            "REPOSITORY",
+            &[]
+        )]))),
+        Ok(created_field(
+            "PVI_1",
+            "Autospec delivery",
+            "SINGLE_SELECT",
+            &TEST_DELIVERY_OPTIONS,
+        )),
+        Ok(created_field(
+            "PVI_3",
+            "Work kind",
+            "SINGLE_SELECT",
+            &TEST_WORK_KIND_OPTIONS,
+        )),
+        Ok(created_field("PVI_4", "Source spec", "TEXT", &[])),
+        Ok(created_field("PVI_5", "Depends on", "TEXT", &[])),
+        Ok(created_field("PVI_6", "Pull request", "TEXT", &[])),
+        Ok(created_field(
+            "PVI_7",
+            "CI",
+            "SINGLE_SELECT",
+            &TEST_CI_OPTIONS,
+        )),
+        Ok(created_field("PVI_8", "Last activity", "DATE", &[])),
+        Ok(item_list(&[])),
+    ]);
+    provision_portfolio_shape(&mut store, &mut retry, &policy).unwrap();
+    assert_eq!(
+        retry
+            .calls
+            .iter()
+            .filter(|call| matches!(call, GithubCommand::CreateProjectField { name, .. } if name == "Autospec delivery"))
+            .count(),
+        1
+    );
+    assert!(store.portfolio_operation_states().contains(&(
+        "field:autospec-delivery".to_owned(),
+        "acknowledged".to_owned()
+    )));
+}
+
+#[test]
+fn github_provision_portfolio_shape_adopts_a_verified_field_after_a_lost_create_response() {
+    let fixture = Fixture::new("provision-shape-lost-response");
+    let policy = policy("berlinguyinca");
+    let mut store = bound_portfolio_store(&fixture);
+
+    let mut failing = ScriptedGithub::with([
+        Ok(field_list(serde_json::json!([field(
+            "PVI_repo",
+            "Repository",
+            "REPOSITORY",
+            &[]
+        )]))),
+        Err(GithubFailure::Ambiguous("create response lost".to_owned())),
+    ]);
+    assert!(provision_portfolio_shape(&mut store, &mut failing, &policy).is_err());
+    assert!(store
+        .portfolio_operation_states()
+        .contains(&("field:autospec-delivery".to_owned(), "sent".to_owned())));
+
+    // The create actually landed. The retry verifies the remote field against
+    // the managed spec and acknowledges ownership without re-creating it.
+    let mut retry = ScriptedGithub::with([
+        Ok(field_list(serde_json::json!([
+            field("PVI_repo", "Repository", "REPOSITORY", &[]),
+            field(
+                "PVI_1",
+                "Autospec delivery",
+                "SINGLE_SELECT",
+                &TEST_DELIVERY_OPTIONS
+            ),
+        ]))),
+        Ok(created_field(
+            "PVI_3",
+            "Work kind",
+            "SINGLE_SELECT",
+            &TEST_WORK_KIND_OPTIONS,
+        )),
+        Ok(created_field("PVI_4", "Source spec", "TEXT", &[])),
+        Ok(created_field("PVI_5", "Depends on", "TEXT", &[])),
+        Ok(created_field("PVI_6", "Pull request", "TEXT", &[])),
+        Ok(created_field(
+            "PVI_7",
+            "CI",
+            "SINGLE_SELECT",
+            &TEST_CI_OPTIONS,
+        )),
+        Ok(created_field("PVI_8", "Last activity", "DATE", &[])),
+        Ok(item_list(&[])),
+    ]);
+    provision_portfolio_shape(&mut store, &mut retry, &policy).unwrap();
+    assert!(retry
+        .calls
+        .iter()
+        .all(|call| !matches!(call, GithubCommand::CreateProjectField { name, .. } if name == "Autospec delivery")));
+    assert!(store.portfolio_operation_states().contains(&(
+        "field:autospec-delivery".to_owned(),
+        "acknowledged".to_owned()
+    )));
+}
+
+#[test]
+fn github_provision_portfolio_shape_blocks_ambiguous_and_human_owned_fields_without_mutation() {
+    // Two fields share a managed name: ambiguous, no mutation of any kind.
+    {
+        let fixture = Fixture::new("provision-shape-ambiguous");
+        let policy = policy("berlinguyinca");
+        let mut store = bound_portfolio_store(&fixture);
+        let mut github = ScriptedGithub::with([Ok(field_list(serde_json::json!([
+            field(
+                "PVI_a",
+                "Autospec delivery",
+                "SINGLE_SELECT",
+                &TEST_DELIVERY_OPTIONS
+            ),
+            field(
+                "PVI_b",
+                "Autospec delivery",
+                "SINGLE_SELECT",
+                &TEST_DELIVERY_OPTIONS
+            ),
+            field("PVI_repo", "Repository", "REPOSITORY", &[]),
+        ])))]);
+        assert!(provision_portfolio_shape(&mut store, &mut github, &policy).is_err());
+        assert!(github
+            .calls
+            .iter()
+            .all(|call| !matches!(call, GithubCommand::CreateProjectField { .. })));
+        assert!(store.portfolio_operation_states().is_empty());
+    }
+    // A human-created same-name field: blocked, never deleted or repurposed.
+    {
+        let fixture = Fixture::new("provision-shape-human-owned");
+        let policy = policy("berlinguyinca");
+        let mut store = bound_portfolio_store(&fixture);
+        let mut github = ScriptedGithub::with([Ok(field_list(serde_json::json!([
+            field("PVI_repo", "Repository", "REPOSITORY", &[]),
+            field("PVI_h", "Source spec", "TEXT", &[]),
+        ])))]);
+        assert!(provision_portfolio_shape(&mut store, &mut github, &policy).is_err());
+        assert!(github
+            .calls
+            .iter()
+            .all(|call| !matches!(call, GithubCommand::CreateProjectField { .. })));
+        assert!(store.portfolio_operation_states().is_empty());
+    }
+}
+
+#[test]
+fn github_provision_portfolio_item_add_is_journaled_and_retried_without_duplicates() {
+    let fixture = Fixture::new("provision-shape-items");
+    let policy = policy("berlinguyinca");
+    let mut store = bound_portfolio_store(&fixture);
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("source-tracker", 100))
+        .unwrap();
+
+    let mut failing = ScriptedGithub::with([
+        Ok(field_list(serde_json::json!([field(
+            "PVI_repo",
+            "Repository",
+            "REPOSITORY",
+            &[]
+        )]))),
+        Ok(created_field(
+            "PVI_1",
+            "Autospec delivery",
+            "SINGLE_SELECT",
+            &TEST_DELIVERY_OPTIONS,
+        )),
+        Ok(created_field(
+            "PVI_3",
+            "Work kind",
+            "SINGLE_SELECT",
+            &TEST_WORK_KIND_OPTIONS,
+        )),
+        Ok(created_field("PVI_4", "Source spec", "TEXT", &[])),
+        Ok(created_field("PVI_5", "Depends on", "TEXT", &[])),
+        Ok(created_field("PVI_6", "Pull request", "TEXT", &[])),
+        Ok(created_field(
+            "PVI_7",
+            "CI",
+            "SINGLE_SELECT",
+            &TEST_CI_OPTIONS,
+        )),
+        Ok(created_field("PVI_8", "Last activity", "DATE", &[])),
+        Ok(item_list(&[])),
+        Err(GithubFailure::RetryAfter {
+            message: "rate limited".to_owned(),
+            delay: Duration::from_secs(1),
+        }),
+    ]);
+    assert!(provision_portfolio_shape(&mut store, &mut failing, &policy).is_err());
+    assert_eq!(
+        store.snapshot().pending_projections,
+        [
+            "project:item-add:PVT_42:https://github.com/berlinguyinca/autospec/issues/100"
+                .to_owned()
+        ]
+    );
+
+    // The shared retry path sees the item now present and never re-adds it.
+    let mut retry = ScriptedGithub::with([Ok(item_list(&[
+        "https://github.com/berlinguyinca/autospec/issues/100",
+    ]))]);
+    retry_pending_projections(&mut store, &mut retry, &policy).unwrap();
+    assert!(store.snapshot().pending_projections.is_empty());
+    assert!(retry
+        .calls
+        .iter()
+        .all(|call| !matches!(call, GithubCommand::AddToProject { .. })));
+}
+
+#[test]
+fn github_provision_portfolio_shape_requires_a_bound_spec_portfolio() {
+    let fixture = Fixture::new("provision-shape-guards");
+    let policy = policy("berlinguyinca");
+    // A product store is not a spec-portfolio projection.
+    let mut product_store =
+        ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
+    let mut github = ScriptedGithub::with(Vec::new());
+    assert!(provision_portfolio_shape(&mut product_store, &mut github, &policy).is_err());
+    assert!(github.calls.is_empty());
+
+    // A portfolio store without the recovery capsule fails closed before any call.
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_42",
+            42,
+            "https://github.com/orgs/berlinguyinca/projects/42",
+            "Spec — Autospec delivery",
+        )
+        .unwrap();
+    let mut github = ScriptedGithub::with(Vec::new());
+    assert!(provision_portfolio_shape(&mut store, &mut github, &policy).is_err());
+    assert!(github.calls.is_empty());
 }

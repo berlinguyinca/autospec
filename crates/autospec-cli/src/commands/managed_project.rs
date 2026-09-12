@@ -31,8 +31,9 @@ pub use cli::{run, run_portfolio};
 #[cfg(test)]
 pub use github::verify_managed_marker;
 pub use github::{
-    journal_issue_projection, normalize_issue_url, reconcile_issue, resolve_or_create_project,
-    retry_pending_projections, tracked_issue_urls, PortfolioRecoveryCapsule,
+    journal_issue_projection, normalize_issue_url, provision_portfolio_shape, reconcile_issue,
+    resolve_or_create_project, retry_pending_projections, tracked_issue_urls,
+    PortfolioRecoveryCapsule,
 };
 pub(crate) use onboard::discover_remote_issue_relationships;
 pub use onboard::{
@@ -42,6 +43,13 @@ pub use onboard::{
 pub use project::RemoteProject;
 pub(super) use project::{
     apply_project_binding, parse_project_identity, project_binding_payload, ProjectIdentity,
+};
+pub use project::{
+    parse_created_field, parse_remote_fields, plan_view_setup, required_managed_fields,
+    resolve_managed_fields, validate_created_field, FieldOwnership, FieldPlan, FieldPlanEntry,
+    FieldResolutionError, ManagedFieldKind, ManagedFieldSpec, PortfolioShapeReport, RemoteField,
+    RemoteFieldOption, ViewCapability, ViewSetup, DELIVERY_FIELD_NAME, DELIVERY_OPTIONS,
+    REPOSITORY_FIELD_NAME,
 };
 pub use store::ManagedProjectStore;
 
