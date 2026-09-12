@@ -18,7 +18,8 @@
 //! hold.
 
 use autospec_core::negative_evidence::{
-    classify, Control, CoverageLimit, GroupVerdict, HoldsBasis, Method, NegativeReport, Observation,
+    classify, discharge, Alternates, Control, CoverageLimit, DischargeSteps, DischargeVerdict,
+    GroupVerdict, HoldsBasis, Method, NegativeReport, Observation,
 };
 
 /// The incident: four zeros from GitHub code search over a private
@@ -290,4 +291,133 @@ fn empty_report_is_neutral() {
     assert!(!report.any_untrusted());
     assert_eq!(report.weight(), 0);
     assert!(report.lines().is_empty());
+}
+
+// ── Issue #4446: a negative grep is a property of the pattern until proven a
+// property of the code ─────────────────────────────────────────────────────
+
+/// The incident, as run: the pattern as written returned nothing, and the
+/// broadest token the concept must contain returns four hits — the file
+/// creates the executor worktree at four call sites, spelled as an argv
+/// slice (`&["worktree", "add", "--quiet"]`) in which `worktree add` as
+/// adjacent words never appears and never could.
+fn incident_discharge() -> DischargeSteps {
+    DischargeSteps {
+        broad_token: "worktree".into(),
+        broad_hits: 4,
+        pattern: "worktree add|worktree_add|create_worktree|add_worktree".into(),
+        pattern_hits: 0,
+    }
+}
+
+#[test]
+fn the_incident_step_one_hits_step_two_empty_is_a_finding_about_the_pattern() {
+    let verdict = discharge(&incident_discharge());
+
+    match &verdict {
+        DischargeVerdict::PatternRemovedThem {
+            token,
+            pattern,
+            broad_hits,
+        } => {
+            assert_eq!(token, "worktree");
+            assert_eq!(
+                pattern,
+                "worktree add|worktree_add|create_worktree|add_worktree"
+            );
+            assert_eq!(*broad_hits, 4);
+        }
+        other => panic!("expected PatternRemovedThem, got {other:?}"),
+    }
+
+    let line = verdict.line();
+    assert!(line.starts_with("FAIL:"), "{line}");
+    assert!(line.contains("the pattern removed them"), "{line}");
+    assert!(line.contains("not the code"), "{line}");
+}
+
+#[test]
+fn step_one_empty_the_negative_is_real() {
+    // The broadest token the concept must contain is absent: nothing the
+    // pattern could have removed, so the negative may be reported as a
+    // property of the code.
+    let verdict = discharge(&DischargeSteps {
+        broad_token: "worktree".into(),
+        broad_hits: 0,
+        pattern: "worktree add|worktree_add".into(),
+        pattern_hits: 0,
+    });
+    match &verdict {
+        DischargeVerdict::NegativeIsReal { token, .. } => assert_eq!(token, "worktree"),
+        other => panic!("expected NegativeIsReal, got {other:?}"),
+    }
+    let line = verdict.line();
+    assert!(line.starts_with("OK:"), "{line}");
+    assert!(line.contains("the negative is real"), "{line}");
+}
+
+#[test]
+fn a_pattern_that_finds_the_thing_has_no_negative_to_discharge() {
+    let verdict = discharge(&DischargeSteps {
+        broad_token: "worktree".into(),
+        broad_hits: 4,
+        pattern: "worktree".into(),
+        pattern_hits: 4,
+    });
+    match &verdict {
+        DischargeVerdict::Found { pattern_hits, .. } => assert_eq!(*pattern_hits, 4),
+        other => panic!("expected Found, got {other:?}"),
+    }
+    let line = verdict.line();
+    assert!(line.starts_with("OK:"), "{line}");
+    assert!(line.contains("no negative to discharge"), "{line}");
+}
+
+#[test]
+fn the_incident_pattern_four_alternates_sharing_one_assumption_are_one_test() {
+    // All four alternates assumed the two tokens are adjacent in the source
+    // — prose, snake_case, or a function name. The codebase uses an argv
+    // slice, which none of them encodes. The breadth was spelling, not
+    // coverage.
+    let alternates = Alternates::new(
+        vec![
+            "worktree add".into(),
+            "worktree_add".into(),
+            "create_worktree".into(),
+            "add_worktree".into(),
+        ],
+        Some("the tokens are adjacent in the source".into()),
+    )
+    .unwrap();
+    assert_eq!(alternates.effective_tests(), 1);
+    let smell = alternates
+        .smell()
+        .expect("the shared assumption is the smell");
+    assert!(smell.contains("one test, not 4"), "{smell}");
+    assert!(smell.contains("adjacent"), "{smell}");
+}
+
+#[test]
+fn alternates_without_a_shared_assumption_are_several_tests() {
+    // Adjacency, casing, and "it is a function name" are different forms:
+    // each alternate really tests one, so the count is honest and there is
+    // no smell.
+    let alternates = Alternates::new(
+        vec![
+            "worktree add".into(),
+            "worktree_add".into(),
+            "create_worktree".into(),
+        ],
+        None,
+    )
+    .unwrap();
+    assert_eq!(alternates.effective_tests(), 3);
+    assert!(alternates.smell().is_none());
+}
+
+#[test]
+fn an_alternates_record_with_fewer_than_two_alternates_is_no_record() {
+    assert!(Alternates::new(vec!["worktree".into()], None).is_none());
+    assert!(Alternates::new(vec![], Some("adjacency".into())).is_none());
+    assert!(Alternates::new(vec!["worktree add".into(), "  ".into()], None).is_none());
 }
