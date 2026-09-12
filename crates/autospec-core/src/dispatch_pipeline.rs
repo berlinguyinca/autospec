@@ -904,11 +904,14 @@ fn is_directory_entry(entry: &str) -> bool {
 }
 
 /// Whether `candidate` lies strictly beneath the directory `entry` declares.
+/// The boundary is a component separator: `crates/autospec-core/src/` covers
+/// `crates/autospec-core/src/x.rs`, not `crates/autospec-core/src2/x.rs`,
+/// which merely continues the name at a non-separator.
 fn beneath(entry: &str, candidate: &str) -> bool {
     let Some(dir) = entry.strip_suffix('/') else {
         return false;
     };
-    candidate.starts_with(dir) && candidate.len() > dir.len()
+    candidate.starts_with(dir) && candidate.as_bytes().get(dir.len()) == Some(&b'/')
 }
 
 impl IssueWriteSurface {
@@ -941,10 +944,14 @@ impl IssueWriteSurface {
                 .trim()
                 .trim_matches('`')
                 .trim();
+            // A single trailing '/' declares a directory covering everything
+            // beneath it (the issue-quality contract's directory form); the
+            // empty segment it leaves behind is the one this check allows.
+            let file_part = entry.strip_suffix('/').unwrap_or(entry);
             if entry.is_empty()
                 || entry.starts_with('/')
                 || entry.contains(' ')
-                || entry
+                || file_part
                     .split('/')
                     .any(|segment| segment.is_empty() || segment == "." || segment == "..")
             {
