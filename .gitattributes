@@ -1,0 +1,27 @@
+# Generated artifacts are never text-merged (issue #4058).
+#
+# merge=autospec-regen
+#   Declares, by name, the merge driver that resolves a conflict on a
+#   generated file by taking theirs instead of text-merging. A single-value
+#   file (a hash golden) cannot survive a text merge: the losing side becomes
+#   a second hash, and a build passes over the corruption. The driver's
+#   output is a placeholder, not the answer: authoritative content comes
+#   from running the owning generator after the merge (the conversion pass,
+#   or by hand). Register the driver per clone:
+#       bash scripts/register-regen-merge-driver.sh
+#   Without registration git ignores the directive and text-merges the file,
+#   i.e. exactly the corruption this declaration exists to prevent.
+#
+# generated-by=<script>
+#   Machine-readable pointer to the owning generator (AC4), queryable with:
+#       git check-attr generated-by -- <path>
+#   The conversion pass builds its generator registry from these pointers
+#   (see crates/autospec-core/src/conflict_resolution.rs) instead of
+#   hard-coding artifact ownership. Every committed generated artifact
+#   declared here is covered by tests/regen-merge-driver.bats.
+
+tests/fixtures/skill-goldens/*.sha256 merge=autospec-regen generated-by=scripts/gen-skill-goldens.sh
+config/generated-artifact-integrity.sha256 merge=autospec-regen generated-by=scripts/gen-harness-runtime-aliases.sh
+templates/generated/harness-runtime-aliases.sh merge=autospec-regen generated-by=scripts/gen-harness-runtime-aliases.sh
+templates/generated/harness-runtime-aliases.fish merge=autospec-regen generated-by=scripts/gen-harness-runtime-aliases.sh
+docs/generated/harness-runtime-aliases.md merge=autospec-regen generated-by=scripts/gen-harness-runtime-aliases.sh
