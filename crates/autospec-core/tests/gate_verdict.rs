@@ -1,110 +1,129 @@
-//! Issue #3768: a timed-out gate reported "fixes: <all seven checks>".
-//!
-//! An empty result set is not "nothing failed"; it is "no verdict". The
-//! two are identical to every set operation and opposite in meaning.
+//! Regression tests for #4434. Each case is a real incident from the session
+//! that produced the type, not an invented example.
 
+use autospec_core::gate_verdict::{absolute, differential, GateVerdict, TestRun};
 use std::collections::BTreeSet;
 
-use autospec_core::gate_verdict::{
-    check_timeout_budget, diff_failed_checks, BudgetFinding, Completion, GateDiffVerdict,
-    MeasuredRun,
-};
-
-fn baseline_seven() -> BTreeSet<String> {
-    (1..=7).map(|n| format!("check_{n}")).collect()
-}
-
-/// The merged PR's claim, reproduced: `timeout 900` killed the gate against
-/// a command whose measured wall-clock is 741–1189s, `$now` is empty, and a
-/// bare `comm -23 baseline now` reads "everything fixed".
-#[test]
-fn the_incident_gate_holds_with_a_reason_and_claims_no_fix() {
-    let verdict = diff_failed_checks(&Completion::TimedOut, &baseline_seven(), &BTreeSet::new());
-
-    // Rule 2: a timed-out gate produces a hold with the reason — never a
-    // pass and never a "fixed" claim.
-    assert!(verdict.is_no_verdict(), "{verdict:?}");
-    assert!(verdict.holds(), "{verdict:?}");
-    assert!(!verdict.passes(), "{verdict:?}");
-    assert_eq!(verdict.fixed(), None, "{verdict:?}");
-
-    let line = verdict.render("validate");
-    assert!(line.contains("NO-VERDICT"), "{line}");
-    assert!(line.contains("timeout"), "{line}");
-    assert!(!line.contains("fixes:"), "{line}");
-    assert!(!line.contains("no new failures"), "{line}");
-}
-
-/// The pre-fix report line is unreachable: no completion state renders a
-/// fixes clause that a bare set difference would have produced.
-#[test]
-fn no_completion_state_can_render_the_incident_claim() {
-    let baseline = baseline_seven();
-    let empty: BTreeSet<String> = BTreeSet::new();
-    for completion in [
-        Completion::TimedOut,
-        Completion::Errored {
-            reason: "spawn failed".to_string(),
-        },
-    ] {
-        let verdict = diff_failed_checks(&completion, &baseline, &empty);
-        assert!(
-            !verdict.render("validate").contains("fixes:"),
-            "{verdict:?}"
-        );
-        assert_eq!(verdict.fixed(), None, "{verdict:?}");
+fn run(exit: i32, lines: usize, failures: &[&str]) -> TestRun {
+    TestRun {
+        exit_code: exit,
+        result_lines: lines,
+        failures: failures
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<BTreeSet<_>>(),
     }
 }
 
-/// The one state that may claim a fix is a completed run: a green
-/// `validate` (exit 0) with an empty failing set really did fix the
-/// baseline.
+/// INCIDENT: patch #4148 failed to compile (19 x E0596). It produced an empty
+/// failure set, and a set-difference against a 2-failure baseline read it as
+/// "no new failures" and PASSED it.
 #[test]
-fn only_a_completed_run_may_claim_the_fix() {
-    let verdict = diff_failed_checks(
-        &Completion::Ran { exit_code: 0 },
-        &baseline_seven(),
-        &BTreeSet::new(),
+fn a_build_failure_is_not_an_improvement() {
+    let baseline = run(101, 1, &["known_a", "known_b"]);
+    let did_not_build = run(101, 0, &[]);
+    let v = differential(&baseline, &did_not_build);
+    assert!(!v.is_pass(), "a patch that never ran must not pass: {v}");
+    assert!(
+        v.is_unmeasured(),
+        "and it must be reported as unmeasured, not as a failure: {v}"
     );
-    let GateDiffVerdict::Judged {
-        new_failures,
-        fixed,
-    } = &verdict
-    else {
-        panic!("expected Judged, got {verdict:?}");
-    };
-    assert!(new_failures.is_empty());
-    assert_eq!(fixed.len(), 7, "{fixed:?}");
-    assert!(verdict.passes());
+    assert!(
+        v.to_string().contains("never ran"),
+        "the message must say why, or the next reader repeats the mistake: {v}"
+    );
 }
 
-/// Rule 3: the incident's 900s budget does not exceed the measured
-/// wall-clock (741–1189s), and a budget with no recorded measurement is a
-/// finding, not an OK.
+/// INCIDENT: the gate loop `continue`d past one crate's suite but left its ok
+/// flag set, reporting PASS without testing.
 #[test]
-fn every_timeout_budget_exceeds_the_recorded_measurement() {
-    let measurements = [
-        MeasuredRun {
-            secs: 741,
-            source: "measured on main, run A".to_string(),
-        },
-        MeasuredRun {
-            secs: 1189,
-            source: "measured on main, run B".to_string(),
-        },
-    ];
+fn a_skipped_suite_is_not_a_pass() {
+    let skipped = run(0, 0, &[]);
+    let v = absolute(&skipped);
+    assert!(!v.is_pass(), "exit 0 with no tests run is not a pass: {v}");
+    assert!(v.is_unmeasured());
+}
 
-    let finding =
-        check_timeout_budget(900, &measurements).expect("the incident budget must be a finding");
-    assert!(matches!(finding, BudgetFinding::BudgetBelowMeasured { .. }));
+/// A candidate that runs FEWER tests than the baseline has not been judged.
+/// "No new failures" while measuring less is measuring less, not improving.
+#[test]
+fn measuring_less_is_not_improving() {
+    let baseline = run(101, 175, &["known"]);
+    let partial = run(101, 40, &["known"]);
+    let v = differential(&baseline, &partial);
+    assert!(v.is_unmeasured(), "a partial run must not pass: {v}");
+    assert!(v.to_string().contains("fewer tests"), "{v}");
+}
 
-    assert_eq!(
-        check_timeout_budget(1200, &measurements),
-        None,
-        "a budget above the longest measurement validates"
+#[test]
+fn an_unmeasured_baseline_refuses_to_judge() {
+    // Comparing against a baseline that never ran is comparing against
+    // nothing; the honest answer is "I do not know".
+    let v = differential(&run(101, 0, &[]), &run(0, 100, &[]));
+    assert!(v.is_unmeasured(), "{v}");
+    assert!(v.to_string().contains("BASELINE"), "{v}");
+}
+
+/// The real autospec-cli case: 2 pre-existing failures on main, a patch that
+/// introduces none must pass.
+#[test]
+fn inherited_failures_do_not_block_a_clean_patch() {
+    let baseline = run(
+        101,
+        1,
+        &["stale_startup_recovery", "integrated_inactive_local_branch"],
     );
+    let candidate = run(
+        101,
+        1,
+        &["stale_startup_recovery", "integrated_inactive_local_branch"],
+    );
+    assert_eq!(differential(&baseline, &candidate), GateVerdict::Pass);
+}
 
-    let missing =
-        check_timeout_budget(900, &[]).expect("a budget with no measurement must be a finding");
-    assert!(matches!(missing, BudgetFinding::MissingMeasurement { .. }));
+#[test]
+fn a_genuinely_new_failure_is_named() {
+    let baseline = run(101, 1, &["known"]);
+    let candidate = run(101, 1, &["known", "brand_new"]);
+    match differential(&baseline, &candidate) {
+        GateVerdict::Fail { reasons } => {
+            assert_eq!(reasons, vec!["brand_new".to_string()]);
+        }
+        other => panic!("expected Fail naming the new test, got {other}"),
+    }
+}
+
+#[test]
+fn absolute_passes_a_green_suite_and_fails_a_red_one() {
+    assert_eq!(absolute(&run(0, 175, &[])), GateVerdict::Pass);
+    assert!(!absolute(&run(101, 175, &["boom"])).is_pass());
+}
+
+/// Non-zero exit with no named failures is still a failure, not a pass: the
+/// harness itself may have died after reporting results.
+#[test]
+fn non_zero_exit_without_named_failures_still_fails() {
+    let v = absolute(&run(101, 10, &[]));
+    assert!(!v.is_pass(), "{v}");
+    assert!(
+        !v.is_unmeasured(),
+        "results were observed, so this is a real failure: {v}"
+    );
+}
+
+/// There is deliberately no `bool` conversion: a caller cannot coerce
+/// NotMeasured into success. This test documents that as intent.
+#[test]
+fn not_measured_never_reads_as_pass() {
+    for v in [
+        GateVerdict::NotMeasured {
+            why: "anything".into(),
+        },
+        GateVerdict::Fail {
+            reasons: vec!["x".into()],
+        },
+    ] {
+        assert!(!v.is_pass(), "{v}");
+    }
+    assert!(GateVerdict::Pass.is_pass());
 }
