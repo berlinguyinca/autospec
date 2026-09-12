@@ -7,9 +7,11 @@
 
 use std::time::Duration;
 
+use std::collections::BTreeMap;
+
 use autospec_core::circuit_breaker::{
-    BreakerConfig, CircuitState, Exclusion, Fleet, OpenReason, Outcome, RoutingDecision,
-    Transition, WorkerCapability, WorkerOutcome,
+    BreakerConfig, CircuitState, Exclusion, Fleet, LivenessVerdict, OpenReason, Outcome,
+    ProbeOutcome, RoutingDecision, Transition, WorkerCapability, WorkerOutcome,
 };
 
 fn s(n: u64) -> Duration {
@@ -359,6 +361,173 @@ fn the_declared_capability_rejects_a_request_that_cannot_fit() {
     // And the same worker routes a request that fits.
     let report = fleet.routing_report("qwen3.8", Some(32_768), s(0));
     assert!(report.contains("gw-small route"), "was: {report}");
+}
+
+#[test]
+fn a_busy_worker_whose_probe_times_out_is_healthy_not_failing() {
+    // Issue #4459: under load a probe queues behind real work, so the
+    // busiest workers fail the probe first. The measured case: decode
+    // advancing (tokens_predicted_total moving), probe timed out — the
+    // scan called it bad; the worker was working.
+    let mut busy = worker("23015215", "qwen3.8-27b");
+    for _ in 0..4 {
+        busy.request_started(s(0));
+    }
+    // Decode advancing across the sample window: the request is old but
+    // emitting.
+    for t in (0..=45).step_by(5) {
+        busy.token(s(t));
+    }
+    // The probe sent at t=45 timed out. Progress sample first: decode is
+    // advancing, so the verdict is healthy — the probe result is ignored.
+    assert_eq!(
+        busy.liveness(Some(ProbeOutcome::TimedOut), s(45)),
+        LivenessVerdict::Healthy
+    );
+    // Even a probe that timed out long before the last token does not
+    // matter: a busy worker under sustained load is never reported as
+    // failing.
+    assert_eq!(
+        busy.liveness(Some(ProbeOutcome::TimedOut), s(100)),
+        LivenessVerdict::Healthy
+    );
+
+    let line = busy.liveness_line(Some(ProbeOutcome::TimedOut), s(45));
+    assert!(line.contains("healthy"), "was: {line}");
+    assert!(line.contains("busy"), "was: {line}");
+    assert!(!line.contains("wedged"), "was: {line}");
+    assert!(!line.contains("unknown"), "was: {line}");
+}
+
+#[test]
+fn saturated_slots_with_flat_decode_is_wedged_not_unknown() {
+    // The other measured worker: 4 slots held, decode flat. The progress
+    // measure — the gateway's own stuck detector — says wedged, and the
+    // verdict consumes that same judgement, not a weaker probe test.
+    let mut wedged = worker("23022449", "qwen3.8-flash-next");
+    for _ in 0..4 {
+        wedged.request_started(s(0));
+    }
+    // No token for 120s (exactly the stuck bound), probe timed out.
+    assert_eq!(
+        wedged.liveness(Some(ProbeOutcome::TimedOut), s(120)),
+        LivenessVerdict::Wedged
+    );
+    // One token just before the bound: busy again, not wedged.
+    wedged.token(s(119));
+    assert_eq!(
+        wedged.liveness(Some(ProbeOutcome::TimedOut), s(120)),
+        LivenessVerdict::Healthy
+    );
+
+    let mut flat = worker("23022449", "qwen3.8-flash-next");
+    for _ in 0..4 {
+        flat.request_started(s(0));
+    }
+    let line = flat.liveness_line(Some(ProbeOutcome::TimedOut), s(320));
+    assert!(line.contains("wedged"), "was: {line}");
+    assert!(line.contains("4 in-flight"), "was: {line}");
+    assert!(line.contains("no token for"), "was: {line}");
+}
+
+#[test]
+fn a_timeout_with_no_progress_sample_is_unknown_never_bad() {
+    // No verdict of "not answering" without a progress sample. A timeout
+    // alone reports unknown, never bad, and it must be resolved by a
+    // progress sample before any action.
+    let idle = worker("23011001", "qwen3.8-27b");
+    assert_eq!(
+        idle.liveness(Some(ProbeOutcome::TimedOut), s(60)),
+        LivenessVerdict::Unknown
+    );
+    // No probe at all is also unknown: absence of evidence, not evidence
+    // of death.
+    assert_eq!(idle.liveness(None, s(60)), LivenessVerdict::Unknown);
+
+    // An answering probe with no in-flight work is healthy (idle).
+    assert_eq!(
+        idle.liveness(Some(ProbeOutcome::Answered), s(60)),
+        LivenessVerdict::Healthy
+    );
+
+    // The line states the verdict and names the resolution path.
+    let line = idle.liveness_line(Some(ProbeOutcome::TimedOut), s(60));
+    assert!(line.contains("unknown"), "was: {line}");
+    assert!(line.contains("progress sample"), "was: {line}");
+
+    // Resolved by a progress sample: the worker starts real work and the
+    // next scan sees in-flight decode advancing — healthy again, no
+    // restart needed.
+    let mut idle = idle;
+    idle.request_started(s(70));
+    idle.token(s(71));
+    assert_eq!(
+        idle.liveness(Some(ProbeOutcome::TimedOut), s(71)),
+        LivenessVerdict::Healthy
+    );
+}
+
+#[test]
+fn the_fleet_scan_counts_busy_wedged_and_unknown_separately() {
+    // The scan the old probe test ran at the start of every pass reported
+    // `FLEET answering=6 stale=0 bad: <two workers>`, one of them healthy
+    // and busy. The replacement never collapses busy into bad.
+    let mut fleet = Fleet::new();
+
+    let mut busy = worker("23015215", "qwen3.8-27b");
+    busy.request_started(s(100));
+    busy.token(s(155));
+    fleet.register(busy);
+
+    let mut wedged = worker("23022449", "qwen3.8-flash-next");
+    for _ in 0..4 {
+        wedged.request_started(s(0));
+    }
+    fleet.register(wedged);
+
+    let idle = worker("23011001", "qwen3.8-27b");
+    fleet.register(idle);
+
+    let mut probes = BTreeMap::new();
+    probes.insert("23015215".to_string(), ProbeOutcome::TimedOut);
+    probes.insert("23022449".to_string(), ProbeOutcome::TimedOut);
+    probes.insert("23011001".to_string(), ProbeOutcome::TimedOut);
+
+    // t=160: busy's last token was 5s ago (advancing); wedged has had no
+    // token for 160s (past the 120s stuck bound).
+    let report = fleet.liveness_report(&probes, s(160));
+    assert_eq!(
+        report.lines().count(),
+        4,
+        "one line per worker plus summary: {report}"
+    );
+    for line in report.lines() {
+        if let Some(w) = line.split(':').next() {
+            match w {
+                "23015215" => assert!(
+                    line.contains("healthy") && line.contains("busy"),
+                    "was: {line}"
+                ),
+                "23022449" => assert!(line.contains("wedged"), "was: {line}"),
+                "23011001" => assert!(line.contains("unknown"), "was: {line}"),
+                _ => {}
+            }
+        }
+    }
+    let summary = report.lines().last().unwrap();
+    assert_eq!(
+        summary, "FLEET healthy=1 wedged=1 unknown=1",
+        "summary was: {summary}"
+    );
+    // And a probe that answered every worker: healthy idle, still no
+    // "bad" state in the vocabulary.
+    let mut probes = BTreeMap::new();
+    probes.insert("23011001".to_string(), ProbeOutcome::Answered);
+    let report = fleet.liveness_report(&probes, s(160));
+    assert!(
+        report.lines().last().unwrap() == "FLEET healthy=2 wedged=1 unknown=0",
+        "was: {report}"
+    );
 }
 
 #[test]
