@@ -13,6 +13,9 @@ use super::{
     NO_READY_ISSUE_PAUSE, OWNERSHIP_RETIREMENT_PAUSE, TERMINAL_RETIREMENT_PAUSE,
 };
 
+mod stale_claim;
+pub(crate) use stale_claim::{dispose_stale_receipt_failure, ReceiptFailureRoute};
+
 /// The pause a conductor cannot resume from, and the only one that poisons startup.
 const RETRY_LIMIT_EXHAUSTED_PAUSE: &str = "retry_limit_exhausted";
 pub(super) const EXECUTOR_RECEIPT_FAILURE_PAUSE: &str = "executor_receipt_failed";

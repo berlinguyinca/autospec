@@ -856,6 +856,7 @@ ring's computed style cannot be reached by source analysis.
 | Var | Default | Effect |
 |---|---|---|
 | `AUTOSPEC_RESUME_COMMAND` | derived | Literal resume command persisted by `autospec run` and reused by supervisors on reset. |
+| `AUTOSPEC_STALE_CLAIM_FLOOR_SECS` | `86400` | Age of the last recorded progress past which an un-merged, un-claimable bot claim is quarantined (`autospec:needs-human`) instead of retried. |
 
 ## Memory management
 | Var | Default | Effect |
