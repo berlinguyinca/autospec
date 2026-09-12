@@ -55,6 +55,7 @@ pub mod execution;
 pub mod exit_guard;
 pub mod explore;
 pub mod failure_attribution;
+pub mod failure_floor;
 pub mod failure_signatures;
 pub mod fix_surface;
 pub mod fleet_dispatch;
