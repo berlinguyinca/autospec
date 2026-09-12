@@ -9,6 +9,7 @@ pub mod fast_lane;
 pub mod gate;
 pub mod gate_reuse;
 pub mod gate_scope;
+pub mod gate_scoping;
 pub mod patch_apply;
 pub mod patch_conflicts;
 pub mod patch_pipeline;
