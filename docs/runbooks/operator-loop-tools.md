@@ -20,6 +20,7 @@ root is a deployment path and is named as such.
 | topup | `<llm>/topup.sh` | deployment host (authenticated) | */10 | consumes the queue artifact, produces dispatch requests | — |
 | dispatch-agent | `<llm>/dispatch-gw.sh` | shared cluster (no credential) | */10 | dispatches agents from dispatch requests | — |
 | needs-classify sweep | `skills/autospec-classify/SKILL.md` | local workspace (authenticated) | 0 3 * * * | promotes `needs-classify` issues onto the implementation queue | [needs-classify-sweep](needs-classify-sweep.md) |
+| queue-gap reconcile | `autospec dispatch queue-gap` | local workspace (authenticated) | */10 | reports `eligible` / `queued` / `has_branch_or_pr` / `missing` on every run, and fails on a required component with no implementation (#4450) | [refresh-queue-sweep](refresh-queue-sweep.md) |
 
 Per-hop liveness is reported by `autospec dispatch status`
 (`docs/cli-reference.md`); the heartbeat rules the scheduled hops follow
