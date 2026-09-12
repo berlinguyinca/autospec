@@ -156,6 +156,7 @@ pub mod validation;
 pub mod verdict_shelf;
 pub mod verification;
 pub mod warned_output;
+pub mod watchdog_evidence;
 pub mod weight_acquisition;
 pub mod wire_fixture;
 pub mod work_selection;
