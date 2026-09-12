@@ -14,7 +14,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use autospec_core::graph::{metrics, IssueGraph, PlannedIssue};
+use autospec_core::graph::{compare, metrics, IssueGraph, PlannedIssue};
 use serde::Serialize;
 
 use super::CommandFailure;
@@ -38,6 +38,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
             Ok(())
         }
         [command, rest @ ..] if command == "analyze" => run_analyze(rest),
+        [command, rest @ ..] if command == "compare" => run_compare(rest),
         [command, ..] => Err(CommandFailure::diagnostic(format!(
             "unknown autospec graph command: {command}"
         ))),
@@ -131,6 +132,128 @@ fn run_analyze(args: &[String]) -> Result<(), CommandFailure> {
         }
     }
     Ok(())
+}
+
+/// §23/§25: diff a before/after pair of issue graphs and print the
+/// optimizer change summary. `--before` and `--after` each point at an issue
+/// graph file (same grammar as `analyze --input`); both are analyzed at the
+/// same fleet `capacity` and diffed via core's [`compare`]. Exits 0 on an
+/// accepted optimization and 4 when the after-graph is rejected (its
+/// critical path grew).
+fn run_compare(args: &[String]) -> Result<(), CommandFailure> {
+    if args
+        .first()
+        .is_some_and(|flag| flag == "--help" || flag == "-h")
+    {
+        print_help();
+        return Ok(());
+    }
+    let options = parse_compare_options(args)?;
+    let before = analyze_at(&options.before, options.capacity)?;
+    let after = analyze_at(&options.after, options.capacity)?;
+    let summary = compare(&before, &after);
+
+    println!("Optimizer change summary");
+    println!("  edges removed:      {}", summary.removed);
+    println!("  edges added:        {}", summary.added);
+    println!("  issues split:       {}", summary.split);
+    println!("  issues merged:      {}", summary.merged);
+    println!("  edge count delta:   {}", summary.edge_count_delta);
+    println!(
+        "  critical path:      {} -> {}",
+        before.critical_path_length, after.critical_path_length
+    );
+    println!(
+        "  parallelization:    {} -> {}",
+        before.parallelization_score, after.parallelization_score
+    );
+
+    if summary.rejected {
+        println!(
+            "  decision:           rejected (critical path grew {} -> {})",
+            before.critical_path_length, after.critical_path_length
+        );
+        return Err(CommandFailure::status(
+            "optimizer pass rejected: after-graph critical path grew",
+            4,
+        ));
+    }
+    println!("  decision:           accepted");
+    Ok(())
+}
+
+/// Read + analyze one issue graph file at `capacity`, returning its metrics.
+fn analyze_at(path: &std::path::Path, capacity: usize) -> Result<autospec_core::graph::GraphMetrics, CommandFailure> {
+    let source = fs::read_to_string(path).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not read input file {}: {error}",
+            path.display()
+        ))
+    })?;
+    let graph = parse_input(&source)?;
+    if let Some(cycle) = graph.detect_cycle() {
+        return Err(CommandFailure::status(
+            format!(
+                "dependency cycle detected: {} -> {}",
+                cycle.join(" -> "),
+                cycle[0]
+            ),
+            3,
+        ));
+    }
+    Ok(metrics(&graph, capacity))
+}
+
+#[derive(Debug, Clone)]
+struct CompareOptions {
+    before: PathBuf,
+    after: PathBuf,
+    capacity: usize,
+}
+
+fn parse_compare_options(args: &[String]) -> Result<CompareOptions, CommandFailure> {
+    if args.len() % 2 != 0 {
+        let dangling = args
+            .last()
+            .expect("odd-length args have a last element")
+            .as_str();
+        let message = if dangling.starts_with('-') {
+            format!("autospec graph compare: option {dangling} requires an argument")
+        } else {
+            format!("autospec graph compare: unknown option: {dangling}")
+        };
+        return Err(CommandFailure::diagnostic(message));
+    }
+    let mut before = None;
+    let mut after = None;
+    let mut capacity = DEFAULT_CAPACITY;
+    for pair in args.chunks_exact(2) {
+        let option = pair[0].as_str();
+        let value = pair[1].as_str();
+        match option {
+            "--before" if before.is_none() => before = Some(PathBuf::from(value)),
+            "--after" if after.is_none() => after = Some(PathBuf::from(value)),
+            "--capacity" if value.parse::<usize>().is_ok() => {
+                capacity = value.parse().expect("validated above");
+            }
+            _ => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "autospec graph compare: unknown or invalid option {option} {value}"
+                )));
+            }
+        }
+    }
+    let before = before.ok_or_else(|| {
+        CommandFailure::diagnostic("autospec graph compare requires --before <PATH>")
+    })?;
+    let after = after.ok_or_else(|| {
+        CommandFailure::diagnostic("autospec graph compare requires --after <PATH>")
+    })?;
+    Ok(CompareOptions {
+        before,
+        after,
+        capacity,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,10 +498,14 @@ fn print_help() {
 
 USAGE:
     autospec graph analyze --input <PATH> [--capacity N] [--format json|text]
+    autospec graph compare --before <PATH> --after <PATH> [--capacity N]
 
 SUBCOMMANDS:
     analyze    Analyze a proposed issue DAG: §19 metrics JSON, §24 execution
                wave projection, and §25 planner summary
+    compare    §25 optimizer change summary: diff a before/after pair of
+               issue graphs (edges, issues, critical path) and report the
+               accepted/rejected retry decision (§23)
 
 OPTIONS (analyze):
     --input <PATH>     Issue graph JSON ({"issues": [...], "hard_edges": [...]})
@@ -386,9 +513,15 @@ OPTIONS (analyze):
     --capacity <N>     Fleet capacity (default 32, per spec §6.2)
     --format <fmt>     json (default) or text
 
+OPTIONS (compare):
+    --before <PATH>    Issue graph JSON as analyzed before the optimizer pass
+    --after <PATH>     Issue graph JSON as analyzed after the optimizer pass
+    --capacity <N>     Fleet capacity (default 32, per spec §6.2); applied to both
+
 Exit codes:
     0  analysis succeeded
     2  usage or input error (missing file, invalid JSON, bad option)
-    3  dependency cycle detected (cycle path printed on stderr, 1 line)"#;
+    3  dependency cycle detected (cycle path printed on stderr, 1 line)
+    4  optimizer pass rejected (after-graph critical path grew)"#;
     print!("{HELP}\n");
 }
