@@ -83,6 +83,7 @@ pub mod insights;
 pub mod integration;
 pub mod issue_lock;
 pub mod item_sweep;
+pub mod kv_overcommit;
 pub mod lint;
 pub mod log_freshness;
 pub mod loop_actuation;
