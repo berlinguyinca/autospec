@@ -18,6 +18,7 @@
 //! functions return, which keeps policy testable without a model, a node, or a
 //! worktree.
 
+pub mod admission_obligation;
 pub mod capsule;
 pub mod classify;
 pub mod context;
@@ -46,6 +47,10 @@ pub mod telemetry;
 pub mod topology;
 pub mod vertical_slice;
 
+pub use admission_obligation::{
+    check_covers, provisional_status, CheckPlacement, ConditionBehavior, MisplacedCheck,
+    ProvisionalStatus, DEFAULT_MEASUREMENT_WINDOW_SECS,
+};
 pub use capsule::{RolePolicy, TaskCapsule};
 pub use classify::{
     classify, Capability, ClassificationInput, Complexity, Risk, TaskClass, TaskClassification,
