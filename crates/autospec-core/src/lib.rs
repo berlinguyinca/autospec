@@ -1,6 +1,7 @@
 pub mod aar;
 pub mod agent;
 pub mod agent_watchdog;
+pub mod aggregate_granularity;
 pub mod argument_scope;
 pub mod implementation_language;
 pub mod shell_ratchet;
