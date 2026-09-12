@@ -150,6 +150,7 @@ commands! {
     init => "Initialize AutoSpec metadata", diagnostic;
     aar => "Inspect adaptive agent runtime policy", direct;
     anchor => "Register and verify protected evaluator anchor suites", direct;
+    evaluator => "Manage versioned evaluators, epochs, and promotions", direct;
     initiative => "Inspect cross-repository initiatives", direct;
     issue => "Stamp and promote the canonical GitHub issue", direct;
     insights => "Inspect the continuous improvement engine (spec §44)", status_code;

@@ -220,6 +220,23 @@ staged spec, a spec staged before revision headers existed, or a live issue the 
 cannot read. Freshness that cannot be verified is never verified, so a `gh` that returns
 "not authenticated" on an unauthenticated cluster holds the dispatch instead of dispatching
 yesterday's read.
+| `autospec evaluator init [--policy <policy.json>] [--json]` | yes | initialize the store: write-once policy, genesis epoch, atomic current pointer |
+| `autospec evaluator register --file <definition.json> [--json]` | yes | register an immutable evaluator definition (`evaluators/<slot>/v<N>.json`) |
+| `autospec evaluator list [--json]` | yes | list every registered evaluator, sorted by slot then version |
+| `autospec evaluator show <slot@version> [--json]` | yes | show one registered definition plus its recomputed digest |
+| `autospec evaluator pin <slot@version> --actor <name> [--json]` | yes | seed an empty slot at a registered version into the next epoch with a committed human-approved promotion |
+| `autospec evaluator epoch <current\|history> [--json]` | yes | show the active epoch or the full epoch history with promotion ids |
+
+`autospec evaluator` manages the local evaluation store under `.autospec/evaluation`
+(root override: `--root <dir>`). `init` writes the write-once promotion policy (a
+`--policy <policy.json>` file or the built-in default), the genesis epoch, and the atomic
+`current.json` pointer; re-running `init` fails. `register` writes an immutable
+definition document with `O_CREAT|O_EXCL` and rejects a re-register of the same
+`slot@version`. `pin` seeds only empty slots at a registered version, commits a human
+approval (`--actor`) as a promotion event, and bumps the epoch; `epoch current` and
+`epoch history` resolve the active epoch through the atomic pointer and list every epoch
+with its promotion id. Every failure is fail-closed and names the offending path or
+invariant; nothing in this command group talks to a remote.
 
 `autospec rag` is read-only and performs no retrieval. It reports what the Agentic RAG
 subsystem's configuration and policy *would* do, so an operator can check a role budget or a
