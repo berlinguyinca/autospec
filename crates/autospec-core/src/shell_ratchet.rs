@@ -18,6 +18,19 @@
 //! the growth, so the port is a finite problem: the count may fall and may
 //! never rise. A new script must either replace more shell than it adds, or
 //! be written in Rust.
+//!
+//! A change is a diff, not a tree. A bug fix frequently needs *more* lines
+//! than the bug — a missing guard, an extra case, a corrected loop — and a
+//! ceiling on the total refuses the fix for the same reason it refuses a new
+//! feature, even though one grows the surface and the other repairs it
+//! (#4482). So the ratchet compares the head against the base it grew from
+//! (`delta`, `diff_verdict`) and refuses only the part that is new surface —
+//! a shell or Bats file absent from the base. Changes inside a file that
+//! already exists and already runs are admitted and recorded per file
+//! (`ShellDelta::modified`), so "this file grew while being repaired" stays
+//! reportable without being blocking. Porting an existing file is tracked as
+//! its own scheduled work, never as the implied precondition of its bug
+//! fixes.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -43,6 +56,11 @@ pub struct ShellSurface {
     pub lines: BTreeMap<String, usize>,
     /// File counts, keyed by the same labels.
     pub files: BTreeMap<String, usize>,
+    /// Per-file non-blank line counts, keyed by path relative to the measured
+    /// root. The per-file record is what lets a change be told apart as
+    /// growth or repair: the total alone cannot say which file grew while
+    /// being fixed.
+    pub per_file: BTreeMap<String, usize>,
 }
 
 impl ShellSurface {
@@ -153,9 +171,200 @@ pub fn measure(root: &Path) -> std::io::Result<ShellSurface> {
             let n = text.lines().filter(|l| !l.trim().is_empty()).count();
             *surface.lines.entry(label.to_string()).or_insert(0) += n;
             *surface.files.entry(label.to_string()).or_insert(0) += 1;
+            let rel = match path.strip_prefix(root) {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(_) => path.to_string_lossy().into_owned(),
+            };
+            *surface.per_file.entry(rel).or_insert(0) += n;
         }
     }
     Ok(surface)
+}
+
+/// A change to the shell surface, from a base measurement to the head it
+/// grew from. This is what the ratchet decides on: a patch is a diff, and
+/// only the diff tells growth from repair.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShellDelta {
+    /// Files present in the head but not the base, with their non-blank line
+    /// counts. Anything here is new surface, and new surface is what the
+    /// moratorium refuses.
+    pub new_files: BTreeMap<String, usize>,
+    /// Files present in both, keyed by path, as (base lines, head lines), for
+    /// the files whose count changed. Recorded so growth inside an existing
+    /// file is reportable without blocking the fix.
+    pub modified: BTreeMap<String, (usize, usize)>,
+    /// Files present in the base but gone from the head: shell being retired.
+    pub removed_files: Vec<String>,
+}
+
+impl ShellDelta {
+    /// All the lines the change introduces as new surface.
+    pub fn new_lines(&self) -> usize {
+        self.new_files.values().sum()
+    }
+
+    /// True when the change touches only files already present on the base:
+    /// repair, not growth.
+    pub fn maintenance_only(&self) -> bool {
+        self.new_files.is_empty()
+    }
+}
+
+/// Compares a head measurement against the base it grew from.
+pub fn delta(base: &ShellSurface, head: &ShellSurface) -> ShellDelta {
+    let mut out = ShellDelta::default();
+    for (path, lines) in &head.per_file {
+        match base.per_file.get(path) {
+            Some(base_lines) => {
+                if base_lines != lines {
+                    out.modified.insert(path.clone(), (*base_lines, *lines));
+                }
+            }
+            None => {
+                out.new_files.insert(path.clone(), *lines);
+            }
+        }
+    }
+    for path in base.per_file.keys() {
+        if !head.per_file.contains_key(path) {
+            out.removed_files.push(path.clone());
+        }
+    }
+    out.removed_files.sort();
+    out
+}
+
+/// The verdict of a *change* against the ceiling. Where [`verdict`] measures
+/// a tree, this measures the difference from the base: new shell or Bats
+/// files are refused, and changes inside files that exist on the base are
+/// admitted and recorded. A moratorium on new surface must not block repair
+/// of existing surface (#4482).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RatchetDiffVerdict {
+    /// The change adds no shell or Bats file. Changes to existing files are
+    /// recorded in `delta.modified` so the maintenance burden stays visible,
+    /// but they do not block.
+    Admitted {
+        delta: ShellDelta,
+        head_total: usize,
+        ceiling: usize,
+    },
+    /// The change adds at least one shell or Bats file absent from the base:
+    /// the growth the rule exists to stop.
+    RefusedNewFiles {
+        delta: ShellDelta,
+        head_total: usize,
+        ceiling: usize,
+    },
+}
+
+impl RatchetDiffVerdict {
+    /// Whether this verdict should fail a gate.
+    pub fn is_regression(&self) -> bool {
+        matches!(self, RatchetDiffVerdict::RefusedNewFiles { .. })
+    }
+
+    /// The hold reason, for the queue and the patch ledger. It says which of
+    /// the two things the ratchet distinguishes happened — new surface, or
+    /// repair of existing surface — not just "shell ratchet failed".
+    pub fn hold_reason(&self) -> &'static str {
+        match self {
+            RatchetDiffVerdict::Admitted { .. } => "modifies existing shell",
+            RatchetDiffVerdict::RefusedNewFiles { .. } => "adds a new shell file",
+        }
+    }
+
+    /// The operator-facing explanation.
+    pub fn message(&self) -> String {
+        match self {
+            RatchetDiffVerdict::Admitted {
+                delta,
+                head_total,
+                ceiling,
+            } => {
+                let modified = describe_modified(&delta.modified);
+                format!(
+                    "shell ratchet OK: no new shell or Bats files (head {head_total} lines against a \
+                     ceiling of {ceiling}); existing files modified: {modified}. Growth inside \
+                     existing files is recorded, not blocked: a moratorium on new surface must not \
+                     block repair of it, and porting a file is tracked as its own work, not implied \
+                     by this check.{}",
+                    removed_note(delta)
+                )
+            }
+            RatchetDiffVerdict::RefusedNewFiles {
+                delta,
+                head_total,
+                ceiling,
+            } => {
+                let modified = describe_modified(&delta.modified);
+                let new_files: Vec<String> = delta
+                    .new_files
+                    .iter()
+                    .map(|(p, n)| format!("{p} ({n} lines)"))
+                    .collect();
+                format!(
+                    "shell ratchet refused: adds a new shell file ({} new line(s) in {} file(s): \
+                     {}); head {head_total} lines against a ceiling of {ceiling}. The ceiling \
+                     applies to new surface, where it does what it was built for. This \
+                     repository's product is Rust: write it in crates/, or file a porting issue — \
+                     porting is tracked as its own scheduled work, never the implied precondition \
+                     of a bug fix. Existing files modified in this diff: {modified}.{}",
+                    delta.new_lines(),
+                    delta.new_files.len(),
+                    new_files.join(", "),
+                    removed_note(delta)
+                )
+            }
+        }
+    }
+}
+
+/// Renders the per-file modification record, or "none" when the change
+/// touches no existing file's line count.
+fn describe_modified(modified: &BTreeMap<String, (usize, usize)>) -> String {
+    if modified.is_empty() {
+        return "none".to_string();
+    }
+    modified
+        .iter()
+        .map(|(p, (b, h))| format!("{p} {b} -> {h}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn removed_note(delta: &ShellDelta) -> String {
+    if delta.removed_files.is_empty() {
+        String::new()
+    } else {
+        format!(" Removed: {}.", delta.removed_files.join(", "))
+    }
+}
+
+/// Compares a head measurement against the base it grew from and the
+/// ceiling. The ceiling accounts for new files only, where it does what it
+/// was built for; growth inside an existing file never refuses on its own.
+pub fn diff_verdict(
+    base: &ShellSurface,
+    head: &ShellSurface,
+    ceiling: usize,
+) -> RatchetDiffVerdict {
+    let d = delta(base, head);
+    let head_total = head.total_lines();
+    if d.new_files.is_empty() {
+        RatchetDiffVerdict::Admitted {
+            delta: d,
+            head_total,
+            ceiling,
+        }
+    } else {
+        RatchetDiffVerdict::RefusedNewFiles {
+            delta: d,
+            head_total,
+            ceiling,
+        }
+    }
 }
 
 /// Compares a measurement against a ceiling.
