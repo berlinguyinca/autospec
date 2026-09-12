@@ -100,6 +100,7 @@ pub mod log_freshness;
 pub mod loop_actuation;
 pub mod loop_reset;
 pub mod managed_project;
+pub mod measurement_assertion;
 pub mod memo_key;
 pub mod merge_gate;
 pub mod name_scope;
