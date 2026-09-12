@@ -1,4 +1,9 @@
-use super::{ManagedProjectError, ManagedProjectStore, RemoteProject};
+use super::{
+    parse_created_field, parse_remote_fields, plan_view_setup, required_managed_fields,
+    resolve_managed_fields, validate_created_field, FieldOwnership, FieldPlanEntry,
+    ManagedFieldSpec, ManagedProjectError, ManagedProjectStore, PortfolioShapeReport, RemoteField,
+    RemoteProject, ViewCapability,
+};
 use crate::commands::autonomous::accountability::github::{
     GithubCommand, GithubFailure, GithubTransport,
 };
@@ -241,6 +246,233 @@ pub fn retry_pending_projections<T: GithubTransport>(
         store.ack_projection(&projection)?;
     }
     Ok(())
+}
+
+/// Provisions the managed delivery shape of a bound spec-portfolio Project:
+/// verifies built-in and creates owned custom fields, reports the view setup,
+/// and idempotently adds every bound issue item. Field creates move through the
+/// durable `field:<slug>` portfolio operations (intent → sent → acknowledged),
+/// item additions through the journaled projection set, so a retryable failure
+/// anywhere is resumable and never replayed blindly.
+pub fn provision_portfolio_shape<T: GithubTransport>(
+    store: &mut ManagedProjectStore,
+    github: &mut T,
+    policy: &ManagedProjectPolicy,
+) -> Result<PortfolioShapeReport, ManagedProjectError> {
+    let ManagedProjectIdentity::SpecPortfolio(_) = store.snapshot().identity() else {
+        return Err(ManagedProjectError::new(
+            "managed delivery fields are a spec-portfolio projection",
+        ));
+    };
+    if store.portfolio_snapshot().is_none() {
+        return Err(ManagedProjectError::new(
+            "spec portfolio Project shape provisioning requires the recovery capsule",
+        ));
+    }
+    let identity = bound_identity(store, policy)?;
+    let project_url = store
+        .snapshot()
+        .project_url
+        .clone()
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| ManagedProjectError::new("managed project binding has no URL"))?;
+
+    let remote = parse_remote_fields(&execute(
+        github,
+        GithubCommand::ListProjectFields {
+            owner: identity.owner.clone(),
+            number: identity.number,
+        },
+        "cannot list managed GitHub Project fields",
+    )?)?;
+    let ownership = field_ownership(store)?;
+    let plan = resolve_managed_fields(&remote, &ownership)
+        .map_err(|error| ManagedProjectError::new(error.to_string()))?;
+    for entry in &plan.entries {
+        match entry {
+            FieldPlanEntry::Create { spec } => {
+                ensure_field_operation(store, &ownership, spec)?;
+                let created = parse_created_field(&execute(
+                    github,
+                    GithubCommand::CreateProjectField {
+                        owner: identity.owner.clone(),
+                        number: identity.number,
+                        name: spec.name.to_owned(),
+                        data_type: spec.kind.data_type().to_owned(),
+                        single_select_options: spec
+                            .options
+                            .iter()
+                            .map(|option| (*option).to_owned())
+                            .collect(),
+                    },
+                    "cannot create managed GitHub Project field",
+                )?)?;
+                validate_created_field(&created, spec)
+                    .map_err(|error| ManagedProjectError::new(error.to_string()))?;
+                acknowledge_field_operation(store, &spec.operation_id(), &created)?;
+            }
+            // A lost create response is adopted only after the remote field
+            // verifies against the managed spec; the acknowledgment then records
+            // the node IDs the response would have carried.
+            FieldPlanEntry::VerifiedOwned {
+                name,
+                node_id,
+                options,
+            } => {
+                let spec = required_managed_fields()
+                    .into_iter()
+                    .find(|spec| spec.name == *name)
+                    .expect("verified entry names a required field");
+                let state = ownership
+                    .iter()
+                    .find(|(operation_id, _)| operation_id == &spec.operation_id())
+                    .map(|(_, state)| *state);
+                if state == Some(FieldOwnership::Sent) {
+                    let field = RemoteField {
+                        node_id: node_id.clone(),
+                        name: (*name).to_owned(),
+                        data_type: spec.kind.data_type().to_owned(),
+                        options: options.clone(),
+                    };
+                    acknowledge_field_operation(store, &spec.operation_id(), &field)?;
+                }
+            }
+            FieldPlanEntry::VerifiedBuiltIn { .. } => {}
+        }
+    }
+
+    // The shared transport exposes no Project v2 view mutation (the gh CLI
+    // `project` surface has no view create), so view setup is reported as
+    // manual with the exact URL and field list; field and item provisioning
+    // remain mandatory (spec "Project shape").
+    let view_setup = plan_view_setup(ViewCapability::Unsupported, &project_url);
+
+    let items = list_project_items(github, &identity.owner, identity.number)?;
+    let mut urls: Vec<String> = store
+        .portfolio_item_bindings()
+        .iter()
+        .filter_map(|binding| binding.get("issue_url").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    urls.sort();
+    urls.dedup();
+    let mut items_present = 0;
+    let mut items_added = 0;
+    for issue_url in &urls {
+        let normalized = parse::normalize_issue_url(issue_url)?;
+        let projection = projection_key(&identity.node_id, &normalized);
+        if items.contains(&normalized) {
+            store.ensure_projection_pending(&projection)?;
+            store.ack_projection(&projection)?;
+            items_present += 1;
+        } else {
+            store.ensure_projection_pending(&projection)?;
+            execute(
+                github,
+                GithubCommand::AddToProject {
+                    owner: identity.owner.clone(),
+                    project_number: identity.number,
+                    issue_url: normalized.clone(),
+                },
+                "cannot add portfolio issue to managed GitHub Project",
+            )?;
+            store.ack_projection(&projection)?;
+            items_added += 1;
+        }
+    }
+
+    Ok(PortfolioShapeReport {
+        fields: plan.entries.clone(),
+        view_setup,
+        items_present,
+        items_added,
+    })
+}
+
+/// Current state of the `field:<slug>` ownership operations, last event wins.
+fn field_ownership(
+    store: &ManagedProjectStore,
+) -> Result<Vec<(String, FieldOwnership)>, ManagedProjectError> {
+    let mut ownership = Vec::new();
+    for (operation_id, state) in store.portfolio_operation_states() {
+        let Some(name) = operation_id.strip_prefix("field:") else {
+            continue;
+        };
+        if name.is_empty() {
+            return Err(ManagedProjectError::new(
+                "field ownership operation has no field name",
+            ));
+        }
+        let ownership_state = match state.as_str() {
+            "intent" => FieldOwnership::Intent,
+            "sent" => FieldOwnership::Sent,
+            "acknowledged" => FieldOwnership::Acknowledged,
+            other => {
+                return Err(ManagedProjectError::new(format!(
+                    "field ownership operation {operation_id} has invalid state {other}"
+                )))
+            }
+        };
+        if let Some((_, existing)) = ownership.iter_mut().find(|(id, _)| *id == operation_id) {
+            *existing = ownership_state;
+        } else {
+            ownership.push((operation_id, ownership_state));
+        }
+    }
+    Ok(ownership)
+}
+
+/// Records intent (nothing dispatched) and sent (create dispatched) before the
+/// mutation, so a lost response is journaled ownership, never a blind re-create
+/// or a human-owned collision.
+fn ensure_field_operation(
+    store: &mut ManagedProjectStore,
+    ownership: &[(String, FieldOwnership)],
+    spec: &ManagedFieldSpec,
+) -> Result<(), ManagedProjectError> {
+    let operation_id = spec.operation_id();
+    let state = ownership
+        .iter()
+        .find(|(id, _)| id == &operation_id)
+        .map(|(_, state)| *state);
+    if state.is_none() {
+        store.transition_portfolio_operation(
+            &operation_id,
+            "intent",
+            serde_json::json!({
+                "name": spec.name,
+                "data_type": spec.kind.data_type(),
+                "options": spec.options,
+            }),
+        )?;
+    }
+    if matches!(state, None | Some(FieldOwnership::Intent)) {
+        store.transition_portfolio_operation(
+            &operation_id,
+            "sent",
+            serde_json::json!({ "name": spec.name }),
+        )?;
+    }
+    Ok(())
+}
+
+fn acknowledge_field_operation(
+    store: &mut ManagedProjectStore,
+    operation_id: &str,
+    field: &RemoteField,
+) -> Result<(), ManagedProjectError> {
+    store.transition_portfolio_operation(
+        operation_id,
+        "acknowledged",
+        serde_json::json!({
+            "name": field.name,
+            "node_id": field.node_id,
+            "options": field.options.iter().map(|option| serde_json::json!({
+                "name": option.name,
+                "node_id": option.node_id,
+            })).collect::<Vec<_>>(),
+        }),
+    )
 }
 
 fn unresolved_issue_url(projection: &str) -> Result<String, ManagedProjectError> {

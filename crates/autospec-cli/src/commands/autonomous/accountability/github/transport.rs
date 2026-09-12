@@ -65,6 +65,24 @@ pub enum GithubCommand {
         project_number: u64,
         issue_url: String,
     },
+    /// Lists the Project v2 fields (built-in and custom) with their data types and
+    /// single-select options. Read-only: transient failures are retryable, never
+    /// ambiguous.
+    ListProjectFields {
+        owner: String,
+        number: u64,
+    },
+    /// Creates a custom Project v2 field. `single_select_options` is only accepted for
+    /// the `SINGLE_SELECT` data type and fixes the option set at creation time: GitHub
+    /// exposes no option-add mutation, so a missing managed option is a block, not a
+    /// follow-up write.
+    CreateProjectField {
+        owner: String,
+        number: u64,
+        name: String,
+        data_type: String,
+        single_select_options: Vec<String>,
+    },
     /// Reads the tip of a git ref via the `matching-refs` endpoint. Returns a JSON
     /// array of matching refs; an empty array means the ref is absent. Slashes in the
     /// ref path are kept literal (the endpoint takes a path, not a percent-encoded ref).
@@ -290,6 +308,44 @@ impl GithubCommand {
                 ],
                 None,
             ),
+            Self::ListProjectFields { owner, number } => (
+                vec![
+                    "project".into(),
+                    "field-list".into(),
+                    number.to_string(),
+                    "--owner".into(),
+                    owner,
+                    "--format".into(),
+                    "json".into(),
+                ],
+                None,
+            ),
+            Self::CreateProjectField {
+                owner,
+                number,
+                name,
+                data_type,
+                single_select_options,
+            } => {
+                let mut parts = vec![
+                    "project".into(),
+                    "field-create".into(),
+                    number.to_string(),
+                    "--owner".into(),
+                    owner,
+                    "--name".into(),
+                    name,
+                    "--data-type".into(),
+                    data_type,
+                ];
+                if !single_select_options.is_empty() {
+                    parts.push("--single-select-options".into());
+                    parts.push(single_select_options.join(","));
+                }
+                parts.push("--format".into());
+                parts.push("json".into());
+                (parts, None)
+            }
             Self::ReadGitRef { repository, ref_name } => {
                 // The matching-refs endpoint takes a path relative to `refs/`.
                 let path = ref_name.strip_prefix("refs/").unwrap_or(&ref_name);
@@ -422,6 +478,7 @@ fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
             | GithubCommand::ListOwnerRepositories { .. }
             | GithubCommand::ViewProject { .. }
             | GithubCommand::ListProjectItems { .. }
+            | GithubCommand::ListProjectFields { .. }
             | GithubCommand::ReadGitRef { .. }
             | GithubCommand::ReadGitCommit { .. }
     );
