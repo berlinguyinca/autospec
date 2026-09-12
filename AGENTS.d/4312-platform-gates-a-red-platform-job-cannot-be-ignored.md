@@ -1,6 +1,6 @@
 # Platform gates: a red platform job cannot be ignored (issue #4312)
 
-A platform-specific CI job (`macos-test`, `freebsd-test`) is
+A platform-specific CI job (`macos-test`, `windows-test`, `freebsd-test`) is
 the sole verification of the code behind its `#[cfg]` gate: when it goes red,
 every line behind the gate merges unverified, and a single-run view cannot
 tell a job that broke moments ago from one that has been red for days. The
