@@ -19,9 +19,12 @@
 //!   the report; nobody has to eyeball a log directory to find it.
 //! - **Silent runs are counted, not dropped.** A run that died before writing
 //!   a status file lands in [`NO_STATUS_SIGNATURE`]; a failed run that wrote no
-//!   usable stderr line lands in [`NO_OUTPUT_SIGNATURE`]. Both are ordinary
-//!   buckets, so the runs that destroyed their own evidence become the loudest
-//!   entries instead of disappearing from the arithmetic.
+//!   usable stderr line lands in [`NO_OUTPUT_SIGNATURE`]; a run killed by a
+//!   walltime/budget timeout lands in [`TIMEOUT_NO_OUTPUT_SIGNATURE`], kept
+//!   apart from [`NO_OUTPUT_SIGNATURE`] because "the budget was too small" is
+//!   a different failure than "the code crashed silently" (issue #3690). All
+//!   are ordinary buckets, so the runs that destroyed their own evidence
+//!   become the loudest entries instead of disappearing from the arithmetic.
 //!
 //! Signature normalization keeps its cost where the value is: the last
 //! non-Slurm stderr line, with numbers and paths masked (see
@@ -59,6 +62,14 @@ pub const NO_STATUS_SIGNATURE: &str = "<no status file>";
 /// Bucket for failed runs that wrote no usable stderr line.
 pub const NO_OUTPUT_SIGNATURE: &str = "<no output>";
 
+/// Bucket for runs killed by a walltime/budget timeout that wrote no usable
+/// stderr line. Kept distinct from [`NO_OUTPUT_SIGNATURE`]: a silent timeout
+/// means the agent's budget was too small for the job (issue #3690), while a
+/// silent crash means the code is broken — the frontier reacts to these
+/// differently (grow the budget versus fix the crash), so they must not
+/// share a bucket.
+pub const TIMEOUT_NO_OUTPUT_SIGNATURE: &str = "<timeout, no output>";
+
 /// Status recorded for one run, read from its status file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
@@ -66,6 +77,11 @@ pub enum RunOutcome {
     Completed,
     /// The run reported failure (status `failed`, `killed`, non-zero exit…).
     Failed,
+    /// The run was killed by a walltime/budget timeout: status `timeout` /
+    /// `timed_out`, or exit code 124 (runner `timeout` kill) or 281 (Slurm
+    /// walltime kill). Distinct from [`RunOutcome::Failed`]: the failure is
+    /// the budget, not the job (issue #3690).
+    Timeout,
     /// No status file, or one this reader could not interpret. Distinct from
     /// [`RunOutcome::Failed`]: an absent status file means the run never got
     /// to say anything about itself.
@@ -97,6 +113,12 @@ impl RunRecord {
         match self.outcome {
             RunOutcome::Completed => String::new(),
             RunOutcome::Missing => NO_STATUS_SIGNATURE.to_string(),
+            // A timeout that still produced a meaningful stderr line reports
+            // that line; only the silent ones take the dedicated bucket.
+            RunOutcome::Timeout => match last_meaningful_line(&self.stderr) {
+                Some(line) => normalize_signature_line(line),
+                None => TIMEOUT_NO_OUTPUT_SIGNATURE.to_string(),
+            },
             RunOutcome::Failed => match last_meaningful_line(&self.stderr) {
                 Some(line) => normalize_signature_line(line),
                 None => NO_OUTPUT_SIGNATURE.to_string(),
@@ -134,10 +156,14 @@ pub fn analyze(
         *counts.entry(signature).or_insert(0) += 1;
     }
 
-    // Both silent-run buckets are counted here: the report must never make the
+    // All silent-run buckets are counted here: the report must never make the
     // denominator smaller by losing the runs that destroyed their own evidence.
     let unsigned_runs = counts.get(NO_STATUS_SIGNATURE).copied().unwrap_or(0)
-        + counts.get(NO_OUTPUT_SIGNATURE).copied().unwrap_or(0);
+        + counts.get(NO_OUTPUT_SIGNATURE).copied().unwrap_or(0)
+        + counts
+            .get(TIMEOUT_NO_OUTPUT_SIGNATURE)
+            .copied()
+            .unwrap_or(0);
 
     let mut entries: Vec<SignatureCount> = counts
         .into_iter()
