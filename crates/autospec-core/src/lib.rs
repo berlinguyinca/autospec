@@ -26,6 +26,7 @@ pub mod autonomous {
 }
 pub mod autonomous_lifecycle;
 pub mod benchmark_matrix;
+pub mod capability_admission;
 pub mod ci_gate_promotion;
 pub mod ci_name_drift;
 pub mod circuit_breaker;
