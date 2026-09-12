@@ -62,10 +62,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use autospec_core::conflict_resolution::{classify_file, resolution_for, ResolutionPlan};
+use autospec_core::conversion_gate::{test_count_contradiction, tests_added_by_patch};
 use autospec_core::conversion_pass::{select_fresh, PassOutcome, PatchCandidate};
 use autospec_core::failure_attribution::attribute;
 use autospec_core::hold_memo::{re_gate, HoldRecord};
+use autospec_core::prefilter_scope::derive_prefilter_scope;
 use autospec_core::unfed_pass::PassCounters;
+use autospec_core::verification::parse_test_run;
 use serde_json::{json, Value};
 
 use super::claim::{branch_liveness, BranchLiveness};
@@ -554,40 +557,16 @@ fn attempt_flags(repo: Option<&str>, branch: &str) -> (bool, bool) {
     }
 }
 
-/// The gate packages for the files a patch touches: `-p` one affected crate,
-/// or `--workspace` when the patch spans crates or touches the root. The
-/// gate is the affected crate's FULL gate, not a whole-repo gate — a
-/// TypeScript-only patch must not be marked verified on 471 passing Rust
-/// tests, and a single-crate patch should not pay for a whole-workspace run.
+/// The gate scope tokens for the files a patch touches, derived from the
+/// patch's touched crates by the shared definition
+/// ([`autospec_core::prefilter_scope::derive_prefilter_scope`]) — never
+/// hard-coded here (issue #4532): the crates the patch touches are gated
+/// (`-p <crate>` per crate), and a patch that touches no resolvable crate
+/// gates `--workspace`. Fail-closed: being slow is recoverable; being
+/// narrow is not. The pre-filter and the gate use the same derivation, so
+/// the two scopes cannot drift.
 fn gate_packages(files: &[String]) -> Vec<String> {
-    let mut core = false;
-    let mut cli = false;
-    let mut other = false;
-    for file in files {
-        if file.starts_with("crates/autospec-core/") {
-            core = true;
-        } else if file.starts_with("crates/autospec-cli/") {
-            cli = true;
-        } else {
-            other = true;
-        }
-    }
-    if (core || cli) && !other {
-        if core && !cli {
-            vec!["-p".to_string(), "autospec-core".to_string()]
-        } else if cli && !core {
-            vec!["-p".to_string(), "autospec-cli".to_string()]
-        } else {
-            vec![
-                "-p".to_string(),
-                "autospec-core".to_string(),
-                "-p".to_string(),
-                "autospec-cli".to_string(),
-            ]
-        }
-    } else {
-        vec!["--workspace".to_string()]
-    }
+    derive_prefilter_scope(files).tokens()
 }
 
 /// The file paths a `changes.patch` touches, from its `+++ b/<path>` lines.
@@ -883,6 +862,36 @@ fn apply_one(
         return record_held_and_result(plan, base_sha, patch, &format!("worktree add failed: {error}"));
     }
 
+    // The gate's scope, derived from the patch's touched crates (the shared
+    // definition — issue #4532): known before the patch is applied, because
+    // the patch's paths are.
+    let patch_text = fs::read_to_string(&patch.path).unwrap_or_default();
+    let packages = gate_packages(&patch_files(&patch_text));
+
+    // The unchanged-count contradiction (issue #4532) is only possible when
+    // the patch adds test functions. For those, the baseline test count is
+    // measured at the base — at the same scope the gate will use — before
+    // the patch is applied. Being slow is recoverable; being narrow is not.
+    let tests_added = tests_added_by_patch(&patch_text);
+    let baseline_tests = if tests_added > 0 {
+        match run_test_count(&worktree, &packages) {
+            Some(count) => Some(count),
+            None => {
+                teardown_worktree(&worktree);
+                return record_held_and_result(
+                    plan,
+                    base_sha,
+                    patch,
+                    "baseline test count undeterminable at the base (the test stage \
+                     produced no test result line) — the unchanged-count \
+                     contradiction cannot be checked",
+                );
+            }
+        }
+    } else {
+        None
+    };
+
     // Step 3: apply to the branch off current origin/<base>.
     let apply_output = run_capture_in(&worktree, &["apply", "--3way", patch.path.to_str().unwrap_or_default()]);
     let apply_rc = apply_output.as_ref().and_then(|o| o.status.code());
@@ -917,14 +926,12 @@ fn apply_one(
             record_held_and_result(plan, base_sha, patch, &reason)
         }
         ApplyLifecycle::Applied => {
-            // Step 4: the affected crate's full gate on the pinned toolchain.
-            let files = read_patch_files(&patch.path);
-            let packages = gate_packages(&files);
-            let gate = run_gate(&worktree, &packages);
+            // Step 4: the full gate on the pinned toolchain, at the derived scope.
+            let gate = run_gate(&worktree, &packages, tests_added, baseline_tests);
             match gate {
                 GateResult::Pass => {
                     // Step 5: open a PR per passing patch.
-                    let opened = open_pr(repo, &worktree, &branch, patch);
+                    let opened = open_pr(repo, &worktree, &branch, patch, &packages);
                     teardown_worktree(&worktree);
                     if opened {
                         ApplyResult::Converted
@@ -940,6 +947,12 @@ fn apply_one(
                     let failure_note = failing_tests_note(&output);
                     teardown_worktree(&worktree);
                     record_held_and_result(plan, base_sha, patch, &format!("gate failed: {failure_note}"))
+                }
+                GateResult::Contradiction(reason) => {
+                    // The stages were green but the evidence contradicts the
+                    // patch: hold it, the contradiction named (issue #4532).
+                    teardown_worktree(&worktree);
+                    record_held_and_result(plan, base_sha, patch, &reason)
                 }
             }
         }
@@ -1002,16 +1015,57 @@ fn conflict_summary(worktree: &Path) -> String {
 
 enum GateResult {
     Pass,
+    /// A stage failed; the stage's output.
     Fail(String),
+    /// Every stage was green but the evidence contradicts the patch: the
+    /// patch adds test functions and the test count is unchanged (issue
+    /// #4532). The reason names the contradiction; it is the HELD reason.
+    Contradiction(String),
 }
 
-/// The affected crate's FULL gate on the pinned toolchain: `fmt --check`,
+/// The gate's test-stage argv at the given scope: `test --no-fail-fast`
+/// plus the scope tokens. The baseline count and the gate's test stage run
+/// this same argv, so they measure the same set of tests.
+fn test_stage(packages: &[String]) -> Vec<String> {
+    let mut stage = vec!["test".to_string(), "--no-fail-fast".to_string()];
+    stage.extend_from_slice(packages);
+    stage
+}
+
+/// The baseline test count at the given scope: the test stage run at the
+/// base, before the patch is applied, summed across every `test result:`
+/// line (passed + failed — every test that ran). `None` when the stage
+/// produced no test result line (the base did not build, or no test ran) —
+/// a count that cannot be measured is not a zero.
+fn run_test_count(worktree: &Path, packages: &[String]) -> Option<u64> {
+    let stage = test_stage(packages);
+    let output = run_cargo(worktree, &stage)?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let aggregate = parse_test_run(&text);
+    (aggregate.targets > 0).then(|| aggregate.passed.saturating_add(aggregate.failed))
+}
+
+/// The FULL gate at the given scope on the pinned toolchain: `fmt --check`,
 /// `build`, `clippy`, `test --no-fail-fast`. Any failing stage fails the
-/// gate; the failing stage's output is returned for the HELD line.
-fn run_gate(worktree: &Path, packages: &[String]) -> GateResult {
-    // The affected crate's FULL gate, in order: fmt --check, build, clippy,
-    // test --no-fail-fast. Each stage is its own cargo argv; the pinned
-    // toolchain is inherited from the environment (rust-toolchain.toml).
+/// gate; the failing stage's output is returned for the HELD line. A green
+/// run is not yet a pass: when the patch adds test functions, the test
+/// count must have moved from the baseline — identical figures mean the
+/// gate's scope did not cover the change (issue #4532), and the gate fails
+/// with the contradiction named.
+fn run_gate(
+    worktree: &Path,
+    packages: &[String],
+    tests_added: usize,
+    baseline_tests: Option<u64>,
+) -> GateResult {
+    // The gate, in order: fmt --check, build, clippy, then the test stage
+    // (handled separately — its output is the evidence for the
+    // unchanged-count contradiction). Each stage is its own cargo argv; the
+    // pinned toolchain is inherited from the environment (rust-toolchain.toml).
     let mut stages: Vec<Vec<String>> = vec![vec!["fmt".to_string(), "--check".to_string()]];
     let mut build = vec!["build".to_string()];
     build.extend_from_slice(packages);
@@ -1019,9 +1073,6 @@ fn run_gate(worktree: &Path, packages: &[String]) -> GateResult {
     let mut clippy = vec!["clippy".to_string(), "--all-targets".to_string()];
     clippy.extend_from_slice(packages);
     stages.push(clippy);
-    let mut test = vec!["test".to_string(), "--no-fail-fast".to_string()];
-    test.extend_from_slice(packages);
-    stages.push(test);
 
     for stage in &stages {
         let Some(output) = run_cargo(worktree, stage) else {
@@ -1034,6 +1085,33 @@ fn run_gate(worktree: &Path, packages: &[String]) -> GateResult {
                 String::from_utf8_lossy(&output.stderr)
             );
             return GateResult::Fail(text);
+        }
+    }
+
+    let stage = test_stage(packages);
+    let Some(output) = run_cargo(worktree, &stage) else {
+        return GateResult::Fail(format!("cargo {stage:?}: failed to spawn"));
+    };
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.code() != Some(0) {
+        return GateResult::Fail(text);
+    }
+
+    // Green stages are not yet a pass: the unchanged-count contradiction
+    // (issue #4532). `baseline_tests` is `Some` exactly when the patch adds
+    // test functions and the baseline was measured.
+    if let Some(baseline) = baseline_tests {
+        let aggregate = parse_test_run(&text);
+        let post = aggregate.passed.saturating_add(aggregate.failed);
+        if let Some(contradiction) = test_count_contradiction(tests_added, baseline, post) {
+            return GateResult::Contradiction(format!(
+                "gate failed: {contradiction} (gate scope: {})",
+                packages.join(" ")
+            ));
         }
     }
     GateResult::Pass
@@ -1063,7 +1141,7 @@ fn failing_tests_note(output: &str) -> String {
     }
 }
 
-fn open_pr(repo: &str, worktree: &Path, branch: &str, patch: &PatchLocation) -> bool {
+fn open_pr(repo: &str, worktree: &Path, branch: &str, patch: &PatchLocation, scope: &[String]) -> bool {
     if let Err(error) = run_git_in(worktree, &["add", "-A"]) {
         eprintln!("WARN: git add for #{issue} failed: {error}", issue = patch.issue);
         return false;
@@ -1091,9 +1169,11 @@ fn open_pr(repo: &str, worktree: &Path, branch: &str, patch: &PatchLocation) -> 
             &pr_title,
             "--body",
             &format!(
-                "Converted from the agent patch for issue #{}.\n\nSource spec: n/a (patch-to-PR \
-                 conversion pass).",
-                patch.issue
+                "Converted from the agent patch for issue #{}.\n\nGate scope: {} \
+                 (derived from the patch's touched crates).\n\nSource spec: n/a \
+                 (patch-to-PR conversion pass).",
+                patch.issue,
+                scope.join(" ")
             ),
             "--label",
             "auto-implement",
@@ -1212,10 +1292,6 @@ fn run_git_capture(args: &[&str]) -> Result<String, CommandFailure> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn read_patch_files(path: &Path) -> Vec<String> {
-    fs::read_to_string(path).map(|p| patch_files(&p)).unwrap_or_default()
-}
-
 /// Infer `OWNER/NAME` from `gh`, best-effort. `None` on any failure — the
 /// caller decides whether that is fatal (apply) or a reported gap (plan).
 fn infer_repo() -> Option<String> {
@@ -1262,7 +1338,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_is_scoped_to_the_affected_crate() {
+    fn the_gate_scope_is_derived_from_the_touched_crate() {
         assert_eq!(
             gate_packages(&["crates/autospec-core/src/a.rs".to_string()]),
             vec!["-p".to_string(), "autospec-core".to_string()]
@@ -1276,21 +1352,48 @@ mod tests {
                 "crates/autospec-core/src/a.rs".to_string(),
                 "crates/autospec-cli/src/b.rs".to_string(),
             ]),
+            // The crate set is sorted (the shared `CheckScope` contract).
             vec![
                 "-p".to_string(),
-                "autospec-core".to_string(),
-                "-p".to_string(),
                 "autospec-cli".to_string(),
+                "-p".to_string(),
+                "autospec-core".to_string(),
             ]
         );
-        // A root or out-of-crate file widens the gate to the workspace.
+        // No resolvable crate: the workspace (fail-closed default).
         assert_eq!(gate_packages(&["scripts/x.sh".to_string()]), vec!["--workspace".to_string()]);
+        // The scope is the patch's touched crates, not the crates plus
+        // "every other file": a crate patch with a docs-only file beside it
+        // gates that crate (the shared definition, issue #4532).
         assert_eq!(
             gate_packages(&[
                 "crates/autospec-core/src/a.rs".to_string(),
                 "README.md".to_string()
             ]),
-            vec!["--workspace".to_string()]
+            vec!["-p".to_string(), "autospec-core".to_string()]
+        );
+        // No crate is hard-coded: a patch touching a crate this function
+        // has never named gates that crate. The pre-#4532 code could only
+        // produce autospec-core / autospec-cli / --workspace.
+        assert_eq!(
+            gate_packages(&["crates/autospec-foo/src/a.rs".to_string()]),
+            vec!["-p".to_string(), "autospec-foo".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_test_stage_carries_the_derived_scope() {
+        // The incident's shape: a cli patch gates the test stage at
+        // `-p autospec-cli`, never at a fixed crate (issue #4532).
+        let scope = gate_packages(&["crates/autospec-cli/tests/a.rs".to_string()]);
+        assert_eq!(
+            test_stage(&scope),
+            vec![
+                "test".to_string(),
+                "--no-fail-fast".to_string(),
+                "-p".to_string(),
+                "autospec-cli".to_string(),
+            ]
         );
     }
 

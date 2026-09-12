@@ -289,6 +289,61 @@ pub fn contradictory_signals(run: &GateRun) -> Option<&'static str> {
     (run.build_rc == 0 && run.test_build_failed).then_some("build_ok_but_tests_do_not_compile")
 }
 
+/// Whether a diff line body starts with a test attribute: `#[test]` or
+/// `#[tokio::test]` (with or without arguments), at the start of the line.
+fn test_attribute(body: &str) -> bool {
+    let trimmed = body.trim();
+    trimmed == "#[test]" || trimmed.starts_with("#[tokio::test") // `]` or `(` (arguments)
+}
+
+/// The number of test functions a patch adds, net: added test-attribute
+/// lines minus removed ones. A test moved within the file removes and
+/// re-adds its attribute, so it nets to zero — a move adds no test and must
+/// not trigger the unchanged-count contradiction. File headers (`+++` /
+/// `---`) are not diff lines and are never counted.
+pub fn tests_added_by_patch(patch: &str) -> usize {
+    let (mut added, mut removed) = (0usize, 0usize);
+    for line in patch.lines() {
+        match line.as_bytes().first() {
+            Some(b'+') if !line.starts_with("+++") => {
+                if test_attribute(&line[1..]) {
+                    added += 1;
+                }
+            }
+            Some(b'-') if !line.starts_with("---") => {
+                if test_attribute(&line[1..]) {
+                    removed += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    added.saturating_sub(removed)
+}
+
+/// The unchanged-count contradiction (issue #4532).
+///
+/// The gate's test count is identical to the baseline while the patch adds
+/// test functions: nothing the patch added was measured, so the gate's
+/// scope did not cover the change. The incident: a `crates/autospec-cli`
+/// patch gated with `-p autospec-core` — its 202 added tests never ran, and
+/// the PR body's figures were identical to the baseline, because nothing
+/// the patch added was measured. It merged on numbers that did not describe
+/// it.
+///
+/// `None` when there is no contradiction: the patch adds no test functions,
+/// or the count moved (it grows when the new tests ran; a drop is not this
+/// contradiction — it is the run's own failure).
+pub fn test_count_contradiction(tests_added: usize, baseline: u64, post: u64) -> Option<String> {
+    (tests_added > 0 && baseline == post).then(|| {
+        format!(
+            "gate contradiction: the patch adds {tests_added} test function(s) but the test \
+             count is unchanged (baseline={baseline} post={post}) — nothing the patch added \
+             was measured; the gate's scope did not cover the change"
+        )
+    })
+}
+
 /// Renders the status file line for a gate run, flagging contradictory
 /// signals at write time.
 ///
@@ -605,6 +660,63 @@ mod tests {
         assert!(GateStatus::Pass.admits_to_conversion_queue());
         assert!(GateStatus::VerifiedAbsolute.admits_to_conversion_queue());
         assert!(!classify_gate_run(&incident_run()).admits_to_conversion_queue());
+    }
+
+    // --- unchanged-count contradiction (issue #4532) -----------------------
+
+    /// A minimal unified patch body: one added `#[test]` function.
+    /// (No `diff --git` header: it is not needed to count test attributes.)
+    fn patch_adding_one_test() -> &'static str {
+        "\
++mod a {
++    #[test]
++    fn added() {}
++}
+"
+    }
+
+    #[test]
+    fn a_patch_that_adds_tests_is_counted() {
+        assert_eq!(tests_added_by_patch(patch_adding_one_test()), 1);
+        // `#[tokio::test]` adds a test function too, with or without args.
+        let async_patch = "\
++    #[tokio::test]
++    async fn added() {}
++    #[tokio::test(flavor = \"multi_thread\")]
++    async fn added2() {}
+";
+        assert_eq!(tests_added_by_patch(async_patch), 2);
+        // A moved test removes and re-adds its attribute: net zero.
+        let moved = "\
+-    #[test]
+-    fn t() {}
++    #[test]
++    fn t() {}
+";
+        assert_eq!(tests_added_by_patch(moved), 0);
+        // File headers and non-test lines are never counted.
+        let headers = "\
++++ b/crates/autospec-cli/tests/a.rs
+--- a/crates/autospec-cli/tests/a.rs
++    let x = 1;
+";
+        assert_eq!(tests_added_by_patch(headers), 0);
+    }
+
+    #[test]
+    fn an_unchanged_test_count_on_a_test_adding_patch_is_the_contradiction() {
+        // The incident's shape: tests added, count byte-identical to the
+        // baseline — the gate's scope never covered the new tests.
+        let line = test_count_contradiction(202, 5152, 5152).expect("must be named");
+        assert!(line.contains("202 test function(s)"), "{line}");
+        assert!(line.contains("baseline=5152 post=5152"), "{line}");
+        assert!(line.contains("unchanged"), "{line}");
+        // No tests added: identical counts are the expected, clean result.
+        assert_eq!(test_count_contradiction(0, 5152, 5152), None);
+        // The count moved: the new tests ran (or the run broke) — not this
+        // contradiction.
+        assert_eq!(test_count_contradiction(202, 5152, 5354), None);
+        assert_eq!(test_count_contradiction(202, 5152, 5150), None);
     }
 
     // --- status file and write-time flag ------------------------------------
