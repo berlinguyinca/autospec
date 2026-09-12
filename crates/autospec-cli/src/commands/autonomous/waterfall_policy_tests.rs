@@ -41,6 +41,7 @@ fn empty_plan() -> ReadyQueuePlan {
         },
         batch: Vec::new(),
         gate_counts: QueueGateCounts::default(),
+        readiness_predicate_defects: Vec::new(),
     }
 }
 

@@ -386,6 +386,7 @@
             },
             batch: Vec::new(),
             gate_counts: QueueGateCounts::default(),
+            readiness_predicate_defects: Vec::new(),
         };
         let waterfall_root = root.join("operator");
         let policy = super::super::waterfall_policy::WaterfallPolicy::from_config(

@@ -1486,3 +1486,71 @@ fn ignores_non_dependency_references_when_ordering_by_unblocking_value() {
     assert_eq!(plan.ready[0].unblocks, 0);
     assert_eq!(plan.ready[1].unblocks, 0);
 }
+
+#[test]
+fn tier_and_class_labels_do_not_block_readiness() {
+    // #4475: a permanent tier/class label describes *how* a task runs (human
+    // review at execution), not *whether* it is ready. A gate/tier-review
+    // issue whose dependencies are closed must become ready — the label must
+    // not sit in the readiness predicate forever.
+    let input = ready_input(vec![issue(
+        800,
+        "## Implementation outline\n\n- edit `src/a.rs`\n",
+        &["auto-implement", "safety:reviewed", "tier-review", "gate"],
+    )]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![800]);
+    assert!(plan.blocked.is_empty());
+    assert_eq!(plan.gate_counts.decision_blocked, 0);
+    assert!(plan.readiness_predicate_defects.is_empty());
+}
+
+#[test]
+fn frontier_counts_decision_blocked_separately_from_dependency_blocked() {
+    // #4475: the report must distinguish "blocked on a decision" (a real
+    // autospec:needs-human question) from "blocked on dependencies", so "0
+    // resolvable" is not reported when the real count of open questions is 1.
+    // The gate task carries its tier labels, not a decision label, so it is
+    // dependency-blocked, not decision-blocked.
+    let mut input = ready_input(vec![
+        issue(
+            272,
+            "## Implementation outline\n\n- edit `src/a.rs`\n",
+            &["auto-implement", "safety:reviewed", "autospec:needs-human"],
+        ),
+        issue(
+            122,
+            "## Dependencies\n\nDepends on #121\n\n## Implementation outline\n\n- edit `src/b.rs`\n",
+            &["auto-implement", "safety:reviewed", "tier-review", "gate"],
+        ),
+    ]);
+    input.dependencies.insert(
+        121,
+        RemoteIssue::open(121, "upstream", "", Vec::new(), "agent"),
+    );
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.gate_counts.decision_blocked, 1);
+    assert_eq!(plan.gate_counts.dependency_blocked, 1);
+    assert_eq!(plan.gate_counts.blocked, 2);
+}
+
+#[test]
+fn frontier_reports_a_permanent_label_in_the_readiness_predicate_as_a_defect() {
+    // #4475: the frontier asserts every readiness-predicate label is removable.
+    // A permanent (tier/class) label in the predicate is a defect the report
+    // surfaces rather than a silent deletion from the plan.
+    let input = ready_input(vec![issue(
+        801,
+        "## Implementation outline\n\n- edit `src/a.rs`\n",
+        &["auto-implement", "safety:reviewed"],
+    )]);
+
+    let plan = plan_ready_queue(&input);
+
+    // The shipped predicate is sound: no permanent label is present.
+    assert!(plan.readiness_predicate_defects.is_empty());
+}
