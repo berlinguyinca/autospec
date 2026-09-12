@@ -172,6 +172,7 @@ pub mod wire_fixture;
 pub mod work_selection;
 pub mod worker_disposition;
 pub mod workload_validation;
+pub mod worktree_lock;
 
 // Test-only fixture-executable publisher (issue #3500). Compiled only when the
 // `test-support` feature is enabled, which happens solely in `autospec-cli`
