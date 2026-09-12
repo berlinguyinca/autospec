@@ -72,6 +72,7 @@ pub mod false_negative;
 pub mod fix_surface;
 pub mod fleet_dispatch;
 pub mod fleet_models;
+pub mod fleet_pipeline_health;
 pub mod gate_coverage;
 pub mod gate_provenance;
 pub mod gate_serialization;
