@@ -10,7 +10,8 @@
 //! 4. runs the affected crate's full gate (`fmt --check`, `build`, `clippy`,
 //!    `test --no-fail-fast`) on the pinned toolchain,
 //! 5. opens a PR per passing patch,
-//! 6. records a HELD line with the reason for failures — never discards.
+//! 6. records a HELD line — one JSON `HoldRecord` line in the ledger format
+//!    below — with the reason for failures. Never prose, never discards.
 //!
 //! The pass's *decisions* live in [`autospec_core::conversion_pass`]
 //! (selection, and the unfed-vs-idle outcome). Its must-survive behaviours
@@ -20,6 +21,36 @@
 //! [`autospec_core::conflict_resolution`]; the HELD-as-queue re-gate
 //! (re-attempt when the base moves, archive the stale) is
 //! [`autospec_core::hold_memo`] and [`autospec_core::stored_output`].
+//!
+//! ## The HELD ledger format
+//!
+//! The HELD ledger (`--held-file`, default `<llm-root>/held.txt`) is a
+//! machine-readable file this subcommand owns: one JSON line per hold, the
+//! serde form of [`autospec_core::hold_memo::HoldRecord`] —
+//! `{"issue":N,"patch_key":"...","base_sha":"...","depends_on":[...],
+//! "reason":"..."}`. `issue` is the issue number; `patch_key` the patch
+//! input key (the patch's mtime in seconds); `base_sha` the trunk tip the
+//! hold was derived against; `depends_on` the file paths the hold depends
+//! on (empty: the whole base); `reason` what the gate actually reported
+//! (`clippy=2`, `test X FAILED`, `conflict in PATH`) — the gate's report, not
+//! a sentence describing it, so the re-gate can decide whether the hold
+//! still applies. Blank lines and `#` comment lines are skipped. Prose
+//! commentary never lives in a parsed position: a converted prose reason
+//! keeps its sentence in `reason`, and anything else goes in a sidecar
+//! keyed by issue.
+//!
+//! Step 6 is the loop's instruction to an operator: on a failed conversion,
+//! append a HELD line **in this format** — a JSON `HoldRecord` — never
+//! prose. A record kept for a future consumer is written in that consumer's
+//! format from the first entry, or the cost of the wrong choice is paid
+//! retroactively across every entry ever written (#4494).
+//!
+//! `--convert-ledger PATH` is the one-off that turns a pre-existing prose
+//! ledger (lines of `- <issue>  HELD <reason>`, reason may span lines) into
+//! this format: one record per issue, the recorded reason preserved, stamped
+//! with the current trunk tip and — where the patch is still on disk — its
+//! current key, so the first plan after conversion reports `held=N` instead
+//! of re-gating every entry at full gate cost.
 //!
 //! The command is side-effect-free by default: it plans the pass (enumerate +
 //! select + report). `--apply` performs the real conversion (branch, gate,
@@ -50,7 +81,7 @@ const USAGE: &str = "\
 USAGE:
     autospec convert [--llm-root DIR] [--repo OWNER/NAME] [--base BRANCH]
                      [--held-file PATH] [--branch-prefix PREFIX]
-                     [--apply] [--json] [ISSUE ...]
+                     [--apply] [--json] [--convert-ledger PATH] [ISSUE ...]
 
 PLAN (default): enumerate $LLM/*/out/issue-*/changes.patch, select the patches
 not already attempted (a live branch/PR, or a recorded HELD entry whose
@@ -58,7 +89,8 @@ re-gate still holds, disqualify), and report the plan. No mutations.
 
 --apply: perform the real conversion of each selected patch — branch off
 origin/<base>, full gate (fmt --check, build, clippy, test --no-fail-fast),
-open a PR per passing patch, and record a HELD line for failures.
+open a PR per passing patch, and record a HELD line (a JSON HoldRecord in
+the ledger format below, never prose) for failures.
 
 OPTIONS:
     --llm-root DIR        the agent-patch root (default: $LLM)
@@ -68,7 +100,21 @@ OPTIONS:
     --branch-prefix P     conversion branch prefix (default: conv-)
     --apply               perform the conversion, not just the plan
     --json                machine-readable plan
-    ISSUE ...             restrict the pass to these issue numbers";
+    --convert-ledger PATH one-off: convert a prose HELD ledger (lines of
+                          `- <issue>  HELD <reason>`) into the JSON
+                          HoldRecord lines the pass reads, one record per
+                          issue, preserving the recorded reason; writes to
+                          --held-file (default: <llm-root>/held.txt)
+    ISSUE ...             restrict the pass to these issue numbers
+
+HELD LEDGER (--held-file): one JSON line per hold — the serde form of
+hold_memo::HoldRecord — fields issue, patch_key (patch mtime, seconds),
+base_sha (trunk tip the hold was derived against), depends_on (file paths;
+empty = the whole base), reason (what the gate reported: clippy=2, test X
+FAILED, conflict in PATH — the report, not a sentence). Blank and # comment
+lines are skipped. Prose belongs in reason (converted prose keeps its
+sentence there) or in a sidecar keyed by issue; a HELD line is always
+written in this format, never prose.";
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     // A bare `autospec convert` is NOT a help request: it is the incident
@@ -97,6 +143,7 @@ struct Options {
     branch_prefix: String,
     apply: bool,
     as_json: bool,
+    convert_ledger: Option<PathBuf>,
     issues: Vec<u64>,
 }
 
@@ -109,6 +156,7 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
         branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
         apply: false,
         as_json: false,
+        convert_ledger: None,
         issues: Vec::new(),
     };
     let value = |args: &[String], i: &mut usize, flag: &str| -> Result<String, CommandFailure> {
@@ -128,6 +176,9 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
             "--branch-prefix" => opts.branch_prefix = value(args, &mut i, &arg)?,
             "--apply" => opts.apply = true,
             "--json" => opts.as_json = true,
+            "--convert-ledger" => {
+                opts.convert_ledger = Some(PathBuf::from(value(args, &mut i, &arg)?))
+            }
             other if other.starts_with("--") => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown autospec convert option: {other}\n{USAGE}"
@@ -283,6 +334,181 @@ fn load_held(path: &Path) -> Result<BTreeMap<u64, HoldRecord>, CommandFailure> {
         held.insert(record.issue, record);
     }
     Ok(held)
+}
+
+/// One entry line of the prose ledger: `- <issue>  HELD <reason start>`
+/// (the bullet is optional). Returns the issue number and the start of the
+/// reason, or `None` when the line is not an entry. `HELD` must be a whole
+/// word — a leading number that does not parse, or an issue of 0, is not an
+/// entry either: an unrecognized line is prose, never an entry by guess.
+fn prose_entry(line: &str) -> Option<(u64, String)> {
+    let mut rest = line.trim_start();
+    if let Some(stripped) = rest.strip_prefix(['-', '*']) {
+        rest = stripped.trim_start();
+    }
+    let (number, remainder) = rest.split_once(char::is_whitespace)?;
+    let issue: u64 = number.parse().ok()?;
+    if issue == 0 {
+        return None;
+    }
+    let after = remainder.trim_start().strip_prefix("HELD")?;
+    // "HELD" must be a whole word: if a letter follows immediately, it was
+    // not the marker (e.g. "HELDFOO"), so the line is not an entry.
+    if after.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some((issue, after.trim_start().to_string()))
+}
+
+/// A pre-existing prose HELD ledger, parsed into the records it holds: one
+/// entry per issue, keyed by issue number. An entry line is
+/// `- <issue>  HELD <reason start>`; the lines that follow it, up to the
+/// next entry, are its reason's continuation (a reason may span lines, as
+/// the fourteen incident batches did). Blank and `#` comment lines are
+/// skipped. A later entry for the same issue supersedes the earlier one: the
+/// ledger is keyed by issue, last hold wins.
+fn parse_prose_ledger(text: &str) -> BTreeMap<u64, String> {
+    let mut entries: BTreeMap<u64, String> = BTreeMap::new();
+    let mut current: Option<u64> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        match prose_entry(trimmed) {
+            Some((issue, start)) => {
+                entries.insert(issue, start);
+                current = Some(issue);
+            }
+            None => {
+                // A continuation of the previous entry's reason (or a line
+                // before any entry): prose, preserved as such, never a
+                // parsed position.
+                if let Some(issue) = current {
+                    if let Some(record) = entries.get_mut(&issue) {
+                        record.push('\n');
+                        record.push_str(trimmed);
+                    }
+                }
+            }
+        }
+    }
+    entries
+}
+
+/// The trunk tip the converted records are stamped against: `origin/<base>`
+/// when the remote ref resolves, else the local `HEAD` — resolved in the
+/// repository the pass runs in (the cwd), the same way the pass resolves its
+/// refs. Outside a git repository both fail — the records need a base sha to
+/// become re-gate cache keys at all, so the conversion refuses rather than
+/// stamps an empty one.
+fn current_base_sha(base: &str) -> Result<String, CommandFailure> {
+    if let Ok(sha) = run_git_capture(&["rev-parse", &format!("origin/{base}")]) {
+        return Ok(sha);
+    }
+    run_git_capture(&["rev-parse", "HEAD"]).map_err(|_| {
+        CommandFailure::status(
+            "convert --convert-ledger: cannot resolve a base sha (not a git repository?) — \
+             the converted records need one to become re-gate cache keys",
+            2,
+        )
+    })
+}
+
+/// The one-off conversion (#4494): a pre-existing prose HELD ledger becomes
+/// the JSON `HoldRecord` lines the pass reads. One record per issue, the
+/// recorded reason preserved, stamped with the current trunk tip and — where
+/// the patch is still on disk — its current key, so the first plan after
+/// conversion reports `held=N` instead of re-gating every entry at full
+/// gate cost. Where the patch is not on disk the record carries a sentinel
+/// key and re-gates on the first pass — the safe direction (a re-offer,
+/// never a stale "still held"). Existing JSON records in the target survive
+/// the conversion; the prose entries replace any record for the same issue.
+fn convert_ledger(opts: &Options, prose_path: &Path) -> Result<(), CommandFailure> {
+    let text = fs::read_to_string(prose_path).map_err(|error| {
+        CommandFailure::status(
+            format!("cannot read prose ledger {}: {error}", prose_path.display()),
+            2,
+        )
+    })?;
+    let entries = parse_prose_ledger(&text);
+    if entries.is_empty() {
+        return Err(CommandFailure::status(
+            format!(
+                "no HELD entries recognized in {} — expected lines of the form \
+                 `- <issue>  HELD <reason>`",
+                prose_path.display()
+            ),
+            2,
+        ));
+    }
+    let base_sha = current_base_sha(&opts.base)?;
+
+    // The patch keys: the current mtime where the patch is still on disk.
+    let mut patch_keys: BTreeMap<u64, String> = BTreeMap::new();
+    if let Some(root) = resolve_llm_root(opts.llm_root.as_deref()) {
+        if root.is_dir() {
+            match enumerate_patches(&root) {
+                Ok(patches) => {
+                    for patch in patches {
+                        patch_keys.insert(patch.issue, patch.patch_key.clone());
+                    }
+                }
+                Err(_) => eprintln!(
+                    "WARN: cannot enumerate {root:?} for patch keys; converted records \
+                     get sentinel keys and re-gate on the first pass"
+                ),
+            }
+        }
+    }
+
+    // The target: --held-file, else the pass's default ledger under the llm
+    // root. A conversion without a target would write nothing the consumer
+    // can find, which is the incident in reverse.
+    let out_path = match &opts.held_file {
+        Some(path) => path.clone(),
+        None => match resolve_llm_root(opts.llm_root.as_deref()) {
+            Some(root) => root.join("held.txt"),
+            None => {
+                return Err(CommandFailure::diagnostic(
+                    "convert --convert-ledger: no --held-file and no llm root to default \
+                     the target to — pass --held-file PATH",
+                ))
+            }
+        },
+    };
+
+    let mut held = load_held(&out_path)?;
+    for (issue, reason) in &entries {
+        let patch_key = patch_keys
+            .get(issue)
+            .cloned()
+            .unwrap_or_else(|| format!("unrecorded-{issue}"));
+        let record = HoldRecord::new(*issue, patch_key, &base_sha, Vec::new(), reason)
+            .expect("non-empty patch key and base sha by construction");
+        held.insert(*issue, record);
+    }
+    if let Some(parent) = out_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut out = String::new();
+    for record in held.values() {
+        out.push_str(&serde_json::to_string(record).expect("HoldRecord serializes"));
+        out.push('\n');
+    }
+    fs::write(&out_path, out).map_err(|error| {
+        CommandFailure::status(
+            format!("cannot write held ledger {}: {error}", out_path.display()),
+            2,
+        )
+    })?;
+    println!(
+        "held ledger: converted {} prose entr{} -> {} (base_sha={base_sha})",
+        entries.len(),
+        if entries.len() == 1 { "y" } else { "ies" },
+        out_path.display()
+    );
+    Ok(())
 }
 
 /// The files that moved on the base since a hold's recorded base sha — the
@@ -504,6 +730,14 @@ fn unfed() -> CommandFailure {
 
 fn convert(args: &[String]) -> Result<(), CommandFailure> {
     let opts = parse_options(args)?;
+    if opts.apply && opts.convert_ledger.is_some() {
+        return Err(CommandFailure::diagnostic(
+            "--convert-ledger is the one-off ledger conversion; it does not combine with --apply",
+        ));
+    }
+    if let Some(prose) = &opts.convert_ledger {
+        return convert_ledger(&opts, prose);
+    }
     let Some(llm_root) = resolve_llm_root(opts.llm_root.as_deref()) else {
         return Err(unfed());
     };
@@ -1183,6 +1417,119 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
         let issues = load_held(&held).unwrap();
         assert!(issues.contains_key(&4015));
         assert_eq!(issues[&4015].reason, "conflict in a.rs");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prose_entry_requires_the_marker_word() {
+        assert_eq!(
+            prose_entry("- 2755  HELD conflict at x"),
+            Some((2755, "conflict at x".to_string()))
+        );
+        // The bullet is optional; a bare issue number still parses.
+        assert_eq!(
+            prose_entry("2755 HELD no bullet"),
+            Some((2755, "no bullet".to_string()))
+        );
+        // "HELD" must be a whole word.
+        assert_eq!(prose_entry("- 2755 HELDFOO bar"), None);
+        // A lowercase marker is not the marker.
+        assert_eq!(prose_entry("- 2755 held something"), None);
+        assert_eq!(prose_entry("no number here HELD"), None);
+        assert_eq!(prose_entry("- 0 HELD zero issue"), None);
+    }
+
+    #[test]
+    fn the_prose_ledger_parses_keyed_by_issue_with_the_reason_preserved() {
+        let prose = "\
+# held ledger
+- 3195  HELD regression. Applies clean, fmt/clippy clean, but adds a NEW test
+  that main already ships under a different name.
+- 2755  HELD conflict at `scripts/autospec-explore.sh:226`.
+- 2755  HELD conflict at `scripts/autospec-explore.sh:231` (re-dispatch).
+";
+        let entries = parse_prose_ledger(prose);
+        assert_eq!(entries.len(), 2);
+        // A multi-line reason is preserved, line for line.
+        assert_eq!(
+            entries[&3195],
+            "regression. Applies clean, fmt/clippy clean, but adds a NEW test\n\
+             that main already ships under a different name."
+        );
+        // A later hold for the same issue supersedes the earlier one.
+        assert_eq!(
+            entries[&2755],
+            "conflict at `scripts/autospec-explore.sh:231` (re-dispatch)."
+        );
+    }
+
+    #[test]
+    fn a_converted_record_round_trips_and_still_holds() {
+        let entries = parse_prose_ledger("- 2755  HELD conflict at `x.sh:226`.\n");
+        let (issue, reason) = entries.iter().next().unwrap();
+        let record = HoldRecord::new(*issue, "1750000000", "abc1234", Vec::new(), reason)
+            .unwrap();
+        let mut line = serde_json::to_string(&record).unwrap();
+        line.push('\n');
+        let dir = std::env::temp_dir().join(format!("convert-converted-{issue}-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let held = dir.join("held.txt");
+        fs::write(&held, line).unwrap();
+        let loaded = load_held(&held).unwrap();
+        assert_eq!(loaded[&2755].reason, "conflict at `x.sh:226`.");
+        // Stamped with the current patch key and base, the re-gate still
+        // holds: the first plan after conversion reports held, not fresh —
+        // the AC that this issue is actually fixed.
+        let decision = re_gate(&loaded[&2755], "1750000000", &[]);
+        assert!(decision.is_still_held());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_one_off_converter_writes_a_ledger_the_pass_reads() {
+        let dir = std::env::temp_dir().join(format!("convert-prose-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // The base sha is resolved from the repository the pass runs in
+        // (the test's cwd), the same way the pass resolves it.
+        let expected_base = run_git_capture(&["rev-parse", "origin/main"])
+            .or_else(|_| run_git_capture(&["rev-parse", "HEAD"]))
+            .unwrap();
+
+        // One agent patch on disk for a held issue: its mtime becomes the
+        // record's key, so the pass's re-gate still holds for it.
+        let patch_dir = dir.join("llm").join("node-a").join("out").join("issue-2755");
+        fs::create_dir_all(&patch_dir).unwrap();
+        fs::write(patch_dir.join("changes.patch"), "diff --git a/x b/x\n").unwrap();
+
+        let prose = dir.join("held.prose");
+        fs::write(&prose, "- 2755  HELD conflict at `x.sh:226`.\n- 9999  HELD clippy=2\n").unwrap();
+        let out = dir.join("llm").join("held.txt");
+
+        let opts = Options {
+            llm_root: Some(dir.join("llm")),
+            repo: None,
+            base: "main".to_string(),
+            held_file: Some(out.clone()),
+            branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
+            apply: false,
+            as_json: false,
+            convert_ledger: Some(prose.clone()),
+            issues: Vec::new(),
+        };
+        assert!(convert_ledger(&opts, &prose).is_ok());
+
+        let held = load_held(&out).unwrap();
+        assert_eq!(held.len(), 2);
+        assert_eq!(held[&2755].reason, "conflict at `x.sh:226`.");
+        assert_eq!(
+            held[&2755].patch_key,
+            patch_key(&patch_dir.join("changes.patch")).unwrap()
+        );
+        assert_eq!(held[&2755].base_sha, expected_base);
+        // No patch on disk for 9999: sentinel key, reason still preserved.
+        assert_eq!(held[&9999].patch_key, "unrecorded-9999");
+        assert_eq!(held[&9999].reason, "clippy=2");
         let _ = fs::remove_dir_all(&dir);
     }
 }
