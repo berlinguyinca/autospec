@@ -39,6 +39,7 @@ pub mod config_fidelity;
 pub mod conflict_resolution;
 pub mod construction_sites;
 pub mod context;
+pub mod control_file;
 pub mod conversion_gate;
 pub mod conversion_pass;
 pub mod convert_pass;
