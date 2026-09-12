@@ -32,6 +32,17 @@
 //!    naming the declaration being enforced** ([`RevertNotice::log_line`]),
 //!    so an operator whose manual workers are trimmed learns what to
 //!    change rather than chasing the revert as if it were a failure.
+//! 4. **The two halves can run separately** (issue #4379). The reconciler
+//!    is the only component that submits a missing worker, and it was
+//!    disabled entirely (`--dry-run`) because its other half trims workers
+//!    an operator holds warm on purpose — so the fleet could lose workers
+//!    (rotated out by the wedged-worker watchdog) and never regain them.
+//!    [`CapacityReconciler::with_no_trim`] splits the halves: the safe one
+//!    (submit the deficit) runs live, the destructive one (trim the
+//!    surplus) is off. A capability disabled for one of its behaviours is
+//!    split, not switched off; and a remover (the rotation watchdog) must
+//!    never be added to a fleet whose replacer is off, because every
+//!    rotation then permanently reduces capacity.
 
 use std::fmt;
 
@@ -220,6 +231,9 @@ pub struct CapacityReconciler {
     declaration: CapacityDeclaration,
     window: u64,
     prompt_ceiling: u64,
+    /// `true` when the destructive half is split off: the reconciler
+    /// submits the deficit and leaves any surplus alone (issue #4379).
+    no_trim: bool,
 }
 
 impl CapacityReconciler {
@@ -236,7 +250,34 @@ impl CapacityReconciler {
             declaration,
             window,
             prompt_ceiling,
+            no_trim: false,
         })
+    }
+
+    /// Build a reconciler with the destructive half split off: it submits
+    /// the deficit and never cancels a worker (issue #4379).
+    ///
+    /// This is the mode the cron entry runs in, and it exists because the
+    /// whole reconciler was pinned to dry-run: trimming the surplus would
+    /// cancel workers an operator holds warm on purpose, so the only
+    /// component that can submit a missing worker never ran — and a
+    /// remover (the wedged-worker rotation) with no live replacer drains
+    /// the fleet one rotation at a time. The declaration review is
+    /// identical; only the trim is off.
+    pub fn with_no_trim(
+        declaration: CapacityDeclaration,
+        window: u64,
+        prompt_ceiling: u64,
+    ) -> Result<Self, DeclarationError> {
+        let mut reconciler = Self::new(declaration, window, prompt_ceiling)?;
+        reconciler.no_trim = true;
+        Ok(reconciler)
+    }
+
+    /// Whether the destructive half is split off: the reconciler submits
+    /// deficits and leaves any surplus alone.
+    pub fn no_trim(&self) -> bool {
+        self.no_trim
     }
 
     /// The declaration currently in force.
@@ -265,7 +306,10 @@ impl CapacityReconciler {
     /// trimmed newest first (largest job id first — Slurm job ids are
     /// monotonic, which is how the reconciler in issue #3759 cancelled the
     /// operator's just-submitted replacements). Every cancellation carries
-    /// a [`RevertNotice`] naming the declaration being enforced.
+    /// a [`RevertNotice`] naming the declaration being enforced. In
+    /// no-trim mode (built by [`CapacityReconciler::with_no_trim`]) the
+    /// deficit is still submitted, but the surplus is never cancelled:
+    /// the safe half runs without the destructive one (issue #4379).
     pub fn reconcile(&self, live: &[LiveWorker]) -> ReconcileReport {
         let ours: Vec<&LiveWorker> = live
             .iter()
@@ -275,6 +319,15 @@ impl CapacityReconciler {
         if ours.len() as u64 <= want {
             return ReconcileReport {
                 submit: (want - ours.len() as u64) as u32,
+                cancels: Vec::new(),
+            };
+        }
+        if self.no_trim {
+            // Surplus: nothing to submit, and the surplus is left alone —
+            // the destructive half is split off, so a worker an operator
+            // holds warm is never cancelled by this pass (issue #4379).
+            return ReconcileReport {
+                submit: 0,
                 cancels: Vec::new(),
             };
         }

@@ -282,3 +282,97 @@ fn scaling_to_zero_cancels_every_worker_with_a_notice() {
     assert_eq!(report.cancels.len(), 3);
     assert!(report.cancels[0].log_line().contains("want 0"));
 }
+
+// -- The split (issue #4379): the reconciler was the only component that
+//    could submit a missing worker, and it was pinned to dry-run because
+//    its other half trims surplus. The safe half must be able to run
+//    without the destructive one, or a remover (the wedged-worker
+//    rotation) with no live replacer drains the fleet.
+
+#[test]
+fn no_trim_submits_the_deficit_that_the_disabled_reconciler_never_saw() {
+    // The incident shape: rotated workers left the fleet at 5 against a
+    // desired 12; nothing ever submitted the missing 7.
+    let decl = incident_declaration();
+    let reconciler =
+        CapacityReconciler::with_no_trim(CapacityDeclaration { want: 12, ..decl }, WINDOW, 16384)
+            .unwrap();
+    assert!(reconciler.no_trim());
+
+    let live: Vec<LiveWorker> = (1..=5)
+        .map(|id| loop_worker(id, reconciler.declaration()))
+        .collect();
+    let report = reconciler.reconcile(&live);
+    assert_eq!(report.submit, 7);
+    assert_eq!(report.cancels, Vec::<RevertNotice>::new());
+}
+
+#[test]
+fn no_trim_leaves_surplus_alone_instead_of_cancelling_warm_workers() {
+    // Twelve live, want nine: the default mode cancels the newest three,
+    // the no-trim mode submits nothing and cancels nothing.
+    let decl = incident_declaration();
+    let live: Vec<LiveWorker> = (1..=12).map(|id| loop_worker(id, &decl)).collect();
+
+    let trimming = CapacityReconciler::new(decl.clone(), WINDOW, 16384).unwrap();
+    assert!(!trimming.no_trim());
+    let report = trimming.reconcile(&live);
+    assert_eq!(report.submit, 0);
+    assert_eq!(
+        report.cancels.iter().map(|n| n.job_id).collect::<Vec<_>>(),
+        vec![12, 11, 10]
+    );
+
+    let no_trim = CapacityReconciler::with_no_trim(decl, WINDOW, 16384).unwrap();
+    let report = no_trim.reconcile(&live);
+    assert_eq!(report.submit, 0);
+    assert_eq!(report.cancels, Vec::<RevertNotice>::new());
+}
+
+#[test]
+fn no_trim_at_exact_want_is_idle_and_at_zero_want_cancels_nothing() {
+    let decl = incident_declaration();
+    let reconciler = CapacityReconciler::with_no_trim(decl.clone(), WINDOW, 16384).unwrap();
+    let live: Vec<LiveWorker> = (1..=9)
+        .map(|id| loop_worker(id, reconciler.declaration()))
+        .collect();
+    let report = reconciler.reconcile(&live);
+    assert_eq!(report.submit, 0);
+    assert_eq!(report.cancels, Vec::<RevertNotice>::new());
+
+    // Scaling to zero is a declaration the operator must enforce with the
+    // destructive half on; no-trim must not cancel a single worker.
+    let mut decl_zero = decl;
+    decl_zero.want = 0;
+    let zero = CapacityReconciler::with_no_trim(decl_zero, WINDOW, 16384).unwrap();
+    let report = zero.reconcile(&live);
+    assert_eq!(report.submit, 0);
+    assert_eq!(report.cancels, Vec::<RevertNotice>::new());
+}
+
+#[test]
+fn no_trim_still_reviews_the_declaration_and_ignores_other_models() {
+    // The declaration review is identical in both modes: a declaration
+    // that fails it never takes effect, no-trim or not.
+    let mut decl = incident_declaration();
+    decl.slots = 32; // 262144 / 32 = 8192 < 16384
+    assert!(matches!(
+        CapacityReconciler::with_no_trim(decl.clone(), WINDOW, 16384),
+        Err(DeclarationError::TokensPerSlotBelowCeiling { .. })
+    ));
+
+    let decl = incident_declaration();
+    let reconciler = CapacityReconciler::with_no_trim(decl, WINDOW, 16384).unwrap();
+    let live = vec![LiveWorker {
+        job_id: 100,
+        model: "qwen3.8-30b".to_owned(),
+        part: "low".to_owned(),
+        hours: 168,
+        slots: 4,
+    }];
+    // Other model's surplus is not this declaration's resource and is left
+    // alone even though the declared model is at zero live.
+    let report = reconciler.reconcile(&live);
+    assert_eq!(report.submit, 9);
+    assert_eq!(report.cancels, Vec::<RevertNotice>::new());
+}
