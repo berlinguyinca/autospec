@@ -490,8 +490,7 @@ fn autonomous_executor_bridge_merged_reconciliation_waits_for_exact_live_process
     state.supervisor = Some(identity);
 
     assert!(
-        !bridge::executor_terminal_processes_are_quiescent(&state)
-            .expect("inspect exact live process"),
+        !bridge::executor_processes_quiescent(&state).expect("inspect exact live process"),
         "remote terminal truth must not retire a generation while its exact process is live"
     );
     assert!(

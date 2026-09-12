@@ -2884,39 +2884,27 @@ fn run_foreground_with_lease(
                     return Ok(ForegroundCompletion::State(Box::new(state)));
                 }
             } else if state.pause_reason() == Some("executor_receipt_failed") {
-                if executor_receipt_failure_can_resume(claim_terminal, || {
+                let recovery = executor_receipt_failure_can_resume(claim_terminal, || {
                     executor_receipt_failure_is_recoverable(layout, &state_path, issue)
-                })? {
-                    state = state
-                        .transition(ConductorEvent::Resume)
-                        .map_err(CommandFailure::diagnostic)?;
-                    persist_foreground_state(&state_path, &state)
-                        .map_err(CommandFailure::diagnostic)?;
-                } else if continuous {
-                    if let Some(acquisition) =
-                        load_claim_acquisition_receipt(&state_path, &layout.repo, issue)
-                            .map_err(CommandFailure::diagnostic)?
-                    {
-                        let _ = claim::transition_bridge_claim(
-                            claim::ClaimMutationIdentity {
-                                repo: &acquisition.repo,
-                                issue: acquisition.issue,
-                                worker_id: &acquisition.worker_id,
-                                branch: &acquisition.branch,
-                                claim_id: &acquisition.claim_id,
-                            },
-                            None,
-                            claim::BridgeClaimDisposition::Retryable,
-                        )?;
+                });
+                // A stale un-merged claim is quarantined rather than released back
+                // onto the queue it is still blocking with its own open pull request.
+                match blocked_cycle::dispose_stale_receipt_failure(
+                    layout,
+                    &state_path,
+                    issue,
+                    recovery,
+                    continuous,
+                    state,
+                )? {
+                    blocked_cycle::ReceiptFailureRoute::Resumed(next) => state = next,
+                    blocked_cycle::ReceiptFailureRoute::Retired(next) => {
+                        return Ok(ForegroundCompletion::State(Box::new(next)));
                     }
-                    clear_claim_acquisition_receipt(&state_path)
-                        .map_err(CommandFailure::diagnostic)?;
-                    state = state
-                        .transition(ConductorEvent::RetireObsoleteSelection)
-                        .map_err(CommandFailure::diagnostic)?;
-                    persist_foreground_state(&state_path, &state)
-                        .map_err(CommandFailure::diagnostic)?;
-                    return Ok(ForegroundCompletion::State(Box::new(state)));
+                    blocked_cycle::ReceiptFailureRoute::Unchanged(next) => state = next,
+                    blocked_cycle::ReceiptFailureRoute::Failed(failure) => {
+                        return Err(failure.into())
+                    }
                 }
             } else if claim_terminal || state.pause_reason() == Some("executor_bridge_nonterminal")
             {

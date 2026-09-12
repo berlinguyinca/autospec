@@ -1007,7 +1007,7 @@ pub(crate) fn recoverable_implementation_completion(
                 | BridgePhase::ResultAccepted
                 | BridgePhase::MergeRequested
         )
-        && executor_terminal_processes_are_quiescent(&state)?
+        && executor_processes_quiescent(&state)?
         && reconcile_exact_merged_invocation(&state_path, &mut state, &DraftPrAdapter::github_cli())
             .map_err(|error| error.to_string())?
     {
@@ -1017,7 +1017,7 @@ pub(crate) fn recoverable_implementation_completion(
     }
     if state.phase == BridgePhase::Merged
         && !state.identity.worktree.exists()
-        && executor_terminal_processes_are_quiescent(&state)?
+        && executor_processes_quiescent(&state)?
     {
         finalize_merged_executor(&state_path, &mut state, None)
             .map_err(|error| error.to_string())?;
@@ -1096,7 +1096,7 @@ pub(crate) fn exact_invocation_exists(
     Ok(true)
 }
 
-fn executor_terminal_processes_are_quiescent(state: &PersistedInvocation) -> Result<bool, String> {
+pub(crate) fn executor_processes_quiescent(state: &PersistedInvocation) -> Result<bool, String> {
     if persisted_executor_is_live(state)? {
         return Ok(false);
     }
@@ -1112,7 +1112,7 @@ fn executor_terminal_processes_are_quiescent(state: &PersistedInvocation) -> Res
     Err("completed executor draft process identity changed; refusing recovery".to_string())
 }
 
-fn invocation_matches_lease(
+pub(crate) fn invocation_matches_lease(
     state: &PersistedInvocation,
     lease: &crate::commands::claim::ClaimLease,
 ) -> bool {
@@ -1214,7 +1214,7 @@ fn run_executor_bridge_with_codex_probe_observed(
         }
         if recovered.phase == BridgePhase::Merged
             && !recovered.identity.worktree.exists()
-            && executor_terminal_processes_are_quiescent(recovered)?
+            && executor_processes_quiescent(recovered)?
         {
             let mut recovered = recovered.clone();
             finalize_merged_executor(&request.state_path, &mut recovered, None)?;
@@ -1230,7 +1230,7 @@ fn run_executor_bridge_with_codex_probe_observed(
                     | BridgePhase::ResultAccepted
                     | BridgePhase::MergeRequested
             )
-            && executor_terminal_processes_are_quiescent(recovered)?
+            && executor_processes_quiescent(recovered)?
         {
             let mut recovered = recovered.clone();
             if reconcile_exact_merged_invocation(
@@ -1376,7 +1376,7 @@ fn run_executor_bridge_with_codex_probe_observed(
         resolved_harness = Some(resolved);
     }
     if state.phase == BridgePhase::Merged {
-        if !executor_terminal_processes_are_quiescent(&state)? {
+        if !executor_processes_quiescent(&state)? {
             return Err("executor merged recovery still owns a live process"
                 .to_string()
                 .into());
@@ -1397,7 +1397,7 @@ fn run_executor_bridge_with_codex_probe_observed(
             | BridgePhase::ReviewPassed
             | BridgePhase::ResultAccepted
             | BridgePhase::MergeRequested
-    ) && executor_terminal_processes_are_quiescent(&state)?
+    ) && executor_processes_quiescent(&state)?
         && reconcile_exact_merged_invocation(&request.state_path, &mut state, &remote)?
     {
         finalize_merged_executor(&request.state_path, &mut state, runtime.take())?;
@@ -12464,7 +12464,7 @@ pub(super) fn write_private_create_once(
     result
 }
 
-fn validate_private_state_file(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_private_state_file(path: &Path) -> Result<(), String> {
     let metadata =
         fs::metadata(path).map_err(|error| format!("read executor state metadata: {error}"))?;
     if !metadata.is_file() {
@@ -14664,7 +14664,7 @@ where
             continue;
         }
         saw_transfer = true;
-        if !executor_terminal_processes_are_quiescent(&state)? {
+        if !executor_processes_quiescent(&state)? {
             return Err("interrupted executor predecessor process is still live".to_string());
         }
         if state.phase == BridgePhase::Pending
@@ -22132,7 +22132,7 @@ fn process_table_entries() -> Result<Vec<(u32, ProcessBirth)>, String> {
     Ok(entries)
 }
 
-fn unix_now() -> Result<u64, String> {
+pub(crate) fn unix_now() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
