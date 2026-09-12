@@ -446,6 +446,105 @@ fn a_claim_on_an_issue_with_an_open_pr_is_not_in_flight_and_not_stale() {
     assert!(line.contains("in flight 0"), "{line}");
 }
 
+// ── zero backlog: proven vs unmeasured (issue #4449) ───────────────────
+
+#[test]
+fn a_zero_backlog_built_on_seen_candidates_is_proven() {
+    let snapshot = BacklogSnapshot {
+        open_issues: set(&[4300]),
+        patched_issues: set(&[4300]),
+        prs: vec![open_pr("conv/4300-fix", Some(4300), "")],
+        known_merged: BTreeSet::new(),
+        in_flight: BTreeSet::new(),
+    };
+    let report = compute_backlog(&snapshot).unwrap();
+    assert!(report.outstanding.is_empty());
+    let zero = report
+        .outstanding_zero
+        .as_ref()
+        .expect("a zero backlog carries its zero-control");
+    assert!(!zero.is_unmeasured(), "{}", zero.line());
+    assert!(
+        zero.line().starts_with("empty (proven):"),
+        "{}",
+        zero.line()
+    );
+    // A proven zero reads as an ordinary count on the summary line.
+    assert!(
+        !report.summary_line().contains("UNMEASURED"),
+        "{}",
+        report.summary_line()
+    );
+    assert!(
+        report.discrepancies().is_empty(),
+        "{:?}",
+        report.discrepancies()
+    );
+}
+
+#[test]
+fn a_zero_backlog_that_never_saw_a_candidate_is_unmeasured_and_reported() {
+    // The comm incident: the loop would have logged a byte-identical
+    // "convertible 0" for a broken enumeration and a drained backlog. The
+    // line now says which it is.
+    let snapshot = BacklogSnapshot {
+        open_issues: BTreeSet::new(),
+        patched_issues: BTreeSet::new(),
+        prs: Vec::new(),
+        known_merged: BTreeSet::new(),
+        in_flight: BTreeSet::new(),
+    };
+    let report = compute_backlog(&snapshot).unwrap();
+    assert!(report.outstanding.is_empty());
+    let zero = report
+        .outstanding_zero
+        .as_ref()
+        .expect("a zero backlog carries its zero-control");
+    assert!(zero.is_unmeasured(), "{}", zero.line());
+    assert!(
+        report.summary_line().contains("UNMEASURED"),
+        "{}",
+        report.summary_line()
+    );
+    assert!(
+        report
+            .discrepancies()
+            .iter()
+            .any(|d| d.contains("UNMEASURED")),
+        "{:?}",
+        report.discrepancies()
+    );
+}
+
+#[test]
+fn a_zero_backlog_with_patches_but_no_open_issues_is_unmeasured() {
+    // Patches on disk but the open-issue enumeration came back empty: the
+    // intersection could not have returned a candidate, so the zero is not
+    // a measurement of a drained backlog.
+    let snapshot = BacklogSnapshot {
+        open_issues: BTreeSet::new(),
+        patched_issues: set(&[4400]),
+        prs: Vec::new(),
+        known_merged: BTreeSet::new(),
+        in_flight: BTreeSet::new(),
+    };
+    let report = compute_backlog(&snapshot).unwrap();
+    assert!(report.outstanding.is_empty());
+    let zero = report
+        .outstanding_zero
+        .as_ref()
+        .expect("zero carries its control");
+    assert!(zero.is_unmeasured(), "{}", zero.line());
+    assert!(zero.line().contains("open issues"), "{}", zero.line());
+}
+
+#[test]
+fn a_non_empty_backlog_carries_no_zero_control() {
+    let report = compute_backlog(&evidence_snapshot()).unwrap();
+    assert!(!report.outstanding.is_empty());
+    assert!(report.outstanding_zero.is_none());
+}
+
 #[test]
 fn a_claim_naming_an_issue_with_no_open_patch_is_reported_as_stale() {
     // The pass is gone or the patch moved: the claim is evidence of drift,

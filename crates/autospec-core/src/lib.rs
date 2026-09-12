@@ -63,6 +63,7 @@ pub mod explore;
 pub mod failure_attribution;
 pub mod failure_floor;
 pub mod failure_signatures;
+pub mod false_negative;
 pub mod fix_surface;
 pub mod fleet_dispatch;
 pub mod fleet_models;
