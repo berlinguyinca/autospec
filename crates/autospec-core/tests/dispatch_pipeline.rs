@@ -9,9 +9,10 @@
 //! topology is declared rather than assumed.
 
 use autospec_core::dispatch_pipeline::{
-    CredentialRequirement, DispatchOutcome, DispatchPipeline, DispatchTick, EntryState,
-    FailureCode, FreshnessPolicy, HostKind, LifecycleLedger, LivenessLedger, LivenessVerdict,
-    PipelineStep, PipelineTopology, QueueFile, SchedulingReconciliation, SkipReason, StepSchedule,
+    CredentialRequirement, DispatchOutcome, DispatchPipeline, DispatchTick, DispatchWaves,
+    EntryState, FailureCode, FilingOverlapCheck, FreshnessPolicy, HostKind, IssueWriteSurface,
+    LifecycleLedger, LivenessLedger, LivenessVerdict, PipelineStep, PipelineTopology, QueueFile,
+    SchedulingReconciliation, SiblingLanding, SkipReason, StepSchedule, SurfaceOverlap,
     TopologyViolation, DEFAULT_INTERVAL_SECS, DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
 };
 
@@ -700,6 +701,306 @@ fn populated_case_reports_a_fault_when_the_queue_is_empty() {
     assert_eq!(failure.code, FailureCode::AdmittedNotSchedulable);
     assert_eq!(failure.step, "refresh-queue");
     assert!(failure.message.contains("243, 244, 245, 246, 247, 248"));
+}
+
+// ── Write surfaces (#3961) ─────────────────────────────────────────────────
+
+fn surface(issue: u64, paths: impl IntoIterator<Item = impl AsRef<str>>) -> IssueWriteSurface {
+    IssueWriteSurface::new(issue, paths)
+}
+
+#[test]
+fn the_surface_is_recorded_from_the_files_touched_section() {
+    // Invariant 1: the issue records its predicted write surface — paths or
+    // modules — at filing time, read from the body's `## Files touched`
+    // section. Unsafe entries (absolute, escaping, prose) are dropped, not
+    // guessed at.
+    let body = "\
+# Two independent symptoms
+
+## Goal
+One sentence.
+
+## Files touched
+- crates/autospec-core/src/dispatch_pipeline.rs
+- `docs/cli-reference.md`
+- autospec_core::dispatch_pipeline
+- /absolute/path.rs
+- crates/autospec-core/src/../escape.rs
+- this line is prose, not a path
+
+## Tests required
+- unit
+";
+    let recorded = IssueWriteSurface::from_body(42, body).expect("a declared surface is recorded");
+    assert_eq!(recorded.issue, 42);
+    assert_eq!(
+        recorded.paths.iter().cloned().collect::<Vec<_>>(),
+        vec![
+            "autospec_core::dispatch_pipeline",
+            "crates/autospec-core/src/dispatch_pipeline.rs",
+            "docs/cli-reference.md",
+        ]
+    );
+
+    // A directory declaration covers everything beneath it and is recorded
+    // as declared, with the trailing slash.
+    let dir = IssueWriteSurface::from_body(43, "## Files touched\n- crates/autospec-core/src/\n")
+        .expect("a directory declaration is a safe path");
+    assert_eq!(
+        dir.paths.iter().cloned().collect::<Vec<_>>(),
+        vec!["crates/autospec-core/src/"]
+    );
+
+    // Absent or empty section: the surface is undeclared, never invented.
+    assert!(IssueWriteSurface::from_body(44, "## Goal\nOne sentence.\n").is_none());
+    assert!(
+        IssueWriteSurface::from_body(45, "## Files touched\n\n## Tests required\n- unit\n")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_directory_declaration_covers_only_the_files_beneath_it() {
+    // The shared entry named is the broader declaration, from either
+    // direction.
+    let dir = surface(1, ["crates/autospec-core/src/"]);
+    let file = surface(2, ["crates/autospec-core/src/dispatch_pipeline.rs"]);
+    assert!(dir.overlaps_with(&file));
+    assert_eq!(dir.shared_entries(&file), vec!["crates/autospec-core/src/"]);
+    assert_eq!(file.shared_entries(&dir), vec!["crates/autospec-core/src/"]);
+
+    // A sibling path that merely continues the name at a non-separator is
+    // not beneath the directory: the boundary is a component separator.
+    let sibling = surface(3, ["crates/autospec-core/src2/other.rs"]);
+    assert!(!dir.overlaps_with(&sibling));
+    assert!(dir.shared_entries(&sibling).is_empty());
+
+    // Disjoint files share nothing.
+    let other = surface(4, ["crates/autospec-core/src/ready_queue.rs"]);
+    let third = surface(5, ["crates/autospec-cli/src/main.rs"]);
+    assert!(!other.overlaps_with(&third));
+}
+
+#[test]
+fn filing_reports_each_shared_surface_entry_with_the_sibling_named() {
+    // Invariant 2: at filing time the new surface is compared against every
+    // open surface and each shared entry is reported — the moment the fix
+    // is one sentence, not a GPU run.
+    let candidate = surface(
+        3927,
+        [
+            "crates/autospec-core/src/dispatch_pipeline.rs",
+            "docs/cli-reference.md",
+        ],
+    );
+    let open = vec![
+        surface(
+            3911,
+            [
+                "crates/autospec-core/src/dispatch_pipeline.rs",
+                "docs/cli-reference.md",
+            ],
+        ),
+        surface(3935, ["crates/autospec-core/src/conflict_resolution.rs"]),
+        // The candidate's own already-open surface is excluded, not an
+        // overlap with itself.
+        surface(3927, ["crates/autospec-core/src/dispatch_pipeline.rs"]),
+    ];
+
+    let check = FilingOverlapCheck::check(&candidate, &open);
+    assert!(!check.clean());
+    assert_eq!(
+        check.overlaps,
+        vec![SurfaceOverlap {
+            issue: 3911,
+            shared: vec![
+                "crates/autospec-core/src/dispatch_pipeline.rs".to_string(),
+                "docs/cli-reference.md".to_string(),
+            ],
+        }]
+    );
+    let lines = check.lines();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].starts_with("WRITE-SURFACE OVERLAP: #3927"));
+    assert!(
+        lines[0].contains("#3911"),
+        "the sibling is named: {}",
+        lines[0]
+    );
+    assert!(lines[0].contains("crates/autospec-core/src/dispatch_pipeline.rs"));
+    assert!(lines[0].contains("serialise or merge"));
+}
+
+#[test]
+fn filing_is_clean_when_no_open_issue_shares_a_surface_entry() {
+    let candidate = surface(40, ["crates/autospec-core/src/ready_queue.rs"]);
+    let open = vec![surface(
+        3911,
+        ["crates/autospec-core/src/dispatch_pipeline.rs"],
+    )];
+
+    let check = FilingOverlapCheck::check(&candidate, &open);
+    assert!(check.clean());
+    assert_eq!(
+        check.lines(),
+        vec!["WRITE-SURFACE clean: #40 declares a surface no open issue shares"]
+    );
+}
+
+#[test]
+fn overlapping_issues_are_serialised_into_separate_waves() {
+    // Invariant 3: the dispatcher plans concurrency waves from the same
+    // surfaces. Two issues that share a write surface never run
+    // concurrently; disjoint issues ride the same wave.
+    let surfaces = vec![
+        surface(
+            3911,
+            [
+                "crates/autospec-core/src/dispatch_pipeline.rs",
+                "docs/cli-reference.md",
+            ],
+        ),
+        surface(
+            3927,
+            [
+                "crates/autospec-core/src/dispatch_pipeline.rs",
+                "docs/cli-reference.md",
+            ],
+        ),
+        surface(3935, ["crates/autospec-core/src/conflict_resolution.rs"]),
+    ];
+    let waves = DispatchWaves::plan([3911, 3927, 3935], &surfaces);
+
+    assert!(!waves
+        .waves
+        .iter()
+        .any(|wave| wave.contains(&3911) && wave.contains(&3927)));
+    assert!(waves.concurrent_with(3911).contains(&3935));
+    assert!(!waves.concurrent_with(3911).contains(&3927));
+}
+
+#[test]
+fn an_undeclared_surface_takes_a_wave_to_itself() {
+    // An issue that declares no surface cannot be proven disjoint from
+    // anything: it never rides with neighbours, declared or not.
+    let surfaces = vec![
+        surface(3911, ["crates/autospec-core/src/dispatch_pipeline.rs"]),
+        surface(3935, ["crates/autospec-core/src/ready_queue.rs"]),
+    ];
+
+    let waves = DispatchWaves::plan([3911, 3940, 3941], &surfaces);
+    assert_eq!(waves.waves, vec![vec![3911], vec![3940], vec![3941]]);
+
+    // A declared issue also does not join a wave that already holds an
+    // undeclared member, even when it is disjoint from the others.
+    let waves = DispatchWaves::plan([3940, 3911, 3935], &surfaces);
+    assert_eq!(waves.waves, vec![vec![3940], vec![3911, 3935]]);
+}
+
+#[test]
+fn a_sibling_landing_note_names_what_merged_and_instructs_extension() {
+    // Invariant 4: the re-staged spec says what landed and where, and
+    // instructs the agent to extend rather than re-implement — its base
+    // snapshot is the world before the sibling.
+    let sibling = SiblingLanding::new(
+        3927,
+        ["SchedulingReconciliation", "ADMITTED_NOT_SCHEDULABLE"],
+        [
+            "crates/autospec-core/src/dispatch_pipeline.rs",
+            "docs/cli-reference.md",
+        ],
+    );
+    let note = sibling.note(3911);
+
+    assert!(note.contains("SIBLING LANDED while #3911 was in flight"));
+    assert!(note.contains("#3927 merged"));
+    assert!(note.contains("SchedulingReconciliation"));
+    assert!(note.contains("ADMITTED_NOT_SCHEDULABLE"));
+    assert!(note.contains("crates/autospec-core/src/dispatch_pipeline.rs"));
+    assert!(note.contains("docs/cli-reference.md"));
+    assert!(note.contains("Extend what it added"));
+    assert!(note.contains("do not re-implement"));
+}
+
+// ── The populated case (#3793) ──────────────────────────────────────────────
+
+#[test]
+fn the_populated_case_reports_the_one_colliding_pair_and_serialises_only_it() {
+    // A #3793-shaped frontier: several open issues, each declaring its own
+    // surface. Exactly one pair shares a file — the incident behind #3961,
+    // where two issues filed hours apart from independent symptoms both
+    // declared the same dispatch-queue file. No subject search catches
+    // them; the file comparison must, and it must name the pair and no
+    // other, and the dispatcher must serialise only that pair.
+    let surfaces = vec![
+        surface(3793, ["crates/autospec-core/src/cost/record.rs"]),
+        surface(
+            3911,
+            [
+                "crates/autospec-core/src/dispatch_pipeline.rs",
+                "docs/cli-reference.md",
+            ],
+        ),
+        surface(
+            3927,
+            [
+                "crates/autospec-core/src/dispatch_pipeline.rs",
+                "docs/cli-reference.md",
+            ],
+        ),
+        surface(3935, ["crates/autospec-core/src/conflict_resolution.rs"]),
+    ];
+
+    let check = FilingOverlapCheck::check(&surfaces[2], &surfaces);
+    assert_eq!(
+        check.overlaps,
+        vec![SurfaceOverlap {
+            issue: 3911,
+            shared: vec![
+                "crates/autospec-core/src/dispatch_pipeline.rs".to_string(),
+                "docs/cli-reference.md".to_string(),
+            ],
+        }]
+    );
+
+    let waves = DispatchWaves::plan([3793, 3911, 3927, 3935], &surfaces);
+    assert!(
+        waves
+            .waves
+            .iter()
+            .any(|wave| wave == &vec![3793, 3911, 3935]),
+        "the disjoint issues ride together: {:?}",
+        waves.waves
+    );
+    assert!(
+        waves.waves.iter().any(|wave| wave == &vec![3927]),
+        "the colliding issue waits in its own wave: {:?}",
+        waves.waves
+    );
+    assert!(!waves.concurrent_with(3911).contains(&3927));
+    assert!(!waves.concurrent_with(3927).contains(&3911));
+}
+
+#[test]
+fn the_populated_case_reads_surfaces_from_the_bodies_as_filed() {
+    // The same pair, surfaces read from the issue bodies exactly as filed:
+    // the check must fire on the recorded surfaces, not on hand-built ones.
+    let body = "\
+## Files touched
+- crates/autospec-core/src/dispatch_pipeline.rs
+- docs/cli-reference.md
+";
+    let s3911 = IssueWriteSurface::from_body(3911, body).expect("3911 declares its surface");
+    let s3927 = IssueWriteSurface::from_body(3927, body).expect("3927 declares its surface");
+
+    let check = FilingOverlapCheck::check(&s3927, std::slice::from_ref(&s3911));
+    assert!(!check.clean());
+    assert!(check.lines()[0].contains("WRITE-SURFACE OVERLAP"));
+    assert!(check.lines()[0].contains("#3911"));
+
+    let waves = DispatchWaves::plan([3911, 3927], &[s3911, s3927]);
+    assert_eq!(waves.waves, vec![vec![3911], vec![3927]]);
 }
 
 // ── Entry lifecycle (#3911) ────────────────────────────────────────────────
