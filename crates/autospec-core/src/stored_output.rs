@@ -31,6 +31,22 @@
 //!    separately.** [`FrontierCounts::line`] prints the ready count, the
 //!    dispatchable count, and the blocked count with reasons — a summary
 //!    whose two numbers cannot both be acted on is a summary hiding a third.
+//! 5. **A produced patch has a lifecycle, not a terminal state** (issue
+//!    #3994). A dispatcher that skips any issue with a patch on disk treats
+//!    "produced" as a terminal state with no exit: the patch leaves the
+//!    issue's directory only by being deleted, nothing deletes it, and a
+//!    patch that `main` has moved past holds its issue out of the queue
+//!    forever. The exit that matters is the cheap one the guard already
+//!    computes — does the patch still apply to the current base?
+//!    [`eligibility`] separates "waiting for me" ([`Eligibility::
+//!    AwaitingConversion`]) from "waiting for nothing"
+//!    ([`Eligibility::RetireSuperseded`]), and the boundary the conversion
+//!    pass actually uses is 3-way merge, not strict `--check`: a patch that
+//!    strict `git apply --check` rejects but `git apply --3way` applies
+//!    ([`ApplyCheck::AppliesUnder3way`]) is still live. Retirement is
+//!    archival ([`superseded_archive_path`]) — never deletion — and an idle
+//!    pass over a fully-blocked queue names its dominant skip reason
+//!    ([`dominant_skip_line`]).
 //!
 //! Everything here is pure: no I/O, no clock, no subprocesses. The caller
 //! runs `git apply --check` and reports it as [`ApplyCheck`]; the caller
@@ -38,6 +54,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -84,16 +101,25 @@ impl fmt::Display for OutputState {
     }
 }
 
-/// The outcome of `git apply --check` of the stored patch against the trunk
-/// tip — the cheap superseded test. It costs nothing, and it is the only test
-/// a guard needs to ask "is this output still live?".
+/// The outcome of the apply checks of the stored patch against the trunk tip
+/// — the cheap superseded test. It costs nothing, and it is the only test a
+/// guard needs to ask "is this output still live?".
+///
+/// The boundary that matters is the one the conversion pass actually uses
+/// (issue #3994): it applies with `git apply --3way`, not strict `--check`.
+/// A patch that strict `--check` rejects can still be converted when `--3way`
+/// applies it, so it is live, not superseded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyCheck {
-    /// The patch still applies: the output is live.
+    /// The patch applies with strict `git apply --check`: the output is live.
     Applies,
-    /// `git apply --check` rejected the patch: it no longer applies to the
-    /// trunk. The output is superseded.
+    /// Strict `git apply --check` rejected the patch, but `git apply --3way`
+    /// would apply it — the boundary between live and superseded. The output
+    /// is still convertible and is *not* superseded (issue #3994).
+    AppliesUnder3way,
+    /// The patch no longer applies even under `--3way` merge: its changes are
+    /// already landed or unreachable. The output is superseded.
     Rejected,
     /// The check itself failed to run (missing patch file, transport error,
     /// unparseable output). This is not [`ApplyCheck::Rejected`]: a check
@@ -192,6 +218,148 @@ pub fn release(state: Option<OutputState>) -> Release {
         Some(OutputState::Superseded) => Release::ArchiveSuperseded,
         Some(OutputState::Failed) => Release::ReviewFailure,
     }
+}
+
+/// The dispatch eligibility of an issue, decided from its stored output
+/// (issue #3994).
+///
+/// This is the lifecycle exit the dispatcher's old "a patch exists, therefore
+/// not eligible" rule lacked. A produced patch is not a terminal state: it is
+/// either awaiting conversion (still applies to the current base — skip) or
+/// superseded (no longer applies even under 3-way merge — retire and
+/// re-dispatch). The single cheap check — does the patch still apply? —
+/// separates "waiting for me" from "waiting for nothing".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Eligibility {
+    /// No unconverted patch blocks a fresh run: dispatch an agent.
+    Dispatch,
+    /// A patch exists and still applies (strictly, or under `--3way`): skip —
+    /// the work is awaiting conversion, not a fresh dispatch.
+    AwaitingConversion,
+    /// A patch exists but no longer applies even under `--3way` merge: retire
+    /// it (archive, never delete) and return the issue to the eligible pool so
+    /// a fresh run can produce one against current `main`.
+    RetireSuperseded,
+}
+
+impl Eligibility {
+    /// Whether the issue may be dispatched on the next pass (issue #3994
+    /// AC4): no unconverted patch blocks a fresh run, or the superseded patch
+    /// is retired (and the re-dispatch the retirement unblocks). Only a
+    /// patch that still applies keeps the issue out of the eligible set.
+    pub fn is_dispatchable(self) -> bool {
+        !matches!(self, Self::AwaitingConversion)
+    }
+
+    /// The one-word machine name used in reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dispatch => "dispatch",
+            Self::AwaitingConversion => "awaiting_conversion",
+            Self::RetireSuperseded => "retire_superseded",
+        }
+    }
+}
+
+impl fmt::Display for Eligibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Decide dispatch eligibility from the issue's stored output. The two
+/// branches that matter (#3994): a patch that exists and applies is a skip
+/// (awaiting conversion), a patch that exists and does not apply even under
+/// `--3way` is retired and re-dispatched. A check that cannot answer is
+/// fail-closed — never read as "does not apply".
+pub fn eligibility(evidence: &OutputEvidence) -> Eligibility {
+    if evidence.converted {
+        return Eligibility::Dispatch;
+    }
+    if evidence.patch_present {
+        return match evidence.apply_check {
+            Some(ApplyCheck::Rejected) => Eligibility::RetireSuperseded,
+            // Applies, AppliesUnder3way, Unrunnable, or never run: the patch
+            // is still live — fail-closed, never "does not apply".
+            _ => Eligibility::AwaitingConversion,
+        };
+    }
+    // No unconverted patch on record (a failed conversion leaves nothing to
+    // protect), so a fresh run is not blocked.
+    Eligibility::Dispatch
+}
+
+/// The archive path a superseded patch is retired to:
+/// `out/issue-<N>/superseded/<stem>-<timestamp>.patch` (issue #3994).
+///
+/// `issue_dir` is the issue's output directory (`out/issue-<N>` in the
+/// default layout) and `patch_name` the patch's file name (default
+/// `changes.patch`), so the retired patch keeps its stem and gains the
+/// retirement timestamp. Retirement is archival, never deletion: the patch is
+/// *moved* under the issue's `superseded/` directory, so no patch content is
+/// lost and the issue returns to the eligible pool.
+pub fn superseded_archive_path(issue_dir: &Path, patch_name: &str, timestamp: u64) -> PathBuf {
+    let stem = patch_name
+        .rsplit_once('.')
+        .map(|(stem, _ext)| stem)
+        .unwrap_or(patch_name);
+    issue_dir
+        .join("superseded")
+        .join(format!("{stem}-{timestamp}.patch"))
+}
+
+/// One skip reason observed in a dispatch pass, and how many entries it
+/// accounted for (issue #3994 AC3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkipReasonCount {
+    pub reason: String,
+    pub count: usize,
+}
+
+/// Group per-entry skip reasons into reason → count, keeping first-seen
+/// order. Blank reasons are dropped — a skip without a reason is the silent
+/// version of the bug this reports, not an entry to count.
+pub fn skip_reason_counts(
+    reasons: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Vec<SkipReasonCount> {
+    let mut groups: Vec<SkipReasonCount> = Vec::new();
+    for reason in reasons {
+        let reason = reason.as_ref().trim();
+        if reason.is_empty() {
+            continue;
+        }
+        match groups.iter_mut().find(|g| g.reason == reason) {
+            Some(group) => group.count += 1,
+            None => groups.push(SkipReasonCount {
+                reason: reason.to_string(),
+                count: 1,
+            }),
+        }
+    }
+    groups
+}
+
+/// The one line a dispatch pass logs when it ends with slots free and zero
+/// eligible entries (issue #3994 AC3): it names the dominant skip reason and
+/// its count, so a fleet idle because its queue is fully blocked is visible
+/// in the log without a manual audit.
+///
+/// Returns `None` when nothing was skipped — a pass that skipped nothing is
+/// not the case this line exists for, and "all eligible" needs no reason.
+pub fn dominant_skip_line(counts: &[SkipReasonCount]) -> Option<String> {
+    let total: usize = counts.iter().map(|c| c.count).sum();
+    if total == 0 {
+        return None;
+    }
+    let dominant = counts
+        .iter()
+        .max_by_key(|c| c.count)
+        .expect("a non-empty total has a dominant reason");
+    Some(format!(
+        "dispatch pass: 0 eligible with slots free — blocked by {} ({}/{})",
+        dominant.reason, dominant.count, total
+    ))
 }
 
 fn reason_for(state: OutputState) -> &'static str {
