@@ -27,6 +27,7 @@ pub mod autonomous {
     pub mod waterfall;
 }
 pub mod autonomous_lifecycle;
+pub mod baseline_coverage;
 pub mod benchmark_matrix;
 pub mod capability_admission;
 pub mod ci_gate_promotion;
