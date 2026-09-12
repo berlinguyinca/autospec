@@ -90,6 +90,7 @@ pub mod managed_project;
 pub mod memo_key;
 pub mod merge_gate;
 pub mod name_scope;
+pub mod negative_evidence;
 pub mod not_reproducible;
 pub mod planning;
 pub mod platform_gate;
