@@ -122,6 +122,7 @@ pub mod semantic_integration;
 pub mod service_address;
 pub mod service_timeout;
 pub mod shared_write_target;
+pub mod size_dependent_timeout;
 pub mod spec;
 pub mod spec_outcome;
 pub mod staged_spec;
