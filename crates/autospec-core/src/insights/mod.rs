@@ -20,6 +20,7 @@ pub mod events;
 pub mod ingest;
 pub mod metrics;
 pub mod models;
+pub mod patterns;
 pub mod pr;
 pub mod proposals;
 pub mod quality;
@@ -31,6 +32,7 @@ pub use models::{
     model_performance, recommend, ModelPerformance, RecommendationConfidence,
     RoutingRecommendation, Window, TASK_DIMENSIONS,
 };
+pub use patterns::{detect, transition, DetectConfig, Finding, FindingStatus, Severity};
 pub use tools::{
     retirement_candidates, tool_roi, wrapper_candidates, InvocationRow, RetirementCandidate,
     RetirementConfig, RetirementEvidence, ToolRoi, WrapperCandidate,
