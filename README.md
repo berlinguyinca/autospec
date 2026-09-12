@@ -392,6 +392,20 @@ output, or never wrote a status file, get their own buckets instead of dropping
 out of the arithmetic. See
 [failure signatures](docs/failure-signatures.md).
 
+### Reservation budget
+
+An agent budget is derived from the reservation walltime it runs inside, not
+from a fixed LIMIT that kills the run long before the reservation ends. A
+budget that does not fit is refused before the run starts, a timed-out run's
+building patch is preserved, and a silent timeout is reported as its own
+bucket (`<timeout, no output>`) so the frontier knows the budget was too
+small (issue #3690):
+
+```bash
+autospec doctor reservation --walltime 8:00:00            # derives the agent budget
+autospec doctor reservation --walltime 28800 --budget 2700 --json
+```
+
 ## No-Side-Effect Demo
 
 The launch demo shows the shape of an AutoSpec run without creating GitHub issues

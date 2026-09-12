@@ -120,6 +120,7 @@ pub mod recovery_path;
 pub mod refresh_queue_contract;
 pub mod repair_loop;
 pub mod repairs;
+pub mod reservation_budget;
 pub mod resources;
 pub mod restart_safety;
 pub mod result_soundness;

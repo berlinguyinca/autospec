@@ -57,17 +57,25 @@ Slurm's own chatter never becomes a signature. Lines starting with `slurm`,
 meaningful line: the scheduler announcing that it cancelled a job tells you
 nothing about why the run failed.
 
-## Two buckets that must not disappear
+## Three buckets that must not disappear
 
 A run that produced nothing, or died before it could report, is exactly the
-kind of run a naive report drops — and it is the kind worth knowing about. Both
-are counted, get their own signature, and can cross the threshold on their own:
+kind of run a naive report drops — and it is the kind worth knowing about. All
+three are counted, get their own signature, and can cross the threshold on
+their own:
 
 - **`<no output>`** — the run failed and left no readable stderr, or only
   scheduler noise.
 - **`<no status file>`** — the run never wrote a usable status file, so nobody
   knows whether it finished. `failed_runs` counts these as not-successful;
   they are never silently counted as successes.
+- **`<timeout, no output>`** — the run was killed by a walltime/budget timeout
+  (status `timeout`/`timed_out`, exit code 124 or 281) and left no readable
+  stderr. Kept distinct from `<no output>`: a silent timeout means the agent's
+  budget was too small for the job, while a silent crash means the code is
+  broken — the frontier reacts to these differently (grow the budget versus
+  fix the crash), so they must not share a bucket (issue #3690). A timeout that
+  *did* write a meaningful stderr line reports that line instead.
 
 Both stay in the denominator. Twenty runs of which four were silent reports
 `4 of 20 runs failed (20.0%)`, not `0 of 16`.

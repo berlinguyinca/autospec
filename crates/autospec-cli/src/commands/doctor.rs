@@ -2,6 +2,7 @@ use std::path::Path;
 
 pub mod code_intel;
 pub mod failures;
+pub mod reservation;
 pub mod resources;
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -10,6 +11,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     if args.first().is_some_and(|argument| argument == "resources") {
         return resources_command(&args[1..]);
+    }
+    if args
+        .first()
+        .is_some_and(|argument| argument == "reservation")
+    {
+        return reservation_command(&args[1..]);
     }
     if args
         .first()
@@ -43,6 +50,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
         );
     } else {
         println!("AutoSpec doctor: ok");
+    }
+    Ok(())
+}
+
+/// `autospec doctor reservation` — the agent budget against a Slurm
+/// reservation's walltime, checked before the run starts (issue #3690). The
+/// refusal travels in the exit code: 0 when the budget fits, 1 when the
+/// reservation cannot host it.
+fn reservation_command(args: &[String]) -> Result<(), String> {
+    let outcome = reservation::run(args)?;
+    println!("{}", outcome.rendered);
+    if outcome.refused {
+        std::process::exit(reservation::REFUSED_EXIT_CODE);
     }
     Ok(())
 }

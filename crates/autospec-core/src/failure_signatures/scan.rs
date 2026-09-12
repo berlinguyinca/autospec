@@ -87,10 +87,13 @@ fn classify_json_status(text: &str) -> Option<RunOutcome> {
 }
 
 fn outcome_for_code(code: i64) -> RunOutcome {
-    if code == 0 {
-        RunOutcome::Completed
-    } else {
-        RunOutcome::Failed
+    match code {
+        0 => RunOutcome::Completed,
+        // 124: the runner's `timeout` kill (the agent's budget ran out);
+        // 281: Slurm's own walltime kill. Either way the budget, not the
+        // code, is the suspect (issue #3690).
+        124 | 281 => RunOutcome::Timeout,
+        _ => RunOutcome::Failed,
     }
 }
 
@@ -105,10 +108,9 @@ fn classify_status_word(word: &str) -> Option<RunOutcome> {
     match word.as_str() {
         "completed" | "complete" | "succeeded" | "success" | "passed" | "ok" | "done"
         | "finished" => Some(RunOutcome::Completed),
-        "failed" | "failure" | "error" | "killed" | "timeout" | "timed_out" | "cancelled"
-        | "canceled" | "oom" | "oomkilled" | "crashed" | "aborted" | "nonzero" | "non-zero" => {
-            Some(RunOutcome::Failed)
-        }
+        "timeout" | "timed_out" => Some(RunOutcome::Timeout),
+        "failed" | "failure" | "error" | "killed" | "cancelled" | "canceled" | "oom"
+        | "oomkilled" | "crashed" | "aborted" | "nonzero" | "non-zero" => Some(RunOutcome::Failed),
         _ => None,
     }
 }
