@@ -160,6 +160,19 @@
 //!     returns an error the caller turns into a non-zero exit, so the
 //!     pass fails loudly instead of printing a summary that adds up to a
 //!     lie (#3742).
+//! 18. **The machine is divided, not claimed** ([`core_budget`],
+//!     [`WorkerPlan::build_jobs`], [`WorkerPlan::test_threads`],
+//!     [`assert_load_headroom`]). A tool that may run concurrently with
+//!     itself must bound its own resource use: each worker gets
+//!     `cores / instances` jobs and test threads, so the pool declares
+//!     the degree of parallelism in one place and every per-instance
+//!     limit is derived from it — two instances that each independently
+//!     claim all cores is contention, not parallelism (#4369: two
+//!     instances on a 24-core host drove load to 49, capped the
+//!     speedup, and turned timing-sensitive test flakes into routine
+//!     ones). And a pass refuses to start when the host's load average
+//!     already exceeds its core count: a gate must not become less
+//!     reliable as it becomes busier (#4369).
 
 use std::collections::BTreeMap;
 
@@ -1045,7 +1058,8 @@ pub fn classify_gate(build_rc: i32, test_rc: i32) -> GateVerdict {
 }
 
 /// A worker in the conversion pool: one private checkout, one shared
-/// compile cache, one explicit build gate.
+/// compile cache, one explicit build gate, one bounded share of the
+/// machine's cores.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerPlan {
     /// Position in the pool (also the round-robin assignment target).
@@ -1061,6 +1075,57 @@ pub struct WorkerPlan {
     /// The exact build gate this worker's results must name, so a
     /// `build_rc=0` records the command that produced it (#3702).
     pub build_gate: BuildGate,
+    /// This worker's `CARGO_BUILD_JOBS`: the machine divided by the pool
+    /// size ([`core_budget`]). A tool that may run concurrently with
+    /// itself must bound its own resource use — cargo's default (all
+    /// cores) is correct for one instance and wrong for every number
+    /// above one, and nothing in the tool knows which case it is in
+    /// (#4369: two instances on a 24-core host drove load to 49).
+    pub build_jobs: usize,
+    /// This worker's `cargo test -- --test-threads` limit: the same
+    /// per-instance share as [`Self::build_jobs`]. A suite that carries
+    /// wall-clock assertions (e.g. a 15-second internal budget taking 23
+    /// seconds even idle) is budgeted against this, not against the whole
+    /// host: oversubscription turns its rare flakes into routine ones,
+    /// and every occurrence costs a manual attribution check or a false
+    /// HELD that sends good work back for redispatch (#4369).
+    pub test_threads: usize,
+}
+
+/// The core budget of one instance in a pool of `instances` on a `cores`
+/// host: `cores / instances`, floored at one (#4369).
+///
+/// The pool declares the degree of parallelism in one place — the host's
+/// core count and its own size — and every per-instance limit is derived
+/// from it. Two instances that each independently decide to use
+/// everything is not parallelism, it is contention: each requests all
+/// cores, the host context-switches rather than progresses, and the
+/// wall-clock gain is well under the instance count. The floor matters:
+/// `0` jobs is not a gentler limit, it is a crash, so a pool larger than
+/// the host still gets one job per instance.
+pub fn core_budget(cores: usize, instances: usize) -> usize {
+    assert!(instances > 0, "core_budget needs at least one instance");
+    cores.saturating_div(instances).max(1)
+}
+
+/// Refuse to start the pass when the host's load average already exceeds
+/// its core count (#4369).
+///
+/// A gate must not become less reliable as it becomes busier. Where the
+/// box is already oversubscribed, adding an instance adds to the load
+/// rather than dividing the machine: timing-sensitive tests flake, every
+/// flake costs a manual attribution check or produces a false HELD, and
+/// the throughput the pass was started for never materialises. The
+/// caller reads the host's load average (e.g. `/proc/loadavg`) and
+/// passes it in; whether to refuse is a decision about two numbers, so
+/// this policy stays pure.
+pub fn assert_load_headroom(load: f64, cores: usize) -> Result<(), String> {
+    if load > cores as f64 {
+        return Err(format!(
+            "pass refuses to start: load {load:.1} already exceeds the {cores} cores — a new instance would add to it, not divide it"
+        ));
+    }
+    Ok(())
 }
 
 /// Plan `count` workers under `root`: worker `i` gets checkout
@@ -1068,6 +1133,11 @@ pub struct WorkerPlan {
 /// Every path is unique, which is what makes N-way concurrency safe under
 /// the per-checkout lock. Zero workers is a configuration error, not an
 /// empty pass: it would silently re-serialise the pipeline.
+///
+/// Each worker also gets its share of the machine — `CARGO_BUILD_JOBS`
+/// and `--test-threads` of `cores / count` ([`core_budget`]) — because a
+/// worker that defaults to all cores is only correct when it is the only
+/// instance, and nothing in the tool knows which case it is in (#4369).
 pub fn plan_workers(count: usize, root: &str) -> Result<Vec<WorkerPlan>, String> {
     if count == 0 {
         return Err("conversion pool needs at least one worker".to_string());
@@ -1075,12 +1145,18 @@ pub fn plan_workers(count: usize, root: &str) -> Result<Vec<WorkerPlan>, String>
     if root.trim().is_empty() {
         return Err("worker pool root must not be empty".to_string());
     }
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let build_jobs = core_budget(cores, count);
     Ok((0..count)
         .map(|index| WorkerPlan {
             index,
             worktree: format!("{root}/worker-{index}"),
             target_dir: format!("{root}/target/worker-{index}"),
             build_gate: BuildGate::default(),
+            build_jobs,
+            test_threads: build_jobs,
         })
         .collect())
 }
@@ -2951,6 +3027,51 @@ mod tests {
     fn plan_workers_rejects_zero_and_empty_root() {
         assert!(plan_workers(0, "/root").is_err());
         assert!(plan_workers(2, "  ").is_err());
+    }
+
+    #[test]
+    fn core_budget_divides_the_machine_and_floors_at_one() {
+        // The observed case: two instances on a 24-core host must each
+        // ask for 12, not 24 — 24+24 on 24 cores is load 49.
+        assert_eq!(core_budget(24, 2), 12);
+        assert_eq!(core_budget(24, 1), 24);
+        assert_eq!(core_budget(24, 3), 8);
+        // 0 jobs is a crash, not a gentler limit: a pool larger than the
+        // host still gets one job per instance.
+        assert_eq!(core_budget(2, 4), 1);
+        assert_eq!(core_budget(1, 8), 1);
+    }
+
+    #[test]
+    fn every_worker_plan_carries_its_derived_core_budget() {
+        let pool = plan_workers(2, "/scratch/convert").unwrap();
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let expected = core_budget(cores, 2);
+        for worker in &pool {
+            // Both limits derive from the same single declaration: the
+            // host core count divided by the pool size.
+            assert_eq!(worker.build_jobs, expected);
+            assert_eq!(worker.test_threads, expected);
+            assert!(worker.build_jobs > 0 && worker.test_threads > 0);
+        }
+        // The pool's total request equals the machine: N workers x
+        // cores/N <= cores, so the instances divide rather than claim.
+        assert!(pool.len() * expected <= cores.max(pool.len()));
+    }
+
+    #[test]
+    fn load_admission_refuses_to_add_to_an_oversubscribed_host() {
+        // The observed case: load 49 on 24 cores — refuse.
+        assert!(assert_load_headroom(49.0, 24).is_err());
+        let error = assert_load_headroom(49.0, 24).unwrap_err();
+        assert!(error.contains("49.0"), "{error}");
+        assert!(error.contains("24"), "{error}");
+        // Load at or below the core count still has headroom.
+        assert!(assert_load_headroom(24.0, 24).is_ok());
+        assert!(assert_load_headroom(1.5, 24).is_ok());
+        assert!(assert_load_headroom(0.0, 1).is_ok());
     }
 
     #[test]
