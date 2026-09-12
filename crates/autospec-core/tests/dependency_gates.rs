@@ -8,8 +8,8 @@
 //! "nothing new is ready" for days.
 
 use autospec_core::dependency_gates::{
-    classify, depth_verdict, emit, frontier_verdict, is_checkpoint, measure, DependencyClass,
-    DependencySpec, DepthPolicy, FrontierIssue, FrontierVerdict,
+    classify, depth_verdict, emit, frontier_verdict, is_checkpoint, measure, ready_set_change,
+    redundant_edges, DependencyClass, DependencySpec, DepthPolicy, FrontierIssue, FrontierVerdict,
 };
 
 fn spec(id: &str, title: &str, body: &str) -> DependencySpec {
@@ -417,4 +417,78 @@ fn measurement_ignores_edges_outside_the_graph_and_self_edges() {
     assert_eq!(m.max_depth, 2);
     assert_eq!(m.frontier_width, 1);
     assert_eq!(m.top_blockers, vec![("a".to_string(), 1)]);
+}
+
+// --- Invariant 5: a metric over the artifact vs the outcome it cashes into
+
+#[test]
+fn a_transitively_redundant_edge_is_the_one_already_implied_by_another_path() {
+    // a -> b -> c, plus the shortcut a -> c. The shortcut is redundant: the
+    // ordering of a before c already holds through b.
+    let ids = ["a", "b", "c"];
+    let edges: &[(&str, &str)] = &[("a", "b"), ("a", "c"), ("b", "c")];
+    let redundant = redundant_edges(&ids, edges);
+    assert_eq!(redundant, [("a", "c")].into_iter().collect());
+}
+
+#[test]
+fn a_redundant_edge_removed_frees_nothing() {
+    // The invariant in its sharpest form: the artifact metric is non-zero
+    // (one redundant edge), but acting on it cashes into zero issues
+    // startable. The percentage describes the graph; the outcome is the
+    // decision input, and here it is inert.
+    let ids = ["a", "b", "c"];
+    let edges: &[(&str, &str)] = &[("a", "b"), ("a", "c"), ("b", "c")];
+    let redundant = redundant_edges(&ids, edges);
+    assert_eq!(redundant.len(), 1);
+    let change = ready_set_change(&ids, edges, &redundant);
+    assert_eq!(change.before, 1);
+    assert_eq!(change.after, 1);
+    assert_eq!(change.gained(), 0);
+}
+
+#[test]
+fn a_dense_graph_reports_many_redundant_edges_but_gains_nothing() {
+    // The pitfall at scale: a 5-node chain with every forward shortcut. Six
+    // of the ten edges are transitively redundant — a 60% artifact metric
+    // that reads as waste to be pruned. Removing all six moves the ready set
+    // by exactly nothing, because each shortcut's successor is already
+    // ordered by the chain.
+    let ids = ["a", "b", "c", "d", "e"];
+    let edges: &[(&str, &str)] = &[
+        ("a", "b"),
+        ("b", "c"),
+        ("c", "d"),
+        ("d", "e"), // the chain
+        ("a", "c"),
+        ("a", "d"),
+        ("a", "e"),
+        ("b", "d"),
+        ("b", "e"),
+        ("c", "e"), // the shortcuts
+    ];
+    let redundant = redundant_edges(&ids, edges);
+    assert_eq!(redundant.len(), 6);
+    let change = ready_set_change(&ids, edges, &redundant);
+    assert_eq!(change.before, 1);
+    assert_eq!(change.after, 1);
+    assert_eq!(change.gained(), 0);
+    // The report names the outcome, not the six edges.
+    assert_eq!(change.line(), "ready set 1 -> 1 (gains 0)");
+}
+
+#[test]
+fn removing_a_genuine_prerequisite_does_widen_the_ready_set() {
+    // Contrast: an edge that is not redundant, because it is the only path
+    // that orders its successor. Removing it frees the successor — the
+    // simulation reports the one-issue gain that the redundant-edge case
+    // could not.
+    let ids = ["a", "b", "c"];
+    let edges: &[(&str, &str)] = &[("a", "b"), ("b", "c")];
+    let removed: std::collections::BTreeSet<(&str, &str)> = [("a", "b")].into_iter().collect();
+    assert!(redundant_edges(&ids, edges).is_empty());
+    let change = ready_set_change(&ids, edges, &removed);
+    assert_eq!(change.before, 1);
+    assert_eq!(change.after, 2);
+    assert_eq!(change.gained(), 1);
 }

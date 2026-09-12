@@ -23,7 +23,7 @@
 //! true, and read as "the chain is progressing normally" rather than "the
 //! chain cannot progress at all".
 //!
-//! Four invariants, each a checkable primitive here:
+//! Five invariants, each a checkable primitive here:
 //!
 //! 1. **A decomposer distinguishes a prerequisite from a gate, and only
 //!    prerequisites belong in the dispatch-blocking field.**
@@ -43,6 +43,14 @@
 //!    exhausted frontier from a frontier blocked on issues that carry no
 //!    assignee and cannot be completed by an agent**, and reports the
 //!    latter distinctly ([`frontier_verdict`]).
+//! 5. **Before a metric is reported as an opportunity, compute what changes
+//!    if you act on it.** Edge count and path depth are computed over the
+//!    artifact; only how much becomes startable is a decision input. An edge
+//!    is transitively redundant precisely because another path already
+//!    implies the ordering, so removing it frees at most the issues whose
+//!    sole open predecessor was that edge — never one issue per edge. The
+//!    actionable quantity is the simulated change to the ready set
+//!    ([`redundant_edges`], [`ready_set_change`]).
 //!
 //! Everything here is pure: no I/O, no subprocess. Traversals are iterative
 //! over sorted containers, so deep or cyclic graphs cannot overflow the
@@ -526,4 +534,114 @@ fn sort_blockers(mut blockers: Vec<Blocker>) -> Vec<Blocker> {
             .then_with(|| a.id.cmp(&b.id))
     });
     blockers
+}
+
+/// Invariant 5: how many issues are startable — the size of the ready set.
+/// An issue is startable when it has no open predecessor. This is the
+/// quantity an edge-level "opportunity" must be cashed into: edge counts and
+/// path depth describe the artifact and are not decision inputs on their own.
+fn ready_width<'a>(ids: &[&'a str], edges: &[(&'a str, &'a str)]) -> usize {
+    let (preds, _) = adjacency(ids, edges);
+    preds.values().filter(|p| p.is_empty()).count()
+}
+
+/// Invariant 5: the transitively-redundant edges of the graph. An edge is
+/// redundant when its successor is still reachable from its predecessor once
+/// the edge itself is removed — the ordering it enforces is already implied
+/// by another path.
+///
+/// This is the artifact-level metric the pitfall reports ("38% of the
+/// edges"). It is real and reproduces exactly, and it is inert on its own:
+/// it counts the edges, not the outcome. Feed it to [`ready_set_change`] to
+/// see what acting on it buys.
+pub fn redundant_edges<'a>(
+    ids: &[&'a str],
+    edges: &[(&'a str, &'a str)],
+) -> BTreeSet<(&'a str, &'a str)> {
+    let (_, succs) = adjacency(ids, edges);
+    edges
+        .iter()
+        .copied()
+        .filter(|(pre, succ)| pre != succ && reaches_without_direct(pre, succ, &succs))
+        .collect()
+}
+
+/// From `pre`, is `succ` reachable without traversing the direct
+/// `pre -> succ` edge at all? True when a second path already orders the two
+/// nodes. Iterative, so cyclic graphs cannot overflow the stack.
+fn reaches_without_direct<'a>(pre: &'a str, succ: &'a str, succs: &Adj<'a>) -> bool {
+    let mut stack = vec![pre];
+    let mut seen = BTreeSet::new();
+    while let Some(node) = stack.pop() {
+        let Some(nexts) = succs.get(node) else {
+            continue;
+        };
+        for &next in nexts {
+            if node == pre && next == succ {
+                continue; // never traverse the edge under test
+            }
+            if next == succ {
+                return true;
+            }
+            if seen.insert(next) {
+                stack.push(next);
+            }
+        }
+    }
+    false
+}
+
+/// Invariant 5: the change a set of edge removals makes to the ready set,
+/// computed by simulation rather than by counting the edges removed. `removed`
+/// is the set of edges the proposed action would drop; the result reports the
+/// ready set before and after. This is the decision input — the number that
+/// says "acting on the redundancy gains one issue" — not the count of edges in
+/// `removed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadySetChange {
+    /// Issues startable before the edit.
+    pub before: usize,
+    /// Issues startable after the edit.
+    pub after: usize,
+}
+
+impl ReadySetChange {
+    /// How many issues become startable as a result of the edit. Zero (or
+    /// negative) is the tell of the structurally inert metric: a large
+    /// artifact-level number that cashes into nothing.
+    pub fn gained(&self) -> i64 {
+        self.after as i64 - self.before as i64
+    }
+
+    /// The report line: the outcome, not the number of edges touched.
+    pub fn line(&self) -> String {
+        format!(
+            "ready set {} -> {} (gains {})",
+            self.before,
+            self.after,
+            self.gained()
+        )
+    }
+}
+
+/// Invariant 5, applied: remove `removed` from the graph and report the
+/// simulated change to the ready set. Removing an edge only ever lowers a
+/// successor's open-predecessor count, so the ready set can only grow — but
+/// for a redundant edge it grows by nothing, because another path already
+/// holds the successor.
+pub fn ready_set_change<'a>(
+    ids: &[&'a str],
+    edges: &[(&'a str, &'a str)],
+    removed: &BTreeSet<(&'a str, &'a str)>,
+) -> ReadySetChange {
+    let before = ready_width(ids, edges);
+    let kept: Vec<(&str, &str)> = edges
+        .iter()
+        .copied()
+        .filter(|edge| !removed.contains(edge))
+        .collect();
+    ReadySetChange {
+        before,
+        after: ready_width(ids, &kept),
+    }
 }
