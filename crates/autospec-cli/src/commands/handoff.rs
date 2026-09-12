@@ -27,6 +27,8 @@ use serde_json::{json, Value};
 
 use super::CommandFailure;
 
+pub mod conformance;
+
 /// Response schema emitted by `autospec handoff probe`.
 pub const HANDOFF_SCHEMA: &str = "autospec.implementation-handoff.v1";
 /// Capabilities schema advertised by `autospec handoff capabilities`.
@@ -88,6 +90,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
             }
             run_probe(&args[1..])
         }
+        Some("conformance") => conformance::run(&args[1..]),
         Some(other) => Err(CommandFailure::diagnostic(format!(
             "unknown autospec handoff subcommand: {other}\n{USAGE}"
         ))),
@@ -101,7 +104,8 @@ USAGE:
 [--correlation ID] \
 [--intent-kind implement|explain|plan] \
 [--repo-dir PATH]
-    autospec handoff capabilities";
+    autospec handoff capabilities
+    autospec handoff conformance --receipt PATH --trace PATH";
 
 fn print_usage() {
     println!("autospec handoff — produce the autospec.implementation-handoff.v1 handoff (side-effect-free)\n\n{USAGE}");
