@@ -41,6 +41,7 @@ pub mod profile;
 pub mod reasoning;
 pub mod result_target;
 pub mod scheduling_contract;
+pub mod stuck_sampling;
 pub mod telemetry;
 pub mod topology;
 pub mod vertical_slice;
