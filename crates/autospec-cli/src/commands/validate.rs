@@ -21,6 +21,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
         } else {
             render_text(&affected);
         }
+        // A path no declared gate covers is reported ungated, never as a pass:
+        // exit non-zero so no consumer can record this plan as verification.
+        if affected.has_ungated() {
+            return Err(format!(
+                "ungated: no declared gate covers {}",
+                affected.ungated_paths.join(", ")
+            ));
+        }
         Ok(())
     }
 }
@@ -65,9 +73,23 @@ fn run_direct(options: &ValidationOptions) -> Result<(), String> {
                 },
             }
         }
+        // The recorded status names the gate set and the scope it refers to.
+        // A pass without that scope is not a usable record (#3790).
+        println!(
+            "gate set: {} scope: {}",
+            plan.ids().join(","),
+            gate_set_scope(&plan)
+        );
     }
 
     unmeasured_or_failed(aggregate.status, "direct Rust validation")
+}
+
+fn gate_set_scope(plan: &ValidationPlan) -> String {
+    match plan.changed_base() {
+        Some(base) => format!("changed since {base}: {}", plan.changed_paths().join(" ")),
+        None => "full catalog".to_string(),
+    }
 }
 
 fn changed_paths_from_git(root: &std::path::Path, base: &str) -> Result<Vec<String>, String> {
@@ -135,6 +157,9 @@ fn render_text(affected: &AffectedSet) {
     for rule in &affected.rules {
         println!("- {}: {}", rule.check, rule.reason);
     }
+    for path in &affected.ungated_paths {
+        println!("- ungated: {path} (no declared gate covers this path)");
+    }
 }
 
 fn render_json(affected: &AffectedSet) {
@@ -152,7 +177,8 @@ fn render_json(affected: &AffectedSet) {
         .collect::<Vec<_>>()
         .join(",");
     println!(
-        "{{\"command\":\"validate\",\"mode\":\"planning\",\"changed_paths\":{changed_paths},\"checks\":[{checks}]}}"
+        "{{\"command\":\"validate\",\"mode\":\"planning\",\"changed_paths\":{changed_paths},\"checks\":[{checks}],\"ungated_paths\":{}}}",
+        json_array(&affected.ungated_paths)
     );
 }
 

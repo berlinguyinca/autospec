@@ -15,10 +15,19 @@ impl AffectedRule {
     }
 }
 
+/// The gate set a change selects: which declared gates cover the paths it
+/// touches, and which paths no declared gate covers at all.
+///
+/// The gate set is a *function of the changed paths* (#3790). The declared
+/// coverage is exactly the `is_*_input` predicates below; a path that matches
+/// none of them is reported in `ungated_paths`, never folded into a default
+/// gate. A TypeScript-only patch passing the Rust suite was not a weak verdict
+/// — it was not a verdict at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AffectedSet {
     pub changed_paths: Vec<String>,
     pub rules: Vec<AffectedRule>,
+    pub ungated_paths: Vec<String>,
 }
 
 impl AffectedSet {
@@ -31,57 +40,55 @@ impl AffectedSet {
 
         let mut checks = BTreeSet::new();
         let mut rules = Vec::new();
+        let mut ungated_paths = Vec::new();
 
         for path in &changed_paths {
-            if is_shared_input(path) {
-                push_rule(
-                    &mut checks,
-                    &mut rules,
-                    "always-run",
-                    "shared validation input changed",
-                );
-                continue;
+            match Self::rule_for(path) {
+                Some(rule) => {
+                    push_rule(&mut checks, &mut rules, rule.check, rule.reason);
+                }
+                None => {
+                    // No declared gate covers this path. Report it as ungated
+                    // rather than letting some other toolchain's gate set
+                    // stand in for it.
+                    ungated_paths.push(path.clone());
+                }
             }
-
-            if let Some(skill_name) = skill_name_for_path(path) {
-                push_rule(
-                    &mut checks,
-                    &mut rules,
-                    format!("skill:{skill_name}"),
-                    "skill-scoped validation input changed",
-                );
-            }
-
-            if is_rust_input(path) {
-                push_rule(
-                    &mut checks,
-                    &mut rules,
-                    "rust:lint",
-                    "Rust source or manifest changed",
-                );
-            } else if is_docs_input(path) {
-                push_rule(
-                    &mut checks,
-                    &mut rules,
-                    "docs",
-                    "documentation input changed",
-                );
-            }
-        }
-
-        if rules.is_empty() && !changed_paths.is_empty() {
-            push_rule(
-                &mut checks,
-                &mut rules,
-                "global:default",
-                "unmapped input defaults to validation",
-            );
         }
 
         Self {
             changed_paths,
             rules,
+            ungated_paths,
         }
+    }
+
+    /// The single declared gate for a normalized path, in priority order
+    /// shared > skill > rust > docs. `None` means no declared gate covers the
+    /// path: it must be reported as ungated, never folded into a default.
+    fn rule_for(path: &str) -> Option<AffectedRule> {
+        if is_shared_input(path) {
+            return Some(AffectedRule::new(
+                "always-run",
+                "shared validation input changed",
+            ));
+        }
+        if let Some(skill_name) = skill_name_for_path(path) {
+            return Some(AffectedRule::new(
+                format!("skill:{skill_name}"),
+                "skill-scoped validation input changed",
+            ));
+        }
+        if is_rust_input(path) {
+            return Some(AffectedRule::new(
+                "rust:lint",
+                "Rust source or manifest changed",
+            ));
+        }
+        if is_docs_input(path) {
+            return Some(AffectedRule::new("docs", "documentation input changed"));
+        }
+        None
     }
 
     pub fn checks(&self) -> Vec<&str> {
@@ -90,6 +97,14 @@ impl AffectedSet {
 
     pub fn includes_check(&self, check: &str) -> bool {
         self.rules.iter().any(|rule| rule.check == check)
+    }
+
+    /// Whether any changed path has no declared gate covering it.
+    ///
+    /// An ungated set may never be reported as validated: the checks that do
+    /// run cover a different scope than the change made.
+    pub fn has_ungated(&self) -> bool {
+        !self.ungated_paths.is_empty()
     }
 }
 
