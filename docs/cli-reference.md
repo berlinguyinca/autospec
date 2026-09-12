@@ -102,8 +102,8 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec dispatch beat --step <name> [--state-file <path>] [--at <epoch>] [--json]` | yes | one liveness stamp for one hop; the ledger is monotonic, an older beat is ignored |
 | `autospec dispatch status [--topology <path>] [--state-file <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | declared topology, credential-holding steps and their hosts, per-hop verdicts, static topology audit; exit 0 healthy / 1 any defect |
 | `autospec dispatch runs --runs <path> [--out <path>] [--duration-floor <secs>] [--quote-bytes <n>] [--fault-threshold <n>] [--json]` | yes | classify a dispatch batch (#3918): each run is `OK` / `NO-OUTPUT` / `INFRA-FAIL` (auth, endpoint, context — never consumes an attempt) / `LAUNCH-FAIL` (under the duration floor regardless of transcript); writes the `agent-status.tsv` record (transcripts at or below the quote threshold ride along verbatim), prints the batch summary plus a `FLEET-FAULT` line for any repeated identical failure and `SUBFLEET-IDLE` lines for sub-fleets with zero agents but open eligible work; exit 0 / 1 fleet fault |
-| `autospec dispatch tick [--queue <path>] [--state-file <path>] [--lifecycle <path>] [--topology <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | one dispatch tick over the queue (#3911): the liveness gate first (a hold prints its `LIVENESS FAILURE` line and exits 1), then a per-entry report — fresh work is `dispatch`, produced-but-unconverted re-enters as `convert`, converted entries are skipped and named, held entries carry their hold reason; exit 0 something dispatched / 1 liveness hold or nothing dispatched with skips to name / 2 diagnostic |
-| `autospec dispatch mark --action <produced\|converted\|hold\|release> --issue <N> [--reason <text>] [--at <epoch>] [--lifecycle <path>]` | no | move one queue entry through its lifecycle (#3911): `produced` (the agent produced a patch), `converted` (terminal), `hold` (record why it is blocked — `--reason` required — and preserve its state), `release` (clear the hold; a released produced entry re-enters the next tick as a convert, not a fresh dispatch); stamps are monotonic, so a backwards or terminal-entry stamp is refused with exit 1 and a usage error exits 2 |
+| `autospec dispatch tick [--queue <path>] [--state-file <path>] [--lifecycle <path>] [--topology <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--max-attempts <n>] [--json]` | yes | one dispatch tick over the queue (#3911, #4451): the liveness gate first (a hold prints its `LIVENESS FAILURE` line and exits 1), then a per-entry report — fresh work is `dispatch`, produced-but-unconverted re-enters as `convert`, converted entries are skipped and named, held entries carry their hold reason, in-flight entries (dispatched, no outcome recorded) wait rather than being redispatched, and entries dispatched `--max-attempts` times (default 3) without a patch are held over the dispatch bound — with the count and the reason — and the summary reports how many were skipped over the bound; the tick records its decisions in the lifecycle ledger so the bound survives the dispatcher process; exit 0 something dispatched / 1 liveness hold or nothing dispatched with skips to name / 2 diagnostic |
+| `autospec dispatch mark --action <produced\|converted\|hold\|release\|failed> --issue <N> [--reason <text>] [--at <epoch>] [--lifecycle <path>]` | no | move one queue entry through its lifecycle (#3911, #4451): `produced` (the agent produced a patch; resets the dispatch attempt count), `converted` (terminal), `hold` (record why it is blocked — `--reason` required — and preserve its state), `release` (clear the hold and reset the dispatch attempt count — the re-arm after triaging a dispatch-bound entry; a released produced entry re-enters the next tick as a convert, not a fresh dispatch), `failed` (a run ended without a patch: advance the dispatch attempt count and clear the in-flight flag); stamps are monotonic, so a backwards or terminal-entry stamp is refused with exit 1 and a usage error exits 2 |
 | `autospec dispatch-outcomes [--file PATH] [--min-samples N] [--json]` | yes | dispatch outcome attribution (#4025): the conversion rate per model and per (model x spec size band), with the sample count on every row; rows below `--min-samples` decided outcomes (default 10) are reported as `insufficient data (n=K)`, never as a rate; reads the append-only JSONL ledger (default `$HOME/.autospec/dispatch-outcomes.jsonl`), one record per dispatch with the conversion result written back to the record that produced the patch |
 
 `autospec repair-loop` observes a self-healing loop so that a repair which keeps
@@ -173,9 +173,23 @@ conversion, never as a fresh dispatch. `produced`-but-unconverted entries are
 directly queryable — the ledger counts and lists them. `tick` is the dispatcher's
 per-tick report: after the liveness gate, every queue entry is named — dispatched
 fresh, converted, skipped (and why), or held (and why) — so a tick that dispatches
-nothing still says what it is waiting on. The primitives are pure in
-`autospec_core::dispatch_pipeline` (`LifecycleLedger`, `EntryState`,
-`DispatchTick`).
+nothing still says what it is waiting on.
+Dispatch is bounded by attempts, not by evidence of success (#4451): the guard
+"already produced a patch" read an *absent* patch as "not yet tried", so an
+issue that failed before producing one was redispatched forever — eight issues
+consumed 83 GPU dispatches. The ledger now carries a per-entry attempt count
+(fresh dispatches that ended without a patch) and an in-flight flag (dispatched,
+no outcome recorded), and the three states "no patch because untried", "no
+patch because in flight", and "no patch because it keeps failing" are explicit
+in the ledger, not inferred from the absence of a file. `tick` enforces the
+bound (`--max-attempts`, default 3): an entry at the bound is held — with the
+count and the reason — not redispatched, and the run reports how many entries
+it skipped over the bound, because a silent skip would reproduce the
+invisibility the bound exists to remove. `mark failed` records a no-patch
+outcome (advancing the count), `mark produced` or `mark converted` resets it,
+and `mark release` is the explicit re-arm after triage. The primitives are pure
+in `autospec_core::dispatch_pipeline` (`LifecycleLedger`, `EntryState`,
+`DispatchTick`, `DEFAULT_MAX_DISPATCH_ATTEMPTS`).
 `stamp` is what the refresh script calls after it repopulates the file: it rewrites the
 headers through a temp file and rename, then records a beat for the producing hop, so a
 script cannot refresh the artifact and forget to say so. `beat --step <name>` records

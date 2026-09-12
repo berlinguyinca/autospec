@@ -27,9 +27,9 @@
 //!    "staleness is alarmed."
 //!
 //! 2. **A queue walk that finds zero eligible entries must explain why.**
-//!    [`WalkSummary::from_tick`] partitions a [`DispatchTick`] into the four
-//!    numbers — walked / in flight / already produced / eligible — and
-//!    [`WalkSummary::line`] renders the summary. The summary is *required*
+//!    [`WalkSummary::from_tick`] partitions a [`DispatchTick`] into the five
+//!    numbers — walked / in flight / already produced / over dispatch bound /
+//!    eligible — and [`WalkSummary::line`] renders the summary. The summary is *required*
 //!    ([`WalkSummary::required`]) exactly when the queue is non-empty and
 //!    nothing is eligible: that is the case that previously produced silence.
 //!    [`WalkSummary::reconciles`] asserts the partition covers the queue
@@ -329,12 +329,16 @@ impl CoverageFinding {
 pub struct WalkSummary {
     /// The total number of entries the walk looked at.
     pub walked: usize,
-    /// Entries skipped because they are held: the work is blocked, not
-    /// missing.
+    /// Entries skipped because they are held, or dispatched with no outcome
+    /// recorded yet: the work is blocked, not missing.
     pub in_flight: usize,
     /// Entries the walk will not dispatch fresh: a patch already exists
     /// (`convert`), or the work is terminal (`converted`).
     pub already_produced: usize,
+    /// Entries held over the dispatch bound: dispatched repeatedly without
+    /// a patch (#4451). Blocked, not missing — and not the same as a plain
+    /// hold, so they get their own number.
+    pub over_bound: usize,
     /// Entries the walk will dispatch fresh.
     pub eligible: usize,
 }
@@ -342,23 +346,25 @@ pub struct WalkSummary {
 impl WalkSummary {
     /// Build the summary from a [`DispatchTick`] over `queue`.
     ///
-    /// `walked` is the queue length; `in_flight` is the tick's held skips;
-    /// `already_produced` is the tick's convert dispatches plus its
-    /// converted skips (both are "a patch exists, do not re-run the agent");
-    /// `eligible` is the tick's fresh dispatches. The partition is exact —
-    /// every queue entry is in exactly one bucket — so
+    /// `walked` is the queue length; `in_flight` is the tick's held skips
+    /// plus its in-flight skips; `already_produced` is the tick's convert
+    /// dispatches plus its converted skips (both are "a patch exists, do
+    /// not re-run the agent"); `over_bound` is the tick's dispatch-bound
+    /// skips (#4451); `eligible` is the tick's fresh dispatches. The
+    /// partition is exact — every queue entry is in exactly one bucket — so
     /// [`WalkSummary::reconciles`] holds by construction.
     pub fn from_tick(queue: &QueueFile, tick: &DispatchTick) -> Self {
         Self {
             walked: queue.entries.len(),
-            in_flight: tick.held_count(),
+            in_flight: tick.held_count() + tick.in_flight_count(),
             already_produced: tick.convert_count() + tick.converted_count(),
+            over_bound: tick.over_bound_count(),
             eligible: tick.fresh_count(),
         }
     }
 
     /// The summary line, e.g. `walked 132 entries, 14 in flight, 118 already
-    /// produced, 0 eligible`.
+    /// produced, 0 over dispatch bound, 0 eligible`.
     ///
     /// The line is emitted on every human-facing walk, not only when
     /// `eligible == 0`: the numbers are the context that makes the zero
@@ -366,8 +372,8 @@ impl WalkSummary {
     /// unexplainable on the runs where the explanation was visible.
     pub fn line(&self) -> String {
         format!(
-            "walked {} entries, {} in flight, {} already produced, {} eligible",
-            self.walked, self.in_flight, self.already_produced, self.eligible
+            "walked {} entries, {} in flight, {} already produced, {} over dispatch bound, {} eligible",
+            self.walked, self.in_flight, self.already_produced, self.over_bound, self.eligible
         )
     }
 
@@ -384,7 +390,7 @@ impl WalkSummary {
     /// numbers do not add up is a counting defect, not a rounding, and must
     /// be treated as one.
     pub fn reconciles(&self) -> bool {
-        self.walked == self.in_flight + self.already_produced + self.eligible
+        self.walked == self.in_flight + self.already_produced + self.over_bound + self.eligible
     }
 }
 
@@ -648,12 +654,13 @@ mod tests {
         assert_eq!(summary.walked, 5);
         assert_eq!(summary.in_flight, 1);
         assert_eq!(summary.already_produced, 2);
+        assert_eq!(summary.over_bound, 0);
         assert_eq!(summary.eligible, 2);
         assert!(summary.reconciles());
         assert!(!summary.required());
         assert_eq!(
             summary.line(),
-            "walked 5 entries, 1 in flight, 2 already produced, 2 eligible"
+            "walked 5 entries, 1 in flight, 2 already produced, 0 over dispatch bound, 2 eligible"
         );
     }
 
