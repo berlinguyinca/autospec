@@ -109,6 +109,11 @@ pub struct CostReport {
     pub no_record: Vec<String>,
     /// Run directories whose `status.txt` failed to parse.
     pub malformed: Vec<MalformedRecord>,
+    /// Parsed records read from `out/archive/`: runs preserved by the
+    /// pre-redispatch archive rather than destroyed by the overwrite
+    /// (#3940). Set by [`super::summarize`]; zero for reports built
+    /// directly from records.
+    pub archived_records: u64,
     pub cumulative: CostSummary,
     /// Present only when a window was requested.
     pub window: Option<CostSummary>,
@@ -149,6 +154,7 @@ pub fn build_report(
         incomplete,
         no_record: no_record.to_vec(),
         malformed: malformed.to_vec(),
+        archived_records: 0,
         cumulative: build_summary(records, threshold_percent),
         window: since.map(|_| build_summary(&windowed, threshold_percent)),
     }
@@ -366,6 +372,12 @@ impl CostReport {
         }
         let mut out = String::new();
         out.push_str(&self.headline());
+        if self.archived_records > 0 {
+            out.push_str(&format!(
+                "  per-run records: {} run(s) read from pre-redispatch archives (out/archive/) — a re-dispatch cannot destroy them\n",
+                self.archived_records
+            ));
+        }
         out.push_str(&self.evidence_note());
         out.push_str(&render_summary(
             "cumulative (observed)",

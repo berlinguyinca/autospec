@@ -1,15 +1,26 @@
 //! `autospec cost` — GPU-hour accounting over the run records under `out/`.
+//!
+//! Two surfaces:
+//!
+//! - the report (`autospec cost [options]`): runs, GPU-hours and share by
+//!   terminal status, rework separated from productive hours, known-defect
+//!   costs, threshold flags;
+//! - the pre-redispatch archive (`autospec cost archive <issue>`): the
+//!   default a re-dispatch performs instead of `rm -rf` on the run
+//!   directory, so cost accounting is computed from immutable per-run
+//!   records (issue #3940).
 
 use std::path::Path;
 
-use autospec_core::cost::{parse_iso8601, scan_out_dir, summarize};
+use autospec_core::cost::{archive_run, parse_iso8601, scan_out_dir, summarize};
 
 const HELP: &str = "\
 autospec cost — account GPU-hours by terminal status
 
 Usage: autospec cost [options]
+       autospec cost archive [--out-dir DIR] <issue>
 
-Options:
+Report options:
   --out-dir DIR              directory containing run subdirectories (default: out)
   --since ISO-8601           report the window of runs finished (or started) at or
                              after this instant, alongside the cumulative total
@@ -18,7 +29,16 @@ Options:
   --json                     print the report as a JSON object
   -h, --help                 show this help
 
-The command always exits 0 when it can read the directory; threshold flags are
+Archive subcommand:
+  autospec cost archive [--out-dir DIR] <issue>
+                         archive <issue>'s current run directory into
+                         <out-dir>/archive/<issue>/run-N before a re-dispatch
+                         overwrites it. Prints where it moved (or that there
+                         was nothing to move). Exits 2 when the archive
+                         destination already exists: a refused archive must
+                         stop the re-dispatch, not be worked around.
+
+The report always exits 0 when it can read the directory; threshold flags are
 report content, not failures.";
 
 struct Options {
@@ -79,6 +99,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         println!("{HELP}");
         return Ok(());
     }
+    if args.first().is_some_and(|arg| arg == "archive") {
+        return run_archive(&args[1..]);
+    }
     let options = parse(args)?;
     let root = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
     let out_path = root.join(&options.out_dir);
@@ -96,6 +119,52 @@ pub fn run(args: &[String]) -> Result<(), String> {
         println!("{{\"command\":\"cost\",{fields}");
     } else {
         print!("{}", report.to_text());
+    }
+    Ok(())
+}
+
+/// The pre-redispatch archive: the default a re-dispatch performs instead of
+/// `rm -rf` on `out/<issue>` (#3940). A refused archive is an `Err` (exit
+/// 2), so the re-dispatch chain (`archive && rm -rf`) stops instead of
+/// destroying a record twice.
+fn run_archive(args: &[String]) -> Result<(), String> {
+    let mut out_dir = String::from("out");
+    let mut issue: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--out-dir" => {
+                i += 1;
+                out_dir = args
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| "--out-dir takes a value".to_string())?;
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown argument: {other} (see --help)"));
+            }
+            other => {
+                if issue.is_some() {
+                    return Err(format!(
+                        "unexpected argument {other:?}: cost archive takes exactly one <issue> name"
+                    ));
+                }
+                issue = Some(other.to_string());
+            }
+        }
+        i += 1;
+    }
+    let issue =
+        issue.ok_or_else(|| "cost archive expects an <issue> name (see --help)".to_string())?;
+    let root = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+    let out_path = root.join(&out_dir);
+    match archive_run(&out_path, &issue)? {
+        Some(dest) => {
+            let relative: &Path = dest.strip_prefix(&root).unwrap_or(&dest);
+            println!("archived {issue} -> {}", relative.display());
+        }
+        None => println!("fresh: no previous run for {issue} under {out_dir}; nothing to archive"),
     }
     Ok(())
 }

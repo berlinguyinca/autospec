@@ -39,7 +39,16 @@
 //! toward the window when its `finished_at` (or `started_at`, for a run that
 //! never finished) is at or after the instant. Records with no timestamp
 //! count toward the cumulative total only.
+//!
+//! - **Per-run, not per-issue.** A re-dispatch overwrites `out/<issue>`
+//!   (`rm -rf "$OUT"`); the pre-redispatch archive
+//!   (`out/archive/<issue>/run-<n>`, see [`archive`]) is the default that
+//!   keeps each run's record immutable, and the scan reads archived records
+//!   alongside the live one. Without it, half the fleet's runs are invisible
+//!   to the accounting and the surviving record of every issue is the run
+//!   that finally succeeded — biased toward success (#3940).
 
+mod archive;
 mod record;
 mod report;
 mod scan;
@@ -52,6 +61,9 @@ pub const DEFAULT_DEFECT_MAP: &[(&str, &str)] = &[
     ("NO-OUTPUT", "#3936"),
 ];
 
+pub use archive::{
+    archive_root, archive_run, move_to_archive, plan_redispatch, RedispatchPlan, ARCHIVE_DIR,
+};
 pub use record::{Disposition, RunRecord};
 pub use report::{
     CostReport, CostSummary, DefectCost, DispositionBucket, IssueCost, StatusBucket, ThresholdFlag,
@@ -69,7 +81,7 @@ pub fn summarize(
     since: Option<(i64, String)>,
     threshold_percent: f64,
 ) -> CostReport {
-    build_report(
+    let mut report = build_report(
         out_dir,
         scan.records.len() as u64,
         &scan.records,
@@ -77,7 +89,9 @@ pub fn summarize(
         &scan.malformed,
         since,
         threshold_percent,
-    )
+    );
+    report.archived_records = scan.archived;
+    report
 }
 
 /// Whether a terminal status is productive work or rework.
@@ -130,6 +144,7 @@ mod tests {
             records,
             no_record: Vec::new(),
             malformed: Vec::new(),
+            archived: 0,
         };
         let report = build_report(
             "out",
