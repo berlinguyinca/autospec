@@ -164,6 +164,7 @@ commands! {
     dispatch => "Gate dispatch on queue freshness and per-hop liveness", direct;
     dispatch_outcomes as "dispatch-outcomes" => "Attribute dispatch outcomes to model and spec size band (append-only ledger report)", diagnostic;
     resources => "List and show resource ledger rows (read-only)", direct;
+    cleanup => "Render the resource-cleanup dry-run report (Phase 1: observation only)", direct;
     doctor => "Check the Rust core workspace (`doctor code-intel` for LSP health)", diagnostic;
     explore => "Plan repository routing and specialist discovery", direct;
     status => "Summarize local AutoSpec state", diagnostic;
