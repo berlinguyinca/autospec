@@ -690,6 +690,26 @@ Children are written assuming the implementer is a 32B-class local model with **
 
 ## Phase 3A — Freeze the spec portfolio plan (pure validation)
 
+**Capability probe (run first, before any filing).** Binaries older than the
+portfolio commands (#3432) do not expose `portfolio`; a missing subcommand
+is a degraded capability, not a Phase 3 blocker, and the fallback must stay
+open while the primary is unavailable:
+
+```bash
+if "${AUTOSPEC_BIN:-autospec}" portfolio --help >/dev/null 2>&1; then
+  PORTFOLIO_AVAILABLE=1
+else
+  PORTFOLIO_AVAILABLE=0
+  printf '%s\n' 'NOTE: autospec portfolio unavailable; using gh issue create path' >&2
+fi
+```
+
+When `PORTFOLIO_AVAILABLE=1`, Phases 3A and 3B run as written below. When
+it is 0, skip both: file the planned issues through the `gh issue create`
+path used for draft issues (each starts as `needs-classify`, never
+`auto-implement`), and the `## Delivery portfolio` section is omitted for
+that run.
+
 Phase 3 creates or adopts a typed spec portfolio before it files any planned
 issue. The decomposer renders a frozen `autospec.portfolio-plan.v1` manifest to
 `$MANIFEST` — source spec, `project_owner` (the verified portfolio binding),
@@ -698,7 +718,8 @@ children, the source-repository Phase 5.5 audit node, and the
 cross-repository dependency edges, every edge keyed by a stable `item_key`. The
 per-issue `gh issue create` calls in the lint/safety loops above are the
 draft-quality gate; the **actual filing of planned issues goes through the
-apply transaction in Phase 3B**, never a bare `gh issue create` fallback.
+apply transaction in Phase 3B** — never a bare `gh issue create` fallback
+while the probe in this section passes.
 
 Phase 3A is pure planning over the full multi-repository manifest — issue
 lint, safety lint, security-artifact validation when applicable, supersession
@@ -708,8 +729,9 @@ accept issues is a blocking prerequisite, never a silently omitted lane; the
 audit logically depends on every implementation/prerequisite deliverable.
 `--dry-run` ends here: it emits the frozen plan and reports each capability as
 `verified`, `unavailable`, or `unknown`, and it never claims a write permission
-was proven by a read. A non-zero exit blocks Phase 3 — fix the manifest and
-re-run.
+was proven by a read. A non-zero exit here (the probe passed, so this is a
+validation failure, not a missing command) blocks Phase 3 — fix the manifest
+and re-run.
 
 ```bash
 PLAN_JSON=$("${AUTOSPEC_BIN:-autospec}" portfolio validate --manifest "$MANIFEST" --dry-run) || {

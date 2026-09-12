@@ -128,6 +128,12 @@ impl ValidationCheck {
             "check_release_verdict_script" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReleaseVerdictScript)
             }
+            // #3813: the skills are programs whose interpreter is an agent;
+            // this gate is the linker that resolves every `autospec
+            // <subcommand>` reference in `skills/**` against the command
+            // table the binary dispatches on, so a consumer requirement can
+            // never again merge ahead of its producer unchecked.
+            "check_skill_cli_commands" => rust_native(StructuralCheck::SkillCliCommands),
             "check_brute_force_rule_ids" => rust_native(StructuralCheck::BruteForceRuleIds),
             "check_lint_heredoc_handling" => bats_suite("tests/lint/test_complexity_heredoc.bats"),
             "check_lint_reuse_triage" => bats_suite("tests/lint/test_reuse_triage.bats"),
@@ -542,6 +548,7 @@ pub enum StructuralCheck {
     DataScopeReviewLens,
     Phase4CostEpicParity,
     DocsDriftGateRegenConditionalParity,
+    SkillCliCommands,
     StopMode,
     KeywordRouting,
     GapRemediation,
