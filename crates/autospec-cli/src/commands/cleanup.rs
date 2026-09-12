@@ -412,6 +412,14 @@ mod tests {
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).unwrap().flatten() {
                 let path = entry.path();
+                // `.git` is excluded deliberately: the dry-run reads repository state
+                // by invoking git, and git rewrites `.git/index` as a side effect of
+                // being read. Including it would assert that reading a repository does
+                // not touch it -- false for reasons unrelated to this command. The
+                // property under test is that the dry-run leaves the WORKING TREE alone.
+                if path.file_name().is_some_and(|n| n == ".git") {
+                    continue;
+                }
                 let meta = std::fs::metadata(&path).unwrap();
                 if meta.is_dir() {
                     stack.push(path);
