@@ -97,7 +97,7 @@ mod requeue {
         acquisition_blocking_owner, claim_is_abandoned, owner_still_holds,
         quarantine_abandoned_claim_generation_with,
     };
-    use super::super::super::{ClaimRefAdvance, ClaimRefHead};
+    use super::super::super::{BranchLiveness, ClaimRefAdvance, ClaimRefHead};
     use super::owner_record;
     use crate::commands::claim::tests::support::{lock_heartbeat_env, startup_heartbeat_fixture};
     use crate::commands::claim::utc_now_iso;
@@ -142,6 +142,14 @@ mod requeue {
 
     fn ready_record(updated_at: &str) -> autospec_core::claim::RunStateRecord {
         owner_record(updated_at, 10800, "heartbeat-ready:none")
+    }
+
+    /// The known answer for a fixture branch: the sandbox repository
+    /// "owner/repo" has no pull requests, so none of its branches is a live
+    /// attempt. Substituting the answer at the seam keeps the unit tier off
+    /// the network (#4129).
+    fn dead_liveness() -> impl FnMut(&str, &str) -> BranchLiveness {
+        move |_, _| BranchLiveness::Dead
     }
 
     fn lose_generation(
@@ -267,6 +275,25 @@ mod requeue {
 
     #[test]
     fn a_concurrent_lease_renewal_prevents_label_requeue() {
+        // The quarantine step below touches heartbeat storage, so point it at
+        // a private sandbox like the sibling tests: left to the default root
+        // the test read the ambient AUTOSPEC_HEARTBEAT_DIR of whatever ran
+        // concurrently, and the default itself needs the HOME filesystem's
+        // renameat(2) — state outside the test's control (#4129).
+        let _guard = lock_heartbeat_env();
+        let (sandbox, _) = startup_heartbeat_fixture("concurrent-renewal");
+        let root = sandbox.join("heartbeats");
+        let repo = root.join(crate::commands::autonomous::drain::repository_progress_key(
+            "owner/repo",
+        ));
+        std::fs::create_dir_all(&repo).expect("empty heartbeat repository");
+        #[cfg(target_os = "linux")]
+        for directory in [root.as_path(), repo.as_path()] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                .expect("private heartbeat directory");
+        }
+        let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
         let selected = ClaimRefHead {
             oid: "expired-generation".to_string(),
             generation: "generation-1".to_string(),
@@ -277,6 +304,7 @@ mod requeue {
             42,
             Some(selected),
             &mut lose_generation,
+            &mut dead_liveness(),
         )
         .expect("a lost compare-and-swap is not an error");
 
@@ -284,6 +312,11 @@ mod requeue {
             quarantined.is_none(),
             "the renewing worker won, so the caller has no authority to mutate labels"
         );
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+        }
+        std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
     }
 
     #[test]
@@ -329,6 +362,7 @@ mod requeue {
             42,
             Some(selected),
             &mut win_generation,
+            &mut dead_liveness(),
         )
         .expect("dead owner classification")
         .expect("dead owner requeued");
@@ -377,6 +411,7 @@ mod requeue {
             42,
             Some(selected),
             &mut win_generation,
+            &mut dead_liveness(),
         )
         .expect("missing heartbeat quarantine")
         .expect("missing owner requeued");
@@ -465,6 +500,9 @@ mod requeue {
                 42,
                 Some(selected),
                 &mut |_, _| Ok(ClaimRefAdvance::Lost),
+                &mut |_: &str, _: &str| {
+                    panic!("a terminal record must not consult branch liveness")
+                },
             )
             .expect("terminal state must bypass heartbeat IO");
             assert!(result.is_none(), "state={state}");
@@ -473,5 +511,130 @@ mod requeue {
             Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
             None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
         }
+    }
+
+    /// The caller's behaviour under `unknown` and under `dead` are different
+    /// states asserted separately (#4129): the lookup failing is not the same
+    /// answer as the lookup saying the branch is gone.
+    #[test]
+    fn an_unknown_liveness_fails_closed_where_dead_requeues() {
+        let _guard = lock_heartbeat_env();
+        let (sandbox, _) = startup_heartbeat_fixture("liveness-policy");
+        let root = sandbox.join("heartbeats");
+        let repo = root.join(crate::commands::autonomous::drain::repository_progress_key(
+            "owner/repo",
+        ));
+        std::fs::create_dir_all(&repo).expect("empty heartbeat repository");
+        #[cfg(target_os = "linux")]
+        for directory in [root.as_path(), repo.as_path()] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                .expect("private heartbeat directory");
+        }
+        let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
+
+        // Behaviour under unknown: the lookup could not classify the branch,
+        // so the requeue fails closed and the claim is left alone.
+        let selected = ClaimRefHead {
+            oid: "unknown-generation".to_string(),
+            generation: "generation-1".to_string(),
+            record: record("claimed", "2026-07-29T00:49:45Z"),
+        };
+        let blocked = quarantine_abandoned_claim_generation_with(
+            "owner/repo",
+            42,
+            Some(selected),
+            &mut lose_generation,
+            &mut |_, _| BranchLiveness::Unknown,
+        )
+        .expect("unknown liveness classification");
+        assert!(
+            blocked.is_none(),
+            "a lookup that could not classify the branch must not requeue over it"
+        );
+
+        // Behaviour under dead: the same record requeues once the lookup
+        // answers that the branch is not live.
+        let selected = ClaimRefHead {
+            oid: "dead-generation".to_string(),
+            generation: "generation-1".to_string(),
+            record: record("claimed", "2026-07-29T00:49:45Z"),
+        };
+        let requeued = quarantine_abandoned_claim_generation_with(
+            "owner/repo",
+            42,
+            Some(selected),
+            &mut win_generation,
+            &mut dead_liveness(),
+        )
+        .expect("dead liveness classification")
+        .expect("dead branch requeued");
+        assert_eq!(requeued.record.state, "available");
+
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+        }
+        std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
+    }
+}
+
+/// The liveness predicate's contract (#4129): a failed remote lookup reports
+/// `Unknown` — it fails loudly with the attempt named, never absorbed as a
+/// defaulted domain answer.
+mod liveness_predicate {
+    use super::super::super::{branch_live_pr_state, AttemptLiveness, BranchLiveness};
+    use crate::commands::claim::tests::support::{lock_heartbeat_env, startup_heartbeat_fixture};
+    use crate::commands::CommandFailure;
+
+    #[test]
+    fn a_failed_lookup_reports_unknown_not_a_defaulted_boolean() {
+        let live = BranchLiveness::from_result(Ok(AttemptLiveness::OpenPr));
+        let dead = BranchLiveness::from_result(Ok(AttemptLiveness::Abandoned));
+        let missing = BranchLiveness::from_result(Ok(AttemptLiveness::NoBranch));
+        let unknown = BranchLiveness::from_result(Err(CommandFailure::transient(
+            "list open pull requests for branch feat/worker failed",
+        )));
+
+        assert_eq!(live, BranchLiveness::Live);
+        assert_eq!(dead, BranchLiveness::Dead);
+        assert_eq!(missing, BranchLiveness::Dead);
+        assert_eq!(unknown, BranchLiveness::Unknown);
+        assert_ne!(
+            dead, unknown,
+            "a definite negative and a failed lookup must stay distinct states"
+        );
+    }
+
+    #[test]
+    fn a_real_remote_lookup_fails_loudly_with_the_attempt_named() {
+        // The unit tier cannot reach the network: a lookup that attempts the
+        // transport fails with the attempt named, rather than being absorbed
+        // as a domain answer.
+        let _guard = lock_heartbeat_env();
+        let (sandbox, _) = startup_heartbeat_fixture("liveness-lookup");
+        let missing_program = sandbox.join("no-such-gh");
+        let previous = std::env::var_os("AUTOSPEC_GH_PROGRAM");
+        let previous_retries = std::env::var_os("AUTOSPEC_GH_API_RETRIES");
+        std::env::set_var("AUTOSPEC_GH_PROGRAM", &missing_program);
+        std::env::set_var("AUTOSPEC_GH_API_RETRIES", "1");
+
+        let error = branch_live_pr_state("owner/repo", "feat/worker")
+            .expect_err("the lookup must fail loudly, not default to a verdict");
+        let message = error.to_string();
+        assert!(
+            message.contains("list open pull requests for branch feat/worker"),
+            "the failure must name the attempted lookup: {message}"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_GH_PROGRAM", value),
+            None => std::env::remove_var("AUTOSPEC_GH_PROGRAM"),
+        }
+        match previous_retries {
+            Some(value) => std::env::set_var("AUTOSPEC_GH_API_RETRIES", value),
+            None => std::env::remove_var("AUTOSPEC_GH_API_RETRIES"),
+        }
+        std::fs::remove_dir_all(sandbox).expect("remove lookup fixture");
     }
 }
