@@ -102,6 +102,12 @@ RULE_IDs enforced (deterministic detectors):
   NEW_ABSTRACTION_SINGLE_CALLER  New *manager*|*factory*|*adapter*|*wrapper*|*base*|*abstract*
                     file with ≤1 external call site found by rg. Opt-out:
                     # linter:allow-NEW_ABSTRACTION_SINGLE_CALLER <reason>.
+  UNWIRED_PUB_ITEM    (pre-commit mode only) A new pub fn or pub struct in a .rs
+                    diff with no word-boundary reference outside its own
+                    #[cfg(test)] module — a well-tested library nothing calls
+                    passes every other gate. Show the caller that wires it, or
+                    declare deliberate staging (Guardian: skip-UNWIRED_PUB_ITEM
+                    # <reason>) (#4346).
 
 RULE_IDs checked by LLM guardian (not this script):
 
@@ -1937,6 +1943,18 @@ else
     }
 fi
 
+# UNWIRED_PUB_ITEM detector (issue #4346): same sourcing contract as the reuse
+# lens — a missing module means a broken install, so stub and SAY so.
+_upi_lib="${_LINT_SELF_DIR}/lib/lint-unwired-pub.sh"
+if [ -f "$_upi_lib" ]; then
+    . "$_upi_lib"
+else
+    detect_unwired_pub_item() {
+        emit_info UNWIRED_PUB_ITEM "-" "-" \
+            'lib/lint-unwired-pub.sh not found next to this script; UNWIRED_PUB_ITEM is inert. Re-run install.sh --update.'
+    }
+fi
+
 # ── §3.x NEW_DEP_UNJUSTIFIED detector ────────────────────────────────────────
 # Dependency added to a manifest without a why: justification in the same hunk.
 
@@ -2264,6 +2282,7 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         detect_bats_suite_registration
         detect_command_registration
         detect_catalog_entry_completeness
+        detect_unwired_pub_item
         detect_gate_promotion
         if [ "$VACUOUS_ASSERTIONS" -eq 1 ]; then
             detect_vacuous_assertions
@@ -2310,6 +2329,7 @@ else
     detect_bats_suite_registration
     detect_command_registration
     detect_catalog_entry_completeness
+    detect_unwired_pub_item
     detect_gate_promotion
     if [ "$VACUOUS_ASSERTIONS" -eq 1 ]; then
         detect_vacuous_assertions
