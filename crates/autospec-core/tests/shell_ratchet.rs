@@ -1,4 +1,6 @@
-use autospec_core::shell_ratchet::{measure, verdict, RatchetVerdict};
+use autospec_core::shell_ratchet::{
+    delta, diff_verdict, measure, verdict, RatchetDiffVerdict, RatchetVerdict,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -82,6 +84,173 @@ fn files_without_a_counted_extension_are_ignored() {
     write(tmp.path(), "README.md", "# docs\n");
     write(tmp.path(), "Makefile", "all:\n");
     assert_eq!(measure(tmp.path()).unwrap().total_lines(), 0);
+}
+
+#[test]
+fn measure_records_per_file_line_counts() {
+    // The per-file record is what lets a change be told apart as growth or
+    // repair: the total alone cannot say which file grew while being fixed.
+    let tmp = Tmp::new("t");
+    write(tmp.path(), "scripts/a.sh", "echo one\necho two\n");
+    write(tmp.path(), "tests/b.bats", "@test \"x\" {\n  true\n}\n");
+    let s = measure(tmp.path()).unwrap();
+    assert_eq!(s.per_file.get("scripts/a.sh"), Some(&2));
+    assert_eq!(s.per_file.get("tests/b.bats"), Some(&3));
+}
+
+#[test]
+fn a_fix_that_grows_an_existing_file_is_admitted_and_recorded() {
+    // A bug fix frequently needs more lines than the bug — a missing guard,
+    // an extra case. That growth must pass, and it must be recorded.
+    let tmp = Tmp::new("t");
+    write(tmp.path(), "scripts/a.sh", "echo one\necho two\n");
+    let base = measure(tmp.path()).unwrap();
+    write(
+        tmp.path(),
+        "scripts/a.sh",
+        "echo one\necho two\nif [[ -t 1 ]]; then\n  :\nfi\n",
+    );
+    let head = measure(tmp.path()).unwrap();
+    // The ceiling is tight on purpose: the head total (5) is above it, and a
+    // total-only ratchet would refuse the fix.
+    let v = diff_verdict(&base, &head, 3);
+    assert!(!v.is_regression(), "{}", v.message());
+    assert_eq!(v.hold_reason(), "modifies existing shell");
+    let RatchetDiffVerdict::Admitted { delta, .. } = &v else {
+        panic!("expected admitted: {}", v.message());
+    };
+    assert!(delta.maintenance_only());
+    assert_eq!(delta.modified.get("scripts/a.sh"), Some(&(2, 5)));
+    assert!(delta.new_files.is_empty());
+    // The growth is reportable in the message, not just in the record.
+    assert!(
+        v.message().contains("scripts/a.sh 2 -> 5"),
+        "{}",
+        v.message()
+    );
+}
+
+#[test]
+fn a_new_shell_file_is_refused_even_when_the_ceiling_has_slack() {
+    // New surface is what the moratorium exists to stop. Ceiling slack does
+    // not turn a new file into a fix.
+    let tmp = Tmp::new("t");
+    write(tmp.path(), "scripts/a.sh", "echo one\n");
+    let base = measure(tmp.path()).unwrap();
+    write(tmp.path(), "scripts/b.sh", "echo new\n");
+    let head = measure(tmp.path()).unwrap();
+    let v = diff_verdict(&base, &head, 100);
+    assert!(v.is_regression(), "{}", v.message());
+    assert_eq!(v.hold_reason(), "adds a new shell file");
+    let RatchetDiffVerdict::RefusedNewFiles { delta, .. } = &v else {
+        panic!("expected refusal: {}", v.message());
+    };
+    assert_eq!(delta.new_files.get("scripts/b.sh"), Some(&1));
+    assert_eq!(delta.new_lines(), 1);
+}
+
+#[test]
+fn a_new_bats_file_is_refused_like_shell() {
+    let tmp = Tmp::new("t");
+    write(tmp.path(), "scripts/a.sh", "echo one\n");
+    let base = measure(tmp.path()).unwrap();
+    write(
+        tmp.path(),
+        "tests/unit/x.bats",
+        "@test \"y\" {\n  true\n}\n",
+    );
+    let head = measure(tmp.path()).unwrap();
+    let v = diff_verdict(&base, &head, 100);
+    assert!(v.is_regression(), "{}", v.message());
+    assert_eq!(v.hold_reason(), "adds a new shell file");
+    assert!(v.message().contains("tests/unit/x.bats"), "{}", v.message());
+}
+
+#[test]
+fn a_mixed_change_is_refused_for_the_new_file_and_records_the_fix() {
+    // The refusal and the repair are different things: the verdict must name
+    // both, so releasing the fix does not require re-litigating the new file.
+    let tmp = Tmp::new("t");
+    write(tmp.path(), "scripts/a.sh", "echo one\necho two\n");
+    let base = measure(tmp.path()).unwrap();
+    write(
+        tmp.path(),
+        "scripts/a.sh",
+        "echo one\necho two\nfix\nmore\n",
+    );
+    write(tmp.path(), "scripts/b.sh", "echo new\n");
+    let head = measure(tmp.path()).unwrap();
+    let v = diff_verdict(&base, &head, 100);
+    assert!(v.is_regression());
+    assert_eq!(v.hold_reason(), "adds a new shell file");
+    let RatchetDiffVerdict::RefusedNewFiles { delta, .. } = &v else {
+        panic!("expected refusal: {}", v.message());
+    };
+    assert_eq!(delta.new_files.get("scripts/b.sh"), Some(&1));
+    assert_eq!(delta.modified.get("scripts/a.sh"), Some(&(2, 4)));
+    let msg = v.message();
+    assert!(msg.contains("scripts/b.sh"), "{}", msg);
+    assert!(msg.contains("scripts/a.sh 2 -> 4"), "{}", msg);
+    assert!(msg.contains("porting issue"), "{}", msg);
+}
+
+#[test]
+fn removing_shell_is_admitted_and_recorded() {
+    let tmp = Tmp::new("t");
+    write(
+        tmp.path(),
+        "scripts/a.sh",
+        "echo one\necho two\necho three\n",
+    );
+    let base = measure(tmp.path()).unwrap();
+    std::fs::remove_file(tmp.path().join("scripts/a.sh")).unwrap();
+    let head = measure(tmp.path()).unwrap();
+    let v = diff_verdict(&base, &head, 100);
+    assert!(!v.is_regression(), "{}", v.message());
+    let RatchetDiffVerdict::Admitted { delta, .. } = &v else {
+        panic!("expected admitted: {}", v.message());
+    };
+    assert_eq!(delta.removed_files, vec!["scripts/a.sh".to_string()]);
+    assert!(delta.modified.is_empty());
+}
+
+#[test]
+fn an_unchanged_tree_admits_with_nothing_recorded() {
+    let tmp = Tmp::new("t");
+    write(tmp.path(), "scripts/a.sh", "echo one\n");
+    let base = measure(tmp.path()).unwrap();
+    let head = measure(tmp.path()).unwrap();
+    let v = diff_verdict(&base, &head, 100);
+    assert!(!v.is_regression());
+    assert_eq!(v.hold_reason(), "modifies existing shell");
+    let RatchetDiffVerdict::Admitted { delta, .. } = &v else {
+        panic!("expected admitted: {}", v.message());
+    };
+    assert!(delta.maintenance_only());
+    assert!(delta.modified.is_empty());
+    assert!(
+        v.message().contains("existing files modified: none"),
+        "{}",
+        v.message()
+    );
+}
+
+#[test]
+fn delta_names_new_modified_and_removed() {
+    let tmp = Tmp::new("t");
+    write(tmp.path(), "scripts/grow.sh", "echo one\necho two\n");
+    write(tmp.path(), "scripts/gone.sh", "echo bye\n");
+    let base = measure(tmp.path()).unwrap();
+    write(tmp.path(), "scripts/grow.sh", "echo one\necho two\nthree\n");
+    std::fs::remove_file(tmp.path().join("scripts/gone.sh")).unwrap();
+    write(tmp.path(), "scripts/fresh.sh", "echo new\n");
+    let head = measure(tmp.path()).unwrap();
+    let d = delta(&base, &head);
+    assert_eq!(d.new_files.get("scripts/fresh.sh"), Some(&1));
+    assert_eq!(d.modified.get("scripts/grow.sh"), Some(&(2, 3)));
+    assert_eq!(d.removed_files, vec!["scripts/gone.sh".to_string()]);
+    assert_eq!(d.new_lines(), 1);
+    assert!(!d.maintenance_only());
 }
 
 #[test]
