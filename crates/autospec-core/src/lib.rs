@@ -122,12 +122,20 @@ pub mod post_merge;
 pub mod prefilter_scope;
 pub mod procedure;
 pub mod process_evidence;
+// Unix-only by design: pattern-based termination is built on `ps`, `pgrep`,
+// and `nix::sys::signal::kill` — the self-safety helper behind
+// `autospec process-kill` (issue #4448). The platform matrix for this
+// repository is Linux/macOS/BSD CI; there is no Windows process table to
+// guard against, so the module is absent there rather than stubbed.
+#[cfg(unix)]
+pub mod process_termination;
 pub mod progress_contract;
 pub mod progress_signal;
 pub mod prompt_blocks;
 pub mod prose_closure;
 pub mod queue_gap;
 pub mod rag;
+pub mod ranking_evidence;
 pub mod reader_fidelity;
 pub mod rebase_review;
 pub mod rebaseline;

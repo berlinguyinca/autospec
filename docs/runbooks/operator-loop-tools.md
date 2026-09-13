@@ -19,6 +19,7 @@ root is a deployment path and is named as such.
 | refresh-queue | `scripts/refresh-queue.sh` | local workspace (authenticated) | */10 | regenerates the dispatch queue from the live tracker; stages missing specs | [refresh-queue-sweep](refresh-queue-sweep.md) |
 | topup | `<llm>/topup.sh` | deployment host (authenticated) | */10 | consumes the queue artifact, produces dispatch requests | — |
 | dispatch-agent | `<llm>/dispatch-gw.sh` | shared cluster (no credential) | */10 | dispatches agents from dispatch requests | — |
+| convert | `autospec convert --apply --free-slots <reported>` | local workspace (authenticated) | */10 | the patch-to-PR conversion pass: converts finished agent patches, records a HELD line for failures, archives retired patches, and reports the conversion buffer (waiting patches, blocked queue entries) with an alarm when the blocked entries exceed the free agent slots (#4558) | — |
 | needs-classify sweep | `skills/autospec-classify/SKILL.md` | local workspace (authenticated) | 0 3 * * * | promotes `needs-classify` issues onto the implementation queue | [needs-classify-sweep](needs-classify-sweep.md) |
 | queue-gap reconcile | `autospec dispatch queue-gap` | local workspace (authenticated) | */10 | reports `eligible` / `queued` / `has_branch_or_pr` / `missing` on every run, and fails on a required component with no implementation (#4450) | [refresh-queue-sweep](refresh-queue-sweep.md) |
 

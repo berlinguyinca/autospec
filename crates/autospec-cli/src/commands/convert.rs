@@ -55,6 +55,19 @@
 //! The command is side-effect-free by default: it plans the pass (enumerate +
 //! select + report). `--apply` performs the real conversion (branch, gate,
 //! PR, HELD).
+//!
+//! Every plan and apply run also reports the **conversion buffer** — how
+//! many finished patches are waiting (on disk, no live PR) and how many
+//! queue entries they block (one per patch on disk; the dispatch guard
+//! holds each). The pass is the pipeline's rate limiter, and a report of
+//! only what the run converted hides the buffer it is draining; with
+//! `--free-slots N` the pass alarms when the blocked entries exceed the
+//! free agent slots — the precise condition under which the fleet is
+//! wasting GPU time (#4558). `--archive` is the explicit exit for a patch
+//! that can never convert (shell-only, superseded, already in main): it
+//! moves the named issue's patch to that issue's `superseded/` directory
+//! (archival, never deletion), removes the issue's HELD record, and
+//! releases the queue entry the dispatch guard holds.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -71,7 +84,7 @@ use autospec_core::unfed_pass::PassCounters;
 use autospec_core::verification::parse_test_run;
 use serde_json::{json, Value};
 
-use super::claim::{branch_liveness, BranchLiveness};
+use super::claim::{branch_liveness, local_branch_checked_out, BranchLiveness};
 use super::CommandFailure;
 
 /// The schema emitted by `autospec convert --json`.
@@ -84,7 +97,8 @@ const USAGE: &str = "\
 USAGE:
     autospec convert [--llm-root DIR] [--repo OWNER/NAME] [--base BRANCH]
                      [--held-file PATH] [--branch-prefix PREFIX]
-                     [--apply] [--json] [--convert-ledger PATH] [ISSUE ...]
+                     [--free-slots N] [--apply] [--archive] [--json]
+                     [--convert-ledger PATH] [ISSUE ...]
 
 PLAN (default): enumerate $LLM/*/out/issue-*/changes.patch, select the patches
 not already attempted (a live branch/PR, or a recorded HELD entry whose
@@ -101,7 +115,18 @@ OPTIONS:
     --base BRANCH         trunk to branch off origin/<base> (default: main)
     --held-file PATH      the HELD ledger (default: <llm-root>/held.txt)
     --branch-prefix P     conversion branch prefix (default: conv-)
+    --free-slots N        the free agent slots the fleet reports: with it,
+                          the pass alarms when the queue entries blocked on
+                          conversion exceed the free slots — the precise
+                          condition under which the fleet is wasting GPU
+                          time (#4558)
     --apply               perform the conversion, not just the plan
+    --archive             archive the named issues' patches (move, never
+                          delete, to out/issue-N/superseded/) and release
+                          their queue entries — the explicit exit for a
+                          patch that can never convert. Requires explicit
+                          ISSUE numbers; a bare sweep would free every
+                          entry at once (#4558)
     --json                machine-readable plan
     --convert-ledger PATH one-off: convert a prose HELD ledger (lines of
                           `- <issue>  HELD <reason>`) into the JSON
@@ -109,6 +134,12 @@ OPTIONS:
                           issue, preserving the recorded reason; writes to
                           --held-file (default: <llm-root>/held.txt)
     ISSUE ...             restrict the pass to these issue numbers
+
+BUFFER (reported on every plan and apply run): how many finished patches
+are waiting (on disk, no live PR) and how many queue entries they block
+(one per patch on disk; the dispatch guard holds each). With --free-slots
+N an ALARM line when the blocked entries exceed the free slots: the
+fleet's throughput is then limited by conversion, not compute (#4558).
 
 HELD LEDGER (--held-file): one JSON line per hold — the serde form of
 hold_memo::HoldRecord — fields issue, patch_key (patch mtime, seconds),
@@ -144,7 +175,9 @@ struct Options {
     base: String,
     held_file: Option<PathBuf>,
     branch_prefix: String,
+    free_slots: Option<usize>,
     apply: bool,
+    archive: bool,
     as_json: bool,
     convert_ledger: Option<PathBuf>,
     issues: Vec<u64>,
@@ -157,7 +190,9 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
         base: "main".to_string(),
         held_file: None,
         branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
+        free_slots: None,
         apply: false,
+        archive: false,
         as_json: false,
         convert_ledger: None,
         issues: Vec::new(),
@@ -177,7 +212,18 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
             "--base" => opts.base = value(args, &mut i, &arg)?,
             "--held-file" => opts.held_file = Some(PathBuf::from(value(args, &mut i, &arg)?)),
             "--branch-prefix" => opts.branch_prefix = value(args, &mut i, &arg)?,
+            "--free-slots" => {
+                let raw = value(args, &mut i, &arg)?;
+                opts.free_slots = Some(
+                    raw.parse::<usize>().map_err(|_| {
+                        CommandFailure::diagnostic(format!(
+                            "--free-slots must be a non-negative integer, got {raw:?}\n{USAGE}"
+                        ))
+                    })?,
+                );
+            }
             "--apply" => opts.apply = true,
+            "--archive" => opts.archive = true,
             "--json" => opts.as_json = true,
             "--convert-ledger" => {
                 opts.convert_ledger = Some(PathBuf::from(value(args, &mut i, &arg)?))
@@ -319,6 +365,49 @@ fn enumerate_patches(root: &Path) -> Result<Vec<PatchLocation>, CommandFailure> 
 /// [`HoldRecord`]. The pass reads it to decide which held patches still
 /// disqualify (their re-gate holds) versus which are re-offered (the base
 /// moved). Appending a HELD line is the pass's "never discard" step.
+/// Print the pass's summary line, having first checked that it can be true.
+///
+/// `PassOutcome` has carried a `reconciles()` predicate, and a doc comment
+/// saying the counters "must reconcile", since it was written. Nothing in the
+/// running pass ever called it: the summary was printed whatever the arithmetic
+/// said (issue #4604). A pass reporting that it acted on more patches than it
+/// examined would emit a line that reads as authoritative and is impossible.
+///
+/// Every operational decision about this fleet is made from that one line, so
+/// the line now states whether it can be trusted. The counters are still
+/// printed -- suppressing them would destroy the evidence needed to find the
+/// accounting defect -- but they are no longer offered as fact.
+fn report_outcome(outcome: &PassOutcome) {
+    let (line, alarm) = outcome_report(outcome);
+    println!("{line}");
+    if let Some(alarm) = alarm {
+        eprintln!("{alarm}");
+    }
+}
+
+/// The summary line, and the alarm that must accompany it when the pass's own
+/// arithmetic is impossible.
+///
+/// Split from the printing so the decision is testable without capturing
+/// stdout -- the check this issue is about should not itself be reachable only
+/// through a full pass.
+fn outcome_report(outcome: &PassOutcome) -> (String, Option<String>) {
+    let line = outcome.line("convert", "autospec convert", "enumerate $LLM");
+    if outcome.reconciles() {
+        (line, None)
+    } else {
+        (
+            line,
+            Some(
+                "ALARM: the pass's own counters do not reconcile -- it reports acting on more \
+                 patches than it examined. The line above is not a result; it is evidence of \
+                 an accounting defect in the pass. Do not act on these numbers."
+                    .to_string(),
+            ),
+        )
+    }
+}
+
 fn load_held(path: &Path) -> Result<BTreeMap<u64, HoldRecord>, CommandFailure> {
     let Ok(text) = fs::read_to_string(path) else {
         return Ok(BTreeMap::new());
@@ -544,17 +633,154 @@ fn base_changed_files(base_sha: &str, base_ref: &str) -> Option<Vec<String>> {
 /// unmerged with no worktree) does not: redoing it overwrites the stale
 /// branch, so the pass re-offers it. `Unknown` fails closed (disqualify):
 /// offering a patch whose attempt state cannot be verified risks a duplicate.
-fn attempt_flags(repo: Option<&str>, branch: &str) -> (bool, bool) {
+fn attempt_flags(
+    repo: Option<&str>,
+    branch: &str,
+    prefetched: Option<&AttemptIndex>,
+) -> (bool, bool) {
     let Some(repo) = repo else {
         // No repo to ask: the liveness is not checked (a plan-only gap the
         // caller reports), so the patch is not disqualified on this axis.
         return (false, false);
     };
-    match branch_liveness(repo, branch) {
+    let liveness = match prefetched {
+        Some(index) => index.liveness(branch),
+        None => branch_liveness(repo, branch),
+    };
+    match liveness {
         BranchLiveness::Live => (false, true),
         BranchLiveness::Dead => (false, false),
         BranchLiveness::Unknown => (false, true),
     }
+}
+
+/// The remote half of branch liveness for a whole pass, fetched once
+/// (issue #4587).
+///
+/// `branch_liveness` asks the remote per branch. Its order matters and this
+/// index reproduces it exactly:
+///
+/// 1. a local worktree holding the branch makes the attempt live;
+/// 2. otherwise a branch absent from the remote is `NoBranch` — answered
+///    without asking about pull requests at all, which is why a backlog of
+///    mostly-absent branches showed as a long run of `ls-remote` calls;
+/// 3. otherwise an open or merged pull request makes it live;
+/// 4. otherwise the attempt is abandoned, and abandoned is not live.
+///
+/// Steps 2 and 3 are set-membership tests over answers the remote gives in one
+/// call each, and neither changes during a pass. Step 1 stays per-branch
+/// because it is local and cheap — moving it here would trade a correct check
+/// for no saving.
+///
+/// Over a 563-patch backlog this is two round-trips instead of up to three per
+/// candidate; a scheduled pass previously spent its whole period in selection
+/// and never reached a gate.
+#[derive(Debug, Default)]
+struct AttemptIndex {
+    /// Branch names present on the remote, from one prefixed `ls-remote`.
+    remote_branches: std::collections::BTreeSet<String>,
+    /// Branch names carrying an open or merged pull request.
+    live_pr_branches: std::collections::BTreeSet<String>,
+}
+
+impl AttemptIndex {
+    /// The verdict for one branch, in `attempt_liveness`'s order.
+    fn liveness(&self, branch: &str) -> BranchLiveness {
+        if branch.trim().is_empty() {
+            return BranchLiveness::Dead;
+        }
+        // Step 1, kept per-branch and local. A lookup failure here is the one
+        // case this index cannot resolve, so it reports `Unknown` and the
+        // caller's fail-closed arm applies.
+        match local_branch_checked_out(&format!("refs/heads/{branch}")) {
+            Ok(true) => return BranchLiveness::Live,
+            Ok(false) => {}
+            Err(_) => return BranchLiveness::Unknown,
+        }
+        if !self.remote_branches.contains(branch) {
+            return BranchLiveness::Dead;
+        }
+        if self.live_pr_branches.contains(branch) {
+            return BranchLiveness::Live;
+        }
+        BranchLiveness::Dead
+    }
+}
+
+/// Fetch a pass's remote liveness facts in two calls (issue #4587).
+///
+/// `None` when either call fails, so the caller keeps the per-branch path.
+/// Treating a failed batch as "nothing exists" would re-offer every patch and
+/// open duplicate pull requests, which is precisely the outcome the liveness
+/// check exists to prevent.
+fn prefetch_attempt_index(repo: &str, branch_prefix: &str) -> Option<AttemptIndex> {
+    let heads = Command::new("git")
+        .args([
+            "ls-remote",
+            "--heads",
+            "origin",
+            &format!("{branch_prefix}*"),
+        ])
+        .output()
+        .ok()?;
+    if !heads.status.success() {
+        return None;
+    }
+    let mut index = AttemptIndex::default();
+    for line in String::from_utf8_lossy(&heads.stdout).lines() {
+        if let Some((_, reference)) = line.split_once('\t') {
+            if let Some(name) = reference.strip_prefix("refs/heads/") {
+                index.remote_branches.insert(name.to_string());
+            }
+        }
+    }
+
+    let prs = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--limit",
+            "500",
+            "--json",
+            "headRefName,state",
+        ])
+        .output()
+        .ok()?;
+    if !prs.status.success() {
+        return None;
+    }
+    for (head, state) in parse_pull_request_heads(&String::from_utf8_lossy(&prs.stdout)) {
+        if head.starts_with(branch_prefix) && (state == "OPEN" || state == "MERGED") {
+            index.live_pr_branches.insert(head);
+        }
+    }
+    Some(index)
+}
+
+/// `(headRefName, state)` pairs from `gh pr list --json headRefName,state`.
+///
+/// Tolerant of field order, which `gh` does not promise.
+fn parse_pull_request_heads(body: &str) -> Vec<(String, String)> {
+    body.split('{')
+        .skip(1)
+        .filter_map(|chunk| {
+            let head = json_string_field(chunk, "headRefName")?;
+            let state = json_string_field(chunk, "state")?;
+            Some((head, state))
+        })
+        .collect()
+}
+
+/// The value of one string field in a flat JSON object fragment.
+fn json_string_field(chunk: &str, field: &str) -> Option<String> {
+    let rest = chunk.split(&format!("\"{field}\":")).nth(1)?;
+    let rest = rest.trim_start().strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 /// The gate scope tokens for the files a patch touches, derived from the
@@ -602,6 +828,64 @@ fn conflict_reason(path: &str, content: &str) -> String {
     }
 }
 
+/// The conversion buffer (issue #4558 ask 3): the finished patches the
+/// fleet has produced and has not yet turned into PRs, and the queue
+/// entries they hold. A pass that converts 1 of 559 and reports "1
+/// converted" is technically accurate and operationally useless — the
+/// numbers that matter are these two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConversionBuffer {
+    /// Finished patches on disk with no live PR: awaiting conversion.
+    waiting: usize,
+    /// Queue entries the dispatch guard holds: one per patch on disk. The
+    /// guard's condition is the patch's presence, so every enumerated
+    /// patch blocks its queue entry, live PR or not.
+    queue_entries_blocked: usize,
+}
+
+impl ConversionBuffer {
+    /// The one line the pass reports on every run — including an idle run
+    /// ("log one line even when there is nothing to do"): a silent
+    /// successful run and a broken run were indistinguishable for 40
+    /// minutes (#4558), and this line is what makes the two tell apart in
+    /// the log.
+    fn line(&self, free_slots: Option<usize>) -> String {
+        let mut line = format!(
+            "conversion buffer: waiting={} queue_entries_blocked={}",
+            self.waiting, self.queue_entries_blocked
+        );
+        if let Some(slots) = free_slots {
+            line.push_str(&format!(" free_slots={slots}"));
+        }
+        line
+    }
+
+    /// The alarm (#4558 ask 3): the blocked entries exceed the free agent
+    /// slots — the precise condition under which the fleet is wasting GPU
+    /// time: finished work holds the queue entries while the slots idle.
+    /// Exceeds, not meets: at parity the slots are exactly full and no
+    /// GPU time is wasted.
+    fn alarm(&self, free_slots: Option<usize>) -> Option<String> {
+        let slots = free_slots?;
+        (self.queue_entries_blocked > slots).then(|| {
+            format!(
+                "ALARM: {} queue entries are blocked on conversion with {} free agent slots \u{2014} the fleet's throughput is limited by conversion, not compute",
+                self.queue_entries_blocked, slots
+            )
+        })
+    }
+}
+
+/// The buffer a set of candidates describes: waiting is the patches with
+/// no live PR (fresh, branch-held, held-held), blocked is every patch on
+/// disk — the dispatch guard's condition is presence, not PR liveness.
+fn buffer_from_candidates(candidates: &[PatchCandidate]) -> ConversionBuffer {
+    ConversionBuffer {
+        waiting: candidates.iter().filter(|c| !c.pull_request_exists).count(),
+        queue_entries_blocked: candidates.len(),
+    }
+}
+
 struct ConvertPlan {
     opts: Options,
     llm_root: PathBuf,
@@ -613,6 +897,11 @@ struct ConvertPlan {
 impl ConvertPlan {
     fn selection(&self) -> autospec_core::conversion_pass::Selection {
         select_fresh(&self.candidates)
+    }
+
+    /// The buffer this plan's candidates describe (issue #4558 ask 3).
+    fn buffer(&self) -> ConversionBuffer {
+        buffer_from_candidates(&self.candidates)
     }
 }
 
@@ -653,10 +942,23 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
         );
     }
 
+    // The remote half of liveness, fetched once for the pass (issue #4587).
+    // `None` means a fetch failed and the per-branch path is used, so
+    // correctness never depends on the batch succeeding.
+    let attempt_index = repo
+        .as_deref()
+        .and_then(|repo| prefetch_attempt_index(repo, &opts.branch_prefix));
+    if repo.is_some() && attempt_index.is_none() {
+        eprintln!(
+            "WARN: could not prefetch branch liveness; falling back to one query per candidate"
+        );
+    }
+
     let mut candidates = Vec::new();
     for patch in &examined {
         let branch = format!("{}{}", opts.branch_prefix, patch.issue);
-        let (branch_exists, pull_request_exists) = attempt_flags(repo.as_deref(), &branch);
+        let (branch_exists, pull_request_exists) =
+            attempt_flags(repo.as_deref(), &branch, attempt_index.as_ref());
 
         // HELD is a queue: a recorded hold disqualifies only while its
         // re-gate still holds. A changed patch, or a dependent file that
@@ -714,6 +1016,21 @@ fn convert(args: &[String]) -> Result<(), CommandFailure> {
             "--convert-ledger is the one-off ledger conversion; it does not combine with --apply",
         ));
     }
+    if opts.archive && opts.apply {
+        return Err(CommandFailure::diagnostic(
+            "--archive releases queue entries; it does not combine with --apply",
+        ));
+    }
+    if opts.archive && opts.convert_ledger.is_some() {
+        return Err(CommandFailure::diagnostic(
+            "--archive releases queue entries; it does not combine with --convert-ledger",
+        ));
+    }
+    if opts.archive && opts.issues.is_empty() {
+        return Err(CommandFailure::diagnostic(
+            "--archive requires explicit ISSUE numbers: it frees the queue entry for each named issue, and a bare sweep would free every entry at once",
+        ));
+    }
     if let Some(prose) = &opts.convert_ledger {
         return convert_ledger(&opts, prose);
     }
@@ -722,15 +1039,119 @@ fn convert(args: &[String]) -> Result<(), CommandFailure> {
     };
     let plan = build_plan(opts.clone(), llm_root)?;
 
+    if plan.opts.archive {
+        return archive_issues(&plan);
+    }
     if plan.opts.apply {
         return run_apply(&plan);
     }
     render_plan(&plan)
 }
 
+/// The explicit exit for a patch that can never convert (issue #4558 ask 4):
+/// archive the named issues' patches and release their queue entries.
+///
+/// A patch that can never convert — shell-only under the Go/Rust ruling,
+/// superseded, already in main — holds its queue entry hostage forever,
+/// because the dispatch guard cannot distinguish "finished work awaiting
+/// conversion" from "work that will never convert". Archiving is what
+/// separates the two: the patch is *moved* under the issue's `superseded/`
+/// directory (archival, never deletion — the same `superseded_archive_path`
+/// the apply path uses for base-superseded patches), the issue's HELD
+/// record is removed (a hold on an archived patch is a stale hold), and the
+/// guard sees no patch, so the issue returns to the eligible pool. The
+/// operator names the issues: the sweep is refused above, never implied.
+fn archive_issues(plan: &ConvertPlan) -> Result<(), CommandFailure> {
+    let held_path = plan
+        .opts
+        .held_file
+        .clone()
+        .unwrap_or_else(|| plan.llm_root.join("held.txt"));
+    let held = load_held(&held_path)?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut issues = plan.opts.issues.clone();
+    issues.sort_unstable();
+    issues.dedup();
+
+    let mut held_records = held;
+    let mut removed_holds = false;
+    for issue in &issues {
+        let patch = plan
+            .examined
+            .iter()
+            .find(|p| p.issue == *issue)
+            .cloned();
+        let Some(patch) = patch else {
+            eprintln!("WARN: #{issue}: no patch on disk to archive — nothing released");
+            continue;
+        };
+        let issue_dir = patch.path.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(issue_dir.join("superseded")).map_err(|error| {
+            CommandFailure::status(
+                format!(
+                    "cannot create the superseded directory for #{issue}: {error}"
+                ),
+                2,
+            )
+        })?;
+        let archive = autospec_core::stored_output::superseded_archive_path(
+            issue_dir,
+            patch
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or_default(),
+            timestamp,
+        );
+        fs::rename(&patch.path, &archive).map_err(|error| {
+            CommandFailure::status(
+                format!(
+                    "cannot archive {} -> {}: {error}",
+                    patch.path.display(),
+                    archive.display()
+                ),
+                2,
+            )
+        })?;
+        if held_records.remove(issue).is_some() {
+            removed_holds = true;
+        }
+        println!(
+            "ARCHIVED #{issue}: {} -> {} (release: archive the superseded output; queue entry released)",
+            patch.path.display(),
+            archive.display()
+        );
+    }
+
+    // Rewrite the ledger only when a hold was removed: a hold on an
+    // archived patch is a stale hold, and a ledger with none must not be
+    // created by the archive.
+    if removed_holds {
+        let mut out = String::new();
+        for record in held_records.values() {
+            out.push_str(&serde_json::to_string(record).expect("HoldRecord serializes"));
+            out.push('\n');
+        }
+        fs::write(&held_path, out).map_err(|error| {
+            CommandFailure::status(
+                format!("cannot write held ledger {}: {error}", held_path.display()),
+                2,
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     let selection = plan.selection();
     let selection_line = selection.line(plan.candidates.len());
+
+    let buffer = plan.buffer();
 
     if plan.opts.as_json {
         let disqualified: Vec<Value> = selection
@@ -753,6 +1174,12 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             "examined": plan.candidates.len(),
             "fresh": fresh,
             "disqualified": disqualified,
+            "buffer": json!({
+                "waiting": buffer.waiting,
+                "queue_entries_blocked": buffer.queue_entries_blocked,
+                "free_slots": plan.opts.free_slots,
+                "alarm": buffer.alarm(plan.opts.free_slots).is_some(),
+            }),
             "summary": selection_line,
         });
         println!("{value}");
@@ -772,6 +1199,13 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         );
     }
     println!("{}", plan.outcome.line("convert", "autospec convert", "enumerate $LLM"));
+    // The buffer, on every run — including an idle one: the line that
+    // makes a silent successful run distinguishable from a broken one
+    // (#4558).
+    println!("{}", buffer.line(plan.opts.free_slots));
+    if let Some(alarm) = buffer.alarm(plan.opts.free_slots) {
+        println!("{alarm}");
+    }
     Ok(())
 }
 
@@ -804,6 +1238,9 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         held: 0,
         skipped: selection.disqualified.len(),
     };
+    // Patches archived this run (superseded by the base): they leave the
+    // buffer entirely — no patch on disk, so no queue entry held.
+    let mut archived = 0;
 
     for c in &selection.fresh {
         let patch = match plan.examined.iter().find(|p| p.issue == c.issue) {
@@ -813,15 +1250,43 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         match apply_one(plan, &repo, &base_ref, &base_sha, patch) {
             ApplyResult::Converted => counters.converted += 1,
             ApplyResult::Held => counters.held += 1,
-            ApplyResult::Archived => counters.skipped += 1,
+            // Not converted and not held: the pass could not tell whether this
+            // patch is good, so it says so and leaves the patch alone.
+            ApplyResult::BaseUnverifiable => counters.skipped += 1,
+            ApplyResult::Archived => {
+                counters.skipped += 1;
+                archived += 1;
+            }
         }
     }
 
     let outcome = PassOutcome::Examined(counters);
-    println!("{}", outcome.line("convert", "autospec convert", "enumerate $LLM"));
+    report_outcome(&outcome);
     let _ = held_path; // the HELD ledger is written inside apply_one
+
+    // The buffer after the run, not just the run itself (#4558 ask 3):
+    // converted patches leave the waiting count (their PR is live) but
+    // stay on disk and still hold their queue entry; archived patches
+    // leave both. A report of only what converted hides how much is still
+    // waiting.
+    let initial = plan.buffer();
+    let buffer = ConversionBuffer {
+        waiting: initial.waiting.saturating_sub(counters.converted).saturating_sub(archived),
+        queue_entries_blocked: initial.queue_entries_blocked.saturating_sub(archived),
+    };
+    println!("{}", buffer.line(plan.opts.free_slots));
+    if let Some(alarm) = buffer.alarm(plan.opts.free_slots) {
+        println!("{alarm}");
+    }
     Ok(())
 }
+
+mod gate;
+
+use gate::{
+    announce_placement, classify_stage_failure, gate_placement, report_base_broken, run_cargo,
+    stage_name, was_never_placed, GateResult,
+};
 
 enum ApplyResult {
     /// The patch passed the gate and a PR was opened.
@@ -831,6 +1296,10 @@ enum ApplyResult {
     /// The patch no longer applies to the base; it was archived, never
     /// discarded, and its issue returns to the eligible pool.
     Archived,
+    /// The base is broken, so the patch could not be verified (issue #4596).
+    /// No HELD line is written: the patch is untouched and is re-offered on the
+    /// next pass, which will verify it against a green base.
+    BaseUnverifiable,
 }
 
 fn apply_one(
@@ -940,6 +1409,17 @@ fn apply_one(
                         record_held_and_result(plan, base_sha, patch, "PR could not be opened")
                     }
                 }
+                GateResult::BaseUnverifiable { stage, detail } => {
+                    teardown_worktree(&worktree);
+                    report_base_broken(base_sha, &stage, &detail);
+                    eprintln!(
+                        "SKIP #{issue}: the `{stage}` stage fails at the base ({base}), so this \
+                         patch cannot be verified; it is untouched and will be re-offered.",
+                        issue = patch.issue,
+                        base = &base_sha[..base_sha.len().min(8)],
+                    );
+                    ApplyResult::BaseUnverifiable
+                }
                 GateResult::Fail(output) => {
                     // Step 6: record a HELD line with the failing-test set from
                     // the authoritative failures: block, never the progress
@@ -1013,16 +1493,6 @@ fn conflict_summary(worktree: &Path) -> String {
     format!("conflict (refusing auto-resolution): {}", parts.join("; "))
 }
 
-enum GateResult {
-    Pass,
-    /// A stage failed; the stage's output.
-    Fail(String),
-    /// Every stage was green but the evidence contradicts the patch: the
-    /// patch adds test functions and the test count is unchanged (issue
-    /// #4532). The reason names the contradiction; it is the HELD reason.
-    Contradiction(String),
-}
-
 /// The gate's test-stage argv at the given scope: `test --no-fail-fast`
 /// plus the scope tokens. The baseline count and the gate's test stage run
 /// this same argv, so they measure the same set of tests.
@@ -1066,6 +1536,7 @@ fn run_gate(
     // (handled separately — its output is the evidence for the
     // unchanged-count contradiction). Each stage is its own cargo argv; the
     // pinned toolchain is inherited from the environment (rust-toolchain.toml).
+    announce_placement();
     let mut stages: Vec<Vec<String>> = vec![vec!["fmt".to_string(), "--check".to_string()]];
     let mut build = vec!["build".to_string()];
     build.extend_from_slice(packages);
@@ -1084,7 +1555,17 @@ fn run_gate(
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            return GateResult::Fail(text);
+            if was_never_placed(&output) {
+                return GateResult::BaseUnverifiable {
+                    stage: stage_name(stage),
+                    detail: format!(
+                        "the work was never placed on an execution host ({}); the patch is \
+                         unmeasured, not defective",
+                        gate_placement()
+                    ),
+                };
+            }
+            return classify_stage_failure(worktree, stage, text);
         }
     }
 
@@ -1098,7 +1579,17 @@ fn run_gate(
         String::from_utf8_lossy(&output.stderr)
     );
     if output.status.code() != Some(0) {
-        return GateResult::Fail(text);
+        if was_never_placed(&output) {
+            return GateResult::BaseUnverifiable {
+                stage: stage_name(&stage),
+                detail: format!(
+                    "the work was never placed on an execution host ({}); the patch is \
+                     unmeasured, not defective",
+                    gate_placement()
+                ),
+            };
+        }
+        return classify_stage_failure(worktree, &stage, text);
     }
 
     // Green stages are not yet a pass: the unchanged-count contradiction
@@ -1243,14 +1734,6 @@ fn run_capture_in(dir: &Path, args: &[&str]) -> Option<Output> {
         .ok()
 }
 
-fn run_cargo(dir: &Path, stage: &[String]) -> Option<Output> {
-    Command::new("cargo")
-        .args(stage)
-        .current_dir(dir)
-        .output()
-        .ok()
-}
-
 fn run_git(args: &[&str]) -> Result<(), CommandFailure> {
     let output = Command::new("git").args(args).output().map_err(|error| {
         CommandFailure::transient(format!("could not run git {args:?}: {error}"))
@@ -1309,6 +1792,65 @@ fn infer_repo() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- batched selection liveness (issue #4587) ---------------------------
+
+    fn index(remote: &[&str], live_prs: &[&str]) -> AttemptIndex {
+        AttemptIndex {
+            remote_branches: remote.iter().map(|s| s.to_string()).collect(),
+            live_pr_branches: live_prs.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_index_reproduces_attempt_liveness_order() {
+        // Absent from the remote is dead WITHOUT consulting pull requests --
+        // the short-circuit that makes a mostly-absent backlog a long run of
+        // ls-remote calls, and the reason batching them is worth anything.
+        assert_eq!(index(&[], &["conv-1"]).liveness("conv-1"), BranchLiveness::Dead);
+        // Present with an open or merged pull request: live.
+        assert_eq!(index(&["conv-2"], &["conv-2"]).liveness("conv-2"), BranchLiveness::Live);
+        // Present with no live pull request is abandoned, and abandoned is not
+        // live: redoing it overwrites the stale branch.
+        assert_eq!(index(&["conv-3"], &[]).liveness("conv-3"), BranchLiveness::Dead);
+        // An empty branch name is not an attempt.
+        assert_eq!(index(&[], &[]).liveness("   "), BranchLiveness::Dead);
+    }
+
+    #[test]
+    fn a_live_pull_request_on_a_similar_branch_does_not_leak() {
+        // Membership is exact: a prefix match is not a branch match, or the
+        // pass would treat conv-12 as keeping conv-1 in play.
+        let i = index(&["conv-1", "conv-12"], &["conv-12"]);
+        assert_eq!(i.liveness("conv-12"), BranchLiveness::Live);
+        assert_eq!(i.liveness("conv-1"), BranchLiveness::Dead);
+    }
+
+    #[test]
+    fn pull_request_heads_parse_regardless_of_field_order() {
+        let body = r#"[{"headRefName":"conv-7","state":"OPEN"},
+                       {"state":"MERGED","headRefName":"conv-8"},
+                       {"state":"CLOSED","headRefName":"conv-9"}]"#;
+        assert_eq!(
+            parse_pull_request_heads(body),
+            vec![
+                ("conv-7".to_string(), "OPEN".to_string()),
+                ("conv-8".to_string(), "MERGED".to_string()),
+                ("conv-9".to_string(), "CLOSED".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_open_and_merged_pull_requests_are_live() {
+        // CLOSED is the abandoned case the pass must re-offer, not skip.
+        let body = r#"[{"headRefName":"conv-9","state":"CLOSED"}]"#;
+        let live: Vec<_> = parse_pull_request_heads(body)
+            .into_iter()
+            .filter(|(_, state)| state == "OPEN" || state == "MERGED")
+            .collect();
+        assert!(live.is_empty(), "CLOSED must not count as live");
+    }
 
     #[test]
     fn the_unfed_line_is_not_the_idle_line() {
@@ -1588,6 +2130,184 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // --- the conversion buffer and its alarm (issue #4558 ask 3) ----------
+
+    fn candidate(issue: u64, branch: bool, pr: bool, held: bool) -> PatchCandidate {
+        PatchCandidate {
+            issue,
+            patch_key: format!("patch-{issue}"),
+            branch_exists: branch,
+            pull_request_exists: pr,
+            held_recorded: held,
+        }
+    }
+
+    #[test]
+    fn the_buffer_counts_waiting_and_blocked() {
+        let candidates = vec![
+            candidate(1, false, false, false), // fresh: waiting, blocked
+            candidate(2, true, false, false),  // branch: waiting, blocked
+            candidate(3, false, true, false),  // live PR: not waiting, still blocked
+            candidate(4, false, false, true),  // held: waiting, blocked
+        ];
+        let buffer = buffer_from_candidates(&candidates);
+        // Waiting = the patches with no live PR; blocked = every patch on
+        // disk — the dispatch guard's condition is presence, not PR
+        // liveness.
+        assert_eq!(buffer.waiting, 3);
+        assert_eq!(buffer.queue_entries_blocked, 4);
+    }
+
+    #[test]
+    fn the_alarm_fires_only_when_blocked_exceeds_free_slots() {
+        let buffer = buffer_from_candidates(&[
+            candidate(1, false, false, true),
+            candidate(2, false, false, true),
+        ]);
+        // Two queue entries blocked.
+        let alarm = buffer.alarm(Some(1));
+        assert!(alarm.is_some(), "2 blocked > 1 free slot: the fleet is wasting GPU time");
+        let message = alarm.unwrap();
+        assert!(message.starts_with("ALARM: 2 queue entries"), "{message}");
+        // At parity the slots are exactly full: no GPU time is wasted.
+        assert!(
+            buffer.alarm(Some(2)).is_none(),
+            "exceeds, not meets — at parity the fleet is not idling"
+        );
+        assert!(buffer.alarm(Some(3)).is_none());
+        // No slot count given: report only, never alarm.
+        assert!(buffer.alarm(None).is_none());
+    }
+
+    #[test]
+    fn the_buffer_line_names_the_numbers_on_every_run() {
+        let buffer = buffer_from_candidates(&[candidate(1, false, false, true)]);
+        let line = buffer.line(Some(22));
+        assert!(line.contains("waiting=1"), "{line}");
+        assert!(line.contains("queue_entries_blocked=1"), "{line}");
+        assert!(line.contains("free_slots=22"), "{line}");
+        // Without a slot count the buffer is still reported: the idle-run
+        // line exists so a silent successful run is distinguishable from a
+        // broken one.
+        let plain = buffer.line(None);
+        assert!(plain.contains("waiting=1"), "{plain}");
+        assert!(!plain.contains("free_slots"), "{plain}");
+    }
+
+    #[test]
+    fn free_slots_is_parsed_and_rejected_when_not_an_integer() {
+        let opts = parse_options(&["--free-slots".to_string(), "22".to_string()]).unwrap();
+        assert_eq!(opts.free_slots, Some(22));
+        let err = parse_options(&["--free-slots".to_string(), "abc".to_string()]).unwrap_err();
+        assert!(err.message.contains("--free-slots"), "{}", err.message);
+    }
+
+    // --- the explicit archive exit (issue #4558 ask 4) --------------------
+
+    fn plan_in(root: &Path, issues: Vec<u64>) -> ConvertPlan {
+        let opts = Options {
+            llm_root: Some(root.to_path_buf()),
+            repo: None,
+            base: "main".to_string(),
+            held_file: None,
+            branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
+            free_slots: None,
+            apply: false,
+            archive: true,
+            as_json: false,
+            convert_ledger: None,
+            issues,
+        };
+        build_plan(opts, root.to_path_buf()).unwrap()
+    }
+
+    #[test]
+    fn archive_moves_the_patch_and_releases_the_queue_entry() {
+        let dir = std::env::temp_dir().join(format!("convert-archive-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("llm");
+        let patch_dir = root.join("node-a").join("out").join("issue-4558");
+        fs::create_dir_all(&patch_dir).unwrap();
+        fs::write(patch_dir.join("changes.patch"), "diff --git a/x b/x\n").unwrap();
+        // A hold for the archived issue, and one for another issue that
+        // must survive the archive.
+        let archived_hold =
+            HoldRecord::new(4558, "k1", "abc123", Vec::new(), "shell-only").unwrap();
+        let other_hold =
+            HoldRecord::new(9999, "k2", "abc123", Vec::new(), "conflict in a").unwrap();
+        let held_path = root.join("held.txt");
+        let mut text = String::new();
+        text.push_str(&serde_json::to_string(&archived_hold).unwrap());
+        text.push('\n');
+        text.push_str(&serde_json::to_string(&other_hold).unwrap());
+        text.push('\n');
+        fs::write(&held_path, text).unwrap();
+
+        let plan = plan_in(&root, vec![4558]);
+        archive_issues(&plan).unwrap();
+
+        // The patch moved under superseded/ — archival, never deletion.
+        assert!(!patch_dir.join("changes.patch").exists());
+        let archived: Vec<PathBuf> = fs::read_dir(patch_dir.join("superseded"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(archived.len(), 1, "exactly one archived copy");
+        let name = archived[0]
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        // The stem is kept and the retirement timestamp is appended.
+        assert!(name.starts_with("changes-"), "{name}");
+        assert!(name.ends_with(".patch"), "{name}");
+        assert_eq!(
+            fs::read_to_string(&archived[0]).unwrap(),
+            "diff --git a/x b/x\n",
+            "the content is preserved, not lost"
+        );
+        // The archived issue's hold is removed; the other survives.
+        let remaining = load_held(&held_path).unwrap();
+        assert!(!remaining.contains_key(&4558), "a hold on an archived patch is a stale hold");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[&9999].reason, "conflict in a");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_of_an_issue_without_a_patch_is_a_warning_not_an_error() {
+        let dir = std::env::temp_dir()
+            .join(format!("convert-archive-warn-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("llm");
+        let patch_dir = root.join("node-a").join("out").join("issue-7");
+        fs::create_dir_all(&patch_dir).unwrap();
+        fs::write(patch_dir.join("changes.patch"), "diff --git a/x b/x\n").unwrap();
+
+        let plan = plan_in(&root, vec![1234]); // no patch on disk for 1234
+        assert!(
+            archive_issues(&plan).is_ok(),
+            "naming an issue with no patch warns; it does not fail the archive"
+        );
+        // Nothing was moved.
+        assert!(patch_dir.join("changes.patch").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bare_archive_sweep_is_refused() {
+        // The incident's failure mode: a sweep that frees every queue entry
+        // at once. Archive requires explicit issue numbers.
+        let err = convert(&["--archive".to_string()]).unwrap_err();
+        assert!(err.message.contains("--archive requires explicit ISSUE numbers"), "{}", err.message);
+        // Nor does it combine with the mutating apply path.
+        let err = convert(&["--archive".to_string(), "4558".to_string(), "--apply".to_string()])
+            .unwrap_err();
+        assert!(err.message.contains("does not combine with --apply"), "{}", err.message);
+    }
+
     #[test]
     fn the_one_off_converter_writes_a_ledger_the_pass_reads() {
         let dir = std::env::temp_dir().join(format!("convert-prose-{}", std::process::id()));
@@ -1615,7 +2335,9 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             base: "main".to_string(),
             held_file: Some(out.clone()),
             branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
+            free_slots: None,
             apply: false,
+            archive: false,
             as_json: false,
             convert_ledger: Some(prose.clone()),
             issues: Vec::new(),
@@ -1634,5 +2356,58 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
         assert_eq!(held[&9999].patch_key, "unrecorded-9999");
         assert_eq!(held[&9999].reason, "clippy=2");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+
+
+    // --- #4604: a stated invariant must be consulted, not only tested --------
+
+    #[test]
+    fn a_reconciling_pass_reports_its_line_and_nothing_else() {
+        let outcome = PassOutcome::Examined(PassCounters {
+            examined: 10,
+            converted: 3,
+            held: 2,
+            skipped: 1,
+        });
+        let (line, alarm) = outcome_report(&outcome);
+        assert!(line.contains("examined"), "the line still carries the counts");
+        assert!(alarm.is_none(), "sound arithmetic needs no alarm");
+    }
+
+    #[test]
+    fn a_pass_that_acted_on_more_than_it_examined_is_not_reported_as_fact() {
+        // The impossible case: more converted than examined. Before #4604 this
+        // printed exactly like a real result.
+        let outcome = PassOutcome::Examined(PassCounters {
+            examined: 1,
+            converted: 5,
+            held: 0,
+            skipped: 0,
+        });
+        let (line, alarm) = outcome_report(&outcome);
+        assert!(
+            alarm.is_some(),
+            "impossible counters must not be presented as a result"
+        );
+        assert!(
+            line.contains("examined"),
+            "the counters are still printed -- they are the evidence for the defect"
+        );
+    }
+
+    #[test]
+    fn an_unfed_pass_has_nothing_to_reconcile_and_raises_no_alarm() {
+        let (_line, alarm) = outcome_report(&PassOutcome::Unfed);
+        assert!(alarm.is_none());
+    }
+
+    #[test]
+    fn an_idle_pass_and_an_unfed_pass_still_read_differently() {
+        // The distinction this type exists to preserve: nothing to do is not
+        // the same as never given anything.
+        let (idle, _) = outcome_report(&PassOutcome::Examined(PassCounters::default()));
+        let (unfed, _) = outcome_report(&PassOutcome::Unfed);
+        assert_ne!(idle, unfed);
     }
 }

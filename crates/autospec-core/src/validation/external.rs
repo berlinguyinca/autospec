@@ -419,6 +419,20 @@ fn run_shell_lint(id: &str, required: bool, root: &Path) -> CheckResult {
     if captured.result.is_unmeasured() {
         return captured.result;
     }
+    // A run that produced no exit status was not a clean run. Reading its
+    // (empty) output as "no findings" turns a linter that never reported into a
+    // green check -- the strongest possible claim from the weakest possible
+    // evidence. Seen intermittently under a loaded machine, where the spawn
+    // yields no status and no bytes; the check then passed silently.
+    //
+    // Nothing was measured, so that is what it says.
+    if captured.result.exit_code.is_none() {
+        return CheckResult::unmeasured(
+            id,
+            required,
+            "shellcheck produced no exit status, so its output cannot be read as a result",
+        );
+    }
     let stdout = String::from_utf8_lossy(&captured.stdout);
     let findings: Vec<ShellLintFinding> =
         stdout.lines().filter_map(shell_lint_gcc_finding).collect();
