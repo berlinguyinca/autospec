@@ -853,7 +853,7 @@ fn tick(args: &[String]) -> Result<(), CommandFailure> {
         }
     }
 
-    verdict_exit(!report.dispatched_anything() && !report.skipped().is_empty())
+    verdict_exit(report.stalled())
 }
 
 /// `schedule` — audit the refresh-queue schedule as a first-class component
@@ -1668,11 +1668,10 @@ mod lifecycle_tests {
     /// reference topology's producer within the freshness threshold.
     fn live_queue(dir: &Path, entries: &[u64], stamped_at: u64) -> PathBuf {
         let path = dir.join("queue.json");
-        let queue = QueueFile {
-            entries: entries.to_vec(),
-            refreshed_at: Some(stamped_at),
-            refreshed_by: Some("refresh-queue".to_string()),
-        };
+        let mut queue = QueueFile::default();
+        queue.entries = entries.to_vec();
+        queue.refreshed_at = Some(stamped_at);
+        queue.refreshed_by = Some("refresh-queue".to_string());
         fs::write(&path, queue.render()).expect("queue artifact");
         path
     }
