@@ -73,10 +73,7 @@ const NOT_BRACKETABLE_FIRST: [char; 9] = ['^', '(', ')', '*', '+', '?', '|', '{'
 /// - empty -> `Err(Empty)`
 /// - `^foo`, `]foo`, ... -> `Err(FirstCharNotBracketable)`
 pub fn bracket_pattern(pattern: &str) -> Result<String, BracketError> {
-    let first = pattern
-        .chars()
-        .next()
-        .ok_or(BracketError::Empty)?;
+    let first = pattern.chars().next().ok_or(BracketError::Empty)?;
     if first == '[' {
         return Ok(pattern.to_string());
     }
@@ -124,14 +121,20 @@ impl KillReport {
             self.pattern, self.bracketed, self.signal
         );
         if self.killed.is_empty() && self.failed.is_empty() {
-            out.push_str(": matched 0 pid(s) — a kill that matches nothing is a false \
-                         negative, not a clean state; check the pattern")
+            out.push_str(
+                ": matched 0 pid(s) — a kill that matches nothing is a false \
+                         negative, not a clean state; check the pattern",
+            )
         } else {
             if !self.killed.is_empty() {
                 out.push_str(&format!(
                     ": killed {} pid(s) ({})",
                     self.killed.len(),
-                    self.killed.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                    self.killed
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
             if !self.failed.is_empty() {
@@ -149,7 +152,11 @@ impl KillReport {
                 out.push_str(&format!(
                     "; excluded {} session pid(s) ({})",
                     self.excluded.len(),
-                    self.excluded.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                    self.excluded
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
         }
@@ -289,5 +296,3 @@ fn signal_name(signal: Signal) -> String {
         other => format!("{other:?}"),
     }
 }
-
-
