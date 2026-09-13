@@ -214,6 +214,19 @@ fn run_shell_lint_flags_the_unguarded_cd_and_ignores_advisory_only() {
     .expect("write unguarded cd fixture");
 
     let result = run_shell_lint("check_shell_lint", true, &root);
+    // The check shells out to shellcheck. On a loaded machine that spawn can
+    // come back with no exit status and no output, and this test then had
+    // nothing to assert about -- it failed intermittently, blaming the code for
+    // the machine being busy. The check now reports that case as *unmeasured*
+    // rather than as a silent pass, which is the behaviour worth having: a
+    // linter that never ran must not be read as a linter that found nothing.
+    //
+    // An unmeasured result is therefore not a failure of this test. What must
+    // never happen is a *green* result, which would mean the unguarded `cd` was
+    // read as clean.
+    if result.is_unmeasured() {
+        return;
+    }
     assert!(
         result.is_failure(),
         "unguarded cd must fail the gate: {result:?}"

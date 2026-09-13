@@ -175,6 +175,7 @@ commands! {
     validate => "Run configured validation gates", diagnostic;
     run => "Execute the spec queue", diagnostic;
     runtime => "Inspect runtime ownership policy", direct;
+    process_termination as "process-kill" => "Terminate processes by command-line pattern (self-safe: bracketed pattern + session exclusion)", status_code;
     resume => "Resume an interrupted run", diagnostic;
     report => "Render release and run reports", diagnostic;
     showcase => "Render a local demo showcase", diagnostic;
