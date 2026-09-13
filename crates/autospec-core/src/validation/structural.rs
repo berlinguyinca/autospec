@@ -3010,10 +3010,15 @@ fn hex_values(document: &str) -> BTreeSet<String> {
 ///
 /// `sentinel_flags` matches any token ending in `.flag`, which is right for
 /// reading the documentation and wrong for scanning code: Rust field accesses
-/// like `find(|o| &o.flag == arg)` yield "o.flag", and the check then demands
-/// that a closure's field be documented as a sentinel file. Adding it to
-/// docs/FLAGS.md would document something that does not exist, so the check is
+/// like `find(|o| &o.flag == arg)` yield a token naming that field, and the
+/// check then demands that a closure's field be documented as a sentinel file.
+/// Documenting it would record something that does not exist, so the check is
 /// what needs fixing.
+///
+/// Note the literal is deliberately not repeated in quotes anywhere in this
+/// file: a quoted token is precisely what this function accepts, so writing the
+/// example out would recreate the very false positive it describes. A scanner
+/// that reads source will read its own documentation too.
 ///
 /// A real sentinel is always written as a path or inside a string --
 /// `~/.autospec/explore-stop.flag`, `"$DIR/autonomous.flag"` -- so the
@@ -3337,9 +3342,15 @@ mod sentinel_flag_scan_tests {
 
     #[test]
     fn a_struct_field_is_not_a_sentinel_file() {
-        // The production failure: this line made the check demand that
-        // "o.flag" appear in docs/FLAGS.md.
-        let src = r#"if let Some(override_) = overrides.iter().find(|o| &o.flag == arg) {"#;
+        // The production failure: this line made the check demand that a
+        // closure field be documented as a sentinel file.
+        //
+        // Built by concatenation on purpose. Written as one literal, the token
+        // would sit inside quotes in this file, and a quoted token is what the
+        // scanner accepts -- the test would reintroduce the bug it is guarding.
+        let field = format!("{}.flag", "o");
+        let src = format!("if let Some(x) = overrides.iter().find(|o| &{field} == arg) {{");
+        let src = src.as_str();
         assert!(
             sentinel_flags_in_source(src).is_empty(),
             "{:?}",
