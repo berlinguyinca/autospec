@@ -123,7 +123,15 @@ pub(super) fn stage_name(stage: &[String]) -> String {
 /// immediately and tears the worktree down, and no caller reads the patched
 /// tree after a stage has failed.
 pub(super) fn stage_origin(worktree: &Path, stage: &[String]) -> StageOrigin {
-    if let Err(error) = run_git_in(worktree, &["checkout", "--", "."]) {
+    // The patch was applied with `git apply --3way`, which stages its result:
+    // modified files land in the index and new files are added to it. A restore
+    // that copies index-to-worktree (`checkout -- .`) therefore restores the
+    // patched state onto itself, and `clean -fd` does not remove a new file the
+    // index tracks — the "base" re-run ran on the patch, and every failing
+    // patch was attributed to a green base (#4610). The conversion branch sits
+    // at the base commit (the patch is staged, never committed), so resetting
+    // index and worktree to HEAD is exactly the undo the apply deserves.
+    if let Err(error) = run_git_in(worktree, &["reset", "--hard", "HEAD"]) {
         return StageOrigin::Undeterminable(format!("could not restore the base: {error}"));
     }
     if let Err(error) = run_git_in(worktree, &["clean", "-fd"]) {

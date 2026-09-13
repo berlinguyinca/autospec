@@ -62,12 +62,14 @@ pub(crate) fn held_json(plan: &ConvertPlan, holds: &[LanguageHold]) -> Vec<Value
 /// The plan-mode `HOLD` lines, one per language-held patch.
 pub(crate) fn render_holds(plan: &ConvertPlan, holds: &[LanguageHold]) {
     for hold in holds {
-        println!(
+        // Flushed like every other decision line: a hold is a verdict, and a
+        // verdict must not sit in the block buffer (#4572).
+        super::progress::report_line(&format!(
             "  HOLD  #{issue} ({reason}) {patch_key}",
             issue = hold.candidate.issue,
             reason = language_hold_reason(plan, hold),
             patch_key = hold.candidate.patch_key
-        );
+        ));
     }
 }
 

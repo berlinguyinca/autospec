@@ -87,7 +87,11 @@ use serde_json::{json, Value};
 
 use super::claim::{branch_liveness, local_branch_checked_out, BranchLiveness};
 use super::CommandFailure;
+mod git;
 mod language;
+mod progress;
+
+use git::{run_capture_in, run_git, run_git_capture, run_git_in, teardown_worktree};
 
 /// The schema emitted by `autospec convert --json`.
 pub const CONVERT_PLAN_SCHEMA: &str = "autospec.convert-plan.v1";
@@ -912,6 +916,12 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
         .held_file
         .clone()
         .unwrap_or_else(|| llm_root.join("held.txt"));
+    if opts.as_json {
+        // `--json` reserves stdout for the plan; the banner goes to stderr.
+        progress::banner_quiet(&held_path);
+    } else {
+        progress::banner(&held_path);
+    }
     let held = load_held(&held_path)?;
     let base_ref = format!("origin/{}", opts.base);
 
@@ -1166,15 +1176,19 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
 
     println!("{selection_line}");
     for c in &selection.fresh {
-        println!("  FRESH #{issue} {patch_key}", issue = c.issue, patch_key = c.patch_key);
+        progress::report_line(&format!(
+            "  FRESH #{issue} {patch_key}",
+            issue = c.issue,
+            patch_key = c.patch_key
+        ));
     }
     for (c, reason) in &selection.disqualified {
-        println!(
+        progress::report_line(&format!(
             "  SKIP  #{issue} ({reason}) {patch_key}",
             issue = c.issue,
             reason = reason.as_str(),
             patch_key = c.patch_key
-        );
+        ));
     }
     language::render_holds(plan, &selection.language_held);
     println!("{}", plan.outcome.line("convert", "autospec convert", "enumerate $LLM"));
@@ -1228,7 +1242,10 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             None => continue,
         };
         match apply_one(plan, &repo, &base_ref, &base_sha, patch) {
-            ApplyResult::Converted => counters.converted += 1,
+            ApplyResult::Converted => {
+                counters.converted += 1;
+                progress::converted(patch.issue, &patch.patch_key);
+            }
             ApplyResult::Held => counters.held += 1,
             // Not converted and not held: the pass could not tell whether this
             // patch is good, so it says so and leaves the patch alone.
@@ -1396,7 +1413,10 @@ fn apply_one(
         }
         ApplyLifecycle::Applied => {
             // Step 4: the full gate on the pinned toolchain, at the derived scope.
-            let gate = run_gate(&worktree, &packages, tests_added, baseline_tests);
+            // The gate begins loudly: a verdict can take 11+ minutes, and a log
+            // silent between start and verdict reads as a hang (#4572).
+            progress::gate_scope(patch.issue, &packages);
+            let gate = run_gate(patch.issue, &worktree, &packages, tests_added, baseline_tests);
             match gate {
                 GateResult::Pass => {
                     // Step 5: open a PR per passing patch.
@@ -1502,6 +1522,7 @@ fn run_test_count(worktree: &Path, packages: &[String]) -> Option<u64> {
 /// gate's scope did not cover the change (issue #4532), and the gate fails
 /// with the contradiction named.
 fn run_gate(
+    issue: u64,
     worktree: &Path,
     packages: &[String],
     tests_added: usize,
@@ -1521,6 +1542,7 @@ fn run_gate(
     stages.push(clippy);
 
     for stage in &stages {
+        progress::gate_stage(issue, &stage_name(stage));
         let Some(output) = run_cargo(worktree, stage) else {
             return GateResult::Fail(format!("cargo {stage:?}: failed to spawn"));
         };
@@ -1545,6 +1567,7 @@ fn run_gate(
     }
 
     let stage = test_stage(packages);
+    progress::gate_stage(issue, &stage_name(&stage));
     let Some(output) = run_cargo(worktree, &stage) else {
         return GateResult::Fail(format!("cargo {stage:?}: failed to spawn"));
     };
@@ -1706,64 +1729,8 @@ fn record_held_and_result(
             }
         }
     }
-    println!("  HELD  #{issue}: {reason}", issue = patch.issue);
+    progress::held(patch.issue, reason);
     ApplyResult::Held
-}
-
-fn teardown_worktree(worktree: &Path) {
-    let _ = run_git(&["worktree", "remove", "--force", worktree.to_str().unwrap_or_default()]);
-    let _ = run_git(&["worktree", "prune"]);
-    let _ = fs::remove_dir_all(worktree);
-}
-
-/// A captured git/cargo run: `Ok(None)` on a spawn error, else the `Output`.
-fn run_capture_in(dir: &Path, args: &[&str]) -> Option<Output> {
-    Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .ok()
-}
-
-fn run_git(args: &[&str]) -> Result<(), CommandFailure> {
-    let output = Command::new("git").args(args).output().map_err(|error| {
-        CommandFailure::transient(format!("could not run git {args:?}: {error}"))
-    })?;
-    if !output.status.success() {
-        return Err(CommandFailure::status(
-            format!("git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr).trim()),
-            output.status.code().unwrap_or(1),
-        ));
-    }
-    Ok(())
-}
-
-fn run_git_in(dir: &Path, args: &[&str]) -> Result<(), CommandFailure> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .map_err(|error| CommandFailure::transient(format!("could not run git in {dir:?}: {error}")))?;
-    if !output.status.success() {
-        return Err(CommandFailure::status(
-            format!("git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr).trim()),
-            output.status.code().unwrap_or(1),
-        ));
-    }
-    Ok(())
-}
-
-fn run_git_capture(args: &[&str]) -> Result<String, CommandFailure> {
-    let output = Command::new("git").args(args).output().map_err(|error| {
-        CommandFailure::transient(format!("could not run git {args:?}: {error}"))
-    })?;
-    if !output.status.success() {
-        return Err(CommandFailure::status(
-            format!("git {args:?} failed"),
-            output.status.code().unwrap_or(1),
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Infer `OWNER/NAME` from `gh`, best-effort. `None` on any failure — the
