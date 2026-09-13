@@ -789,14 +789,14 @@ fn json_string_field(chunk: &str, field: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// The gate scope tokens for the files a patch touches, derived from the
-/// patch's touched crates by the shared definition
-/// ([`autospec_core::prefilter_scope::derive_prefilter_scope`]) — never
-/// hard-coded here (issue #4532): the crates the patch touches are gated
-/// (`-p <crate>` per crate), and a patch that touches no resolvable crate
-/// gates `--workspace`. Fail-closed: being slow is recoverable; being
-/// narrow is not. The pre-filter and the gate use the same derivation, so
-/// the two scopes cannot drift.
+/// The gate scope tokens for the files a patch touches, from the shared
+/// definition ([`autospec_core::prefilter_scope::derive_prefilter_scope`])
+/// — never hard-coded here (issue #4532): the crates the patch touches are
+/// gated (`-p <crate>` per crate), and a patch that touches no resolvable
+/// crate — or any unattributable path, like a root `Cargo.toml` (#4554) —
+/// gates `--workspace`. Fail-closed: being slow is recoverable; narrow is
+/// not. The pre-filter and gate share the derivation, so the scopes
+/// cannot drift.
 fn gate_packages(files: &[String]) -> Vec<String> {
     derive_prefilter_scope(files).tokens()
 }
@@ -1862,15 +1862,15 @@ mod tests {
         );
         // No resolvable crate: the workspace (fail-closed default).
         assert_eq!(gate_packages(&["scripts/x.sh".to_string()]), vec!["--workspace".to_string()]);
-        // The scope is the patch's touched crates, not the crates plus
-        // "every other file": a crate patch with a docs-only file beside it
-        // gates that crate (the shared definition, issue #4532).
+        // A crate patch with an unattributable file beside it (a README)
+        // gates the workspace: the unattributable path may break a crate
+        // the scope never names — it widens, never is dropped (#4554).
         assert_eq!(
             gate_packages(&[
                 "crates/autospec-core/src/a.rs".to_string(),
                 "README.md".to_string()
             ]),
-            vec!["-p".to_string(), "autospec-core".to_string()]
+            vec!["--workspace".to_string()]
         );
         // No crate is hard-coded: a patch touching a crate this function
         // has never named gates that crate. The pre-#4532 code could only

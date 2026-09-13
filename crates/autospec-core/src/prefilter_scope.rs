@@ -22,13 +22,17 @@
 //!
 //! The contract this module makes checkable:
 //!
-//! 1. **The pre-filter's scope is derived from the patch's touched crates,
+//! 1. **The pre-filter's scope is derived from the patch's touched paths,
 //!    or is the full workspace — never a fixed single crate.**
 //!    [`crates_touched`] reads the crate set out of the patch's paths and
 //!    [`derive_prefilter_scope`] turns it into a [`CheckScope`]: one crate
-//!    gets `-p <crate>`, several get all of them, and no resolvable crate
-//!    falls back to `--workspace` (the conservative scope, fail-closed).
-//!    A fixed single crate cannot be produced by the derivation at all.
+//!    gets `-p <crate>`, several get all of them, and a patch that touches
+//!    no resolvable crate — **or any path that cannot be attributed to a
+//!    crate**, such as a root `Cargo.toml` beside a crate patch (#4554)
+//!    — falls back to `--workspace` (the conservative scope, fail-closed in
+//!    both directions: an unattributable path widens the scope, never is
+//!    dropped from it). A fixed single crate cannot be produced by the
+//!    derivation at all.
 //! 2. **A batch failure reports the scope gap.** [`scope_gaps`] compares
 //!    each member's recorded pre-filter scope against the gate's scope, and
 //!    [`batch_failure_line`] renders the verdict: every member admitted at
@@ -96,8 +100,33 @@ impl fmt::Display for CheckScope {
     }
 }
 
+/// Whether a path attributes to a crate: it falls under `crates/<name>/`
+/// for a real `<name>`. The same rule [`crates_touched`] applies per path.
+pub fn path_attributes_to_crate(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let mut parts = normalized.split('/');
+    parts.next() == Some("crates")
+        && parts
+            .next()
+            .is_some_and(|name| !name.is_empty() && name != "." && name != "..")
+}
+
+/// Whether any path names work that cannot be attributed to a crate
+/// (#4554): a root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, a
+/// shared config, a doc, anything outside `crates/<name>/`. Such a path's
+/// blast radius cannot be bounded by the crates it sits beside — a root
+/// manifest edit can break a crate the scope never names — so it widens
+/// the scope instead of being dropped from it.
+pub fn has_unattributable_path(paths: &[impl AsRef<str>]) -> bool {
+    paths
+        .iter()
+        .any(|path| !path_attributes_to_crate(path.as_ref()))
+}
+
 /// The crates a patch touches: every path under `crates/<name>/` (at any
-/// depth) claims `<name>`. Paths outside a crate claim nothing.
+/// depth) claims `<name>`. Paths outside a crate claim nothing (but see
+/// [`has_unattributable_path`]: claiming nothing is not the same as being
+/// inert).
 pub fn crates_touched(paths: &[impl AsRef<str>]) -> BTreeSet<String> {
     let mut crates = BTreeSet::new();
     for path in paths {
@@ -117,15 +146,24 @@ pub fn crates_touched(paths: &[impl AsRef<str>]) -> BTreeSet<String> {
 
 /// The pre-filter's scope for a patch, derived from the patch's touched
 /// crates: the crates themselves, or the full workspace when the patch
-/// touches no resolvable crate (fail-closed: an unresolvable patch narrows
-/// nothing).
+/// touches no resolvable crate **or any path that cannot be attributed to
+/// a crate** (fail-closed in both directions, #4554: an unattributable
+/// path — a root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, a
+/// shared config — may break a crate the scope never names, so it widens
+/// the scope instead of being dropped from it).
+///
+/// The widening is deliberately blunt: a `README.md` beside a crate patch
+/// costs a workspace gate rather than a `-p` one. That is the cheap error
+/// direction — one slower pre-filter — while a dropped path is the
+/// expensive one: a batch failure that must be bisected back to the file
+/// no scope examined.
 ///
 /// A fixed single crate is not a possible output: the scope is a function
 /// of the patch, and the incident's `-p autospec-core` on an
 /// `autospec-cli` patch is exactly what this refuses to derive.
 pub fn derive_prefilter_scope(paths: &[impl AsRef<str>]) -> CheckScope {
     let crates = crates_touched(paths);
-    if crates.is_empty() {
+    if crates.is_empty() || has_unattributable_path(paths) {
         CheckScope::Workspace
     } else {
         CheckScope::Crates(crates)
