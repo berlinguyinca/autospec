@@ -8,10 +8,14 @@
 
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::Instant;
 
 use autospec_core::toolchain_preflight;
 
+mod gate_run;
+
 use super::run_git_in;
+use gate_run::{gate_timeout, run_bounded, timeout_secs_from, BoundedRun, TIMEOUT_MARKER};
 
 /// The exit status a gate wrapper uses to say "I could not place this work".
 ///
@@ -44,9 +48,7 @@ pub(super) fn gate_wrapper() -> Vec<String> {
 /// in parallel cannot do safely.
 pub(super) fn parse_gate_wrapper(raw: Option<&str>) -> Vec<String> {
     match raw {
-        Some(raw) if !raw.trim().is_empty() => {
-            raw.split_whitespace().map(str::to_string).collect()
-        }
+        Some(raw) if !raw.trim().is_empty() => raw.split_whitespace().map(str::to_string).collect(),
         _ => Vec::new(),
     }
 }
@@ -71,7 +73,99 @@ pub(super) fn run_cargo(dir: &Path, stage: &[String]) -> Option<Output> {
         }
         None => Command::new("cargo"),
     };
-    command.args(stage).current_dir(dir).output().ok()
+    command.args(stage).current_dir(dir);
+    if let Some(target) = gate_target_dir() {
+        command.env("CARGO_TARGET_DIR", target);
+    }
+    announce_target_dir();
+    let bound = gate_timeout();
+    let started = Instant::now();
+    let run = run_bounded(command, bound.as_duration()).ok()?;
+    match run {
+        BoundedRun::Finished(output) => {
+            gate_run::report_stage_elapsed(&stage_name(stage), started.elapsed().as_secs());
+            Some(output)
+        }
+        BoundedRun::TimedOut(mut output) => {
+            let secs = bound.as_secs().unwrap_or(0);
+            let mut marker =
+                format!("{TIMEOUT_MARKER} after {secs}s and was killed\n").into_bytes();
+            marker.append(&mut output.stderr);
+            output.stderr = marker;
+            Some(output)
+        }
+    }
+}
+
+/// The build cache shared across every patch's gate.
+///
+/// A fresh worktree per patch is the right isolation for *source*; isolating
+/// the *artifacts* is pure waste, because an artifact is a pure function of
+/// its inputs and cargo already keys them that way. Measured on the fleet: a
+/// per-patch `target/` rebuilt the whole dependency tree from
+/// `unicode_ident` for every patch — 4.4 GB and 10–16 hours for a batch of
+/// 40 (#4567). Pointing every gate at one shared cache means a patch
+/// rebuilds only the workspace crates it changes, plus the test binaries.
+///
+/// The operator overrides the location with `AUTOSPEC_CONVERT_TARGET_DIR`,
+/// which is the one case the default gets wrong: with `AUTOSPEC_GATE_WRAPPER`
+/// set the gate's `cargo` runs on the execution host the wrapper names
+/// (#4598), where this machine's `~/.cache` is not the filesystem being
+/// built on.
+pub(super) fn gate_target_dir() -> Option<std::path::PathBuf> {
+    parse_gate_target_dir(std::env::var("AUTOSPEC_CONVERT_TARGET_DIR").ok().as_deref())
+        .or_else(default_gate_target_dir)
+}
+
+/// The override for a raw setting, split out from the environment lookup so
+/// it is testable without mutating process-wide state.
+pub(super) fn parse_gate_target_dir(raw: Option<&str>) -> Option<std::path::PathBuf> {
+    raw.map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// The default cache location: this machine's `~/.cache`, created on first
+/// use. A host without a home directory gets no shared cache, and the gate
+/// runs exactly as before (its own `target/` in the worktree).
+fn default_gate_target_dir() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| Path::new(&home).join(".cache/autospec-convert-target"))
+}
+
+/// Whether the shared cache already holds built artifacts, for the report.
+/// Any compiled file under a profile's `deps/` is enough: the first gate of
+/// a pass fills the cache, and every gate after it rebuilds workspace
+/// crates, not the tree — the warm/cold difference is the whole cost of
+/// #4567. Cargo keeps artifacts under `debug/deps` and `release/deps`, not
+/// at the cache root, so that is where the check looks.
+pub(super) fn cache_is_warm(dir: &Path) -> bool {
+    ["debug", "release"].iter().any(|profile| {
+        std::fs::read_dir(dir.join(profile).join("deps")).is_ok_and(|mut e| e.next().is_some())
+    })
+}
+
+/// Say once per pass where the gate's build cache is, and whether it is
+/// warm.
+///
+/// A cold first gate costs the whole dependency tree; the line exists so
+/// that cost is visible in the log instead of being diagnosed later as a
+/// hang. The warm/cold fact is per pass (the cache is shared), so it is
+/// announced once, and each stage reports its own elapsed time.
+pub(super) fn announce_target_dir() {
+    static ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    match gate_target_dir() {
+        Some(dir) => eprintln!(
+            "gate: build cache at {} ({})",
+            dir.display(),
+            if cache_is_warm(&dir) { "warm" } else { "cold" }
+        ),
+        None => eprintln!("gate: no shared build cache; each patch builds its own target/"),
+    }
 }
 
 /// Whether a stage's exit status means the work was never placed.
@@ -169,10 +263,7 @@ pub(super) enum StageOrigin {
 /// The stage's name for a human-facing message: `fmt`, `build`, `clippy`,
 /// `test`.
 pub(super) fn stage_name(stage: &[String]) -> String {
-    stage
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "gate".to_string())
+    stage.first().cloned().unwrap_or_else(|| "gate".to_string())
 }
 
 /// Re-run one gate stage with the patch removed, to decide whether the failure
@@ -222,7 +313,25 @@ pub(super) fn stage_origin(worktree: &Path, stage: &[String]) -> StageOrigin {
 /// patch's failure. The two errors are not symmetric: re-offering a good patch
 /// costs a delay, while holding one writes a durable false claim about someone
 /// else's change.
-pub(super) fn classify_stage_failure(worktree: &Path, stage: &[String], text: String) -> GateResult {
+pub(super) fn classify_stage_failure(
+    worktree: &Path,
+    stage: &[String],
+    text: String,
+) -> GateResult {
+    // A timed-out stage is unmeasured, not defective: the kill is the pass's
+    // own bound firing, not a verdict about the change. Attribution would
+    // re-run the stage at the base and hit the same bound, doubling the stall
+    // for an answer the outcome already gives (#4567).
+    if let Some(secs) = timeout_secs_from(&text) {
+        return GateResult::BaseUnverifiable {
+            stage: stage_name(stage),
+            detail: format!(
+                "the stage did not complete within the gate timeout ({secs}s) and was killed; \n\
+                 the patch is unmeasured, not defective — raise AUTOSPEC_GATE_TIMEOUT_SECS \n\
+                 if the suite genuinely needs the time, then re-gate"
+            ),
+        };
+    }
     verdict_for(stage_origin(worktree, stage), stage, text)
 }
 
@@ -285,13 +394,15 @@ pub(super) enum GateResult {
     /// durable claim that the change is defective; recording that for a defect
     /// the base already had is both wrong and long-lived. A red `fmt` on trunk
     /// produced one such claim per queued patch, each naming an innocent change.
-    BaseUnverifiable { stage: String, detail: String },
+    BaseUnverifiable {
+        stage: String,
+        detail: String,
+    },
     /// Every stage was green but the evidence contradicts the patch: the
     /// patch adds test functions and the test count is unchanged (issue
     /// #4532). The reason names the contradiction; it is the HELD reason.
     Contradiction(String),
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -412,7 +523,10 @@ mod tests {
         // autospec must keep running on one machine with no scheduler at all,
         // so placement is a string the operator supplies, never a dependency.
         for raw in ["srun --", "docker run --rm img", "ssh builder --"] {
-            assert!(!parse_gate_wrapper(Some(raw)).is_empty(), "{raw} should parse");
+            assert!(
+                !parse_gate_wrapper(Some(raw)).is_empty(),
+                "{raw} should parse"
+            );
         }
     }
 
@@ -432,6 +546,37 @@ mod tests {
             }
             _ => panic!("a placement failure must never be held against the patch"),
         }
+    }
+
+    // --- #4589: the pass verifies its own preconditions before judging -----
+
+    // --- #4567: the gate's build cache is shared, and the gate is bounded ---
+
+    #[test]
+    fn an_unset_override_falls_back_to_the_default_cache() {
+        // The parse handles only the override; the default (this machine's
+        // ~/.cache) is composed in gate_target_dir, which needs a home
+        // directory and is therefore not asserted here.
+        assert!(parse_gate_target_dir(None).is_none());
+        assert!(parse_gate_target_dir(Some("")).is_none());
+        assert!(parse_gate_target_dir(Some("   ")).is_none());
+    }
+
+    #[test]
+    fn an_explicit_override_points_the_whole_pass_at_one_cache() {
+        let dir = parse_gate_target_dir(Some("/srv/autospec-gate-cache")).unwrap();
+        assert_eq!(dir, std::path::PathBuf::from("/srv/autospec-gate-cache"));
+    }
+
+    #[test]
+    fn a_warm_cache_is_one_with_built_artifacts() {
+        let root = std::env::temp_dir().join(format!("autospec-gate-warm-{}-", std::process::id()));
+        std::fs::create_dir_all(root.join("empty/debug/deps")).expect("create empty cache");
+        assert!(!cache_is_warm(&root.join("empty")));
+        std::fs::create_dir_all(root.join("warm/debug/deps")).expect("create warm cache");
+        std::fs::write(root.join("warm/debug/deps/libdep.rlib"), b"x").expect("create artifact");
+        assert!(cache_is_warm(&root.join("warm")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // --- #4589: the pass verifies its own preconditions before judging -----
