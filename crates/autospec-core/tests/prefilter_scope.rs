@@ -19,8 +19,8 @@ use std::collections::BTreeSet;
 
 use autospec_core::prefilter_scope::{
     batch_failure_line, crates_touched, derive_prefilter_scope, gate_commands, has_scope_gap,
-    prefilter_commands, scope_gaps, BatchMember, CheckScope, ScopeGap, GATE_CHECKS,
-    PREFILTER_CHECK_NAMES,
+    has_unattributable_path, path_attributes_to_crate, prefilter_commands, scope_gaps, BatchMember,
+    CheckScope, ScopeGap, GATE_CHECKS, PREFILTER_CHECK_NAMES,
 };
 
 fn crates(names: &[&str]) -> CheckScope {
@@ -72,6 +72,109 @@ fn a_patch_touching_no_crate_falls_back_to_the_workspace() {
 fn an_empty_patch_gets_the_workspace() {
     let empty: [&str; 0] = [];
     assert_eq!(derive_prefilter_scope(&empty), CheckScope::Workspace);
+}
+
+// #4554: a path that cannot be attributed to a crate must widen the scope,
+// never be dropped from it. The truth table the issue pins:
+//
+//   no crates, no orphans      -> Workspace   (an_empty_patch / no_crate)
+//   crates, no orphans         -> -p each     (the several_crates test)
+//   crates + >=1 orphan        -> Workspace   (the tests below: the fix)
+//   no crates, >=1 orphan      -> Workspace   (a_patch_touching_no_crate)
+
+#[test]
+fn a_crate_patch_beside_the_root_cargo_toml_widens_to_the_workspace() {
+    // A root-manifest change is exactly the change whose blast radius is
+    // the whole workspace: a dependency bump, a feature-flag default, a
+    // [workspace.dependencies] edit, a new [profile].
+    let scope = derive_prefilter_scope(&["crates/foo/src/a.rs", "Cargo.toml"]);
+    assert_eq!(scope, CheckScope::Workspace);
+}
+
+#[test]
+fn a_crate_patch_beside_cargo_lock_widens_to_the_workspace() {
+    let scope = derive_prefilter_scope(&["crates/foo/src/a.rs", "Cargo.lock"]);
+    assert_eq!(scope, CheckScope::Workspace);
+}
+
+#[test]
+fn a_crate_patch_beside_the_toolchain_pin_widens_to_the_workspace() {
+    let scope = derive_prefilter_scope(&["crates/foo/src/a.rs", "rust-toolchain.toml"]);
+    assert_eq!(scope, CheckScope::Workspace);
+}
+
+#[test]
+fn a_crate_patch_beside_its_own_manifest_stays_at_the_crate() {
+    // Decided: a path under `crates/foo/` attributes to `foo` — the crate's
+    // own manifest included — and gates at `-p foo`, the same scope its
+    // source gets. A manifest edit breaks the crate's own build, which the
+    // crate scope examines; widening for it would be the option the issue
+    // leaves to the narrow-set alternative, and the blunt rule picked here
+    // widens only for paths outside a crate.
+    let scope = derive_prefilter_scope(&["crates/foo/src/a.rs", "crates/foo/Cargo.toml"]);
+    assert_eq!(scope, crates(&["foo"]));
+}
+
+#[test]
+fn a_crate_patch_beside_a_readme_widens_to_the_workspace() {
+    // The blunt case, decided blunt: a README beside a crate patch costs a
+    // workspace gate rather than a -p one. That is the cheap error
+    // direction (one slower pre-filter); dropping the README is the
+    // expensive one (a batch failure bisected back to a file no scope
+    // examined). #4553's test that pinned this pair to -p foo is updated
+    // with the answer.
+    let scope = derive_prefilter_scope(&["crates/foo/src/a.rs", "README.md"]);
+    assert_eq!(scope, CheckScope::Workspace);
+}
+
+#[test]
+fn a_crate_only_patch_still_gates_just_its_crates() {
+    // The common case does not move: every path attributes to a crate.
+    let scope = derive_prefilter_scope(&[
+        "crates/foo/src/a.rs",
+        "crates/foo/tests/b.rs",
+        "crates/bar/src/c.rs",
+    ]);
+    assert_eq!(scope, crates(&["bar", "foo"]));
+}
+
+#[test]
+fn path_attribution_is_the_same_rule_as_crate_claiming() {
+    for path in [
+        "crates/autospec-core/src/lib.rs",
+        "crates/autospec-cli/src/commands/deep/mod.rs",
+    ] {
+        assert!(path_attributes_to_crate(path), "{path}");
+    }
+    for path in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        ".cargo/config.toml",
+        "crates/",
+        "crates",
+        "crates/../crates/autospec-core/src/x.rs",
+        "mycrates/other/src/lib.rs",
+        "scripts/lint-issue.sh",
+        "README.md",
+    ] {
+        assert!(!path_attributes_to_crate(path), "{path}");
+    }
+}
+
+#[test]
+fn has_unattributable_path_flags_any_orphan() {
+    assert!(has_unattributable_path(&[
+        "crates/foo/src/a.rs",
+        "Cargo.toml"
+    ]));
+    assert!(!has_unattributable_path(&[
+        "crates/foo/src/a.rs",
+        "crates/bar/src/b.rs"
+    ]));
+    assert!(has_unattributable_path(&["docs/notes.md"]));
+    let empty: [&str; 0] = [];
+    assert!(!has_unattributable_path(&empty));
 }
 
 #[test]
