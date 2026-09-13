@@ -20,7 +20,21 @@ Source it (`. scripts/lib/autospec-exclusivity.sh`), then:
 
 Command-line matchers (`pgrep -f` / `pkill -f`) are rejected in repo
 scripts by `scripts/lint-process-matchers.sh` (#3938); this lib is the
-approved replacement.
+approved replacement for *matching*. For *terminating* by pattern there is
+exactly one path, and it is Rust (issue #4448):
+
+## `autospec process-kill <pattern> [--signal <NAME>]`
+
+`pkill -f <pattern>` matches the invoking shell's own command line (the
+pattern is in it) and dies with exit 144, taking the work queued after the
+kill with it. `autospec process-kill` (`autospec_core::process_termination`)
+brackets the pattern's first character automatically, excludes its own
+session (itself and every ancestor — the processes whose argv carries the
+plain pattern), and kills the remaining matches by pid. It reports what it
+killed and what it excluded, and a kill that matches nothing exits 1 with a
+false-negative line — zero matches is a warning, not a clean state.
+`--signal` takes `HUP INT QUIT TERM KILL USR1 USR2` (default `TERM`).
+See `AGENTS.d/4448-pkill-self-match-bracketed-helper.md` for the mechanism.
 
 ## Tests
 
