@@ -1,4 +1,7 @@
 //! `evaluator epoch current|history` subcommand handlers.
+//!
+//! Thin over the core [`EvaluationStore`]: read the active epoch or the full
+//! epoch history and render them.
 
 use serde_json::json;
 
@@ -29,9 +32,8 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
 fn current(args: &[String]) -> Result<(), CommandFailure> {
     let (common, rest) = split_common(args)?;
     check_args(&rest, &[], &["--help", "-h"])?;
-    let epoch = open_store(&common.root)
-        .epoch_current()
-        .map_err(CommandFailure::from)?;
+    let store = open_store(&common.root)?;
+    let epoch = store.current_epoch().map_err(CommandFailure::from)?;
     if common.json {
         println!("{}", json!({ "epoch": epoch }));
     } else {
@@ -48,14 +50,17 @@ fn current(args: &[String]) -> Result<(), CommandFailure> {
 fn history(args: &[String]) -> Result<(), CommandFailure> {
     let (common, rest) = split_common(args)?;
     check_args(&rest, &[], &["--help", "-h"])?;
-    let epochs = open_store(&common.root)
-        .epoch_history()
-        .map_err(CommandFailure::from)?;
+    let store = open_store(&common.root)?;
+    let epochs = store.epoch_history().map_err(CommandFailure::from)?;
     if common.json {
         println!("{}", json!({ "epochs": epochs }));
     } else {
         for epoch in &epochs {
-            let promotion = epoch.promotion.as_deref().unwrap_or("-");
+            let promotion = epoch
+                .promotion
+                .as_ref()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".into());
             println!("{} promotion: {promotion}", epoch.epoch_id);
         }
     }
@@ -65,7 +70,13 @@ fn history(args: &[String]) -> Result<(), CommandFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::evaluator::store::tests_support;
+    use autospec_core::evaluation::evaluator::EvaluatorDefinition;
+    use autospec_core::evaluation::policy::PromotionPolicy;
+    use autospec_core::evaluation::store::EvaluationStore;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn s(text: &str) -> String {
         text.to_string()
@@ -81,13 +92,16 @@ mod tests {
 
     #[test]
     fn epoch_current_and_history_on_a_pinned_store() {
-        let base = tests_support::temp_base();
-        let store = crate::commands::evaluator::store::EvaluationStore::new(
-            base.join(".autospec").join("evaluation"),
-        );
-        store.init(None).unwrap();
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "autospec-eval-epoch-{counter}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
         let digest = "c".repeat(64);
-        let definition = serde_json::json!({
+        let definition: EvaluatorDefinition = serde_json::from_value(json!({
             "schema": 1,
             "slot": "test_quality",
             "version": 1,
@@ -95,25 +109,28 @@ mod tests {
             "rubric_ref": "rubrics/test_quality.md",
             "routing_policy_digest": digest,
             "tool_policy_digest": digest,
-            "created_at": 1_757_217_600
-        })
-        .to_string();
-        let file = base.join("def.json");
-        std::fs::write(&file, definition).unwrap();
-        store.register(std::path::Path::new(&file)).unwrap();
-        let reference: crate::commands::evaluator::types::EvaluatorVersionRef =
-            "test_quality@1".parse().unwrap();
-        store.pin(&reference, "operator").unwrap();
+            "created_at": 1_757_217_600,
+            "provenance": {"created_by": "operator", "source": "manual"}
+        }))
+        .unwrap();
 
-        let args = vec![s("--root"), base.to_string_lossy().into_owned()];
+        let reference = definition.version_ref();
+        let mut store = EvaluationStore::init(&root, PromotionPolicy::default(), 100).unwrap();
+        store.register_evaluator(&definition, 100).unwrap();
+        store.pin(reference, "operator", 100).unwrap();
+        drop(store);
+
+        let args = vec![s("--root"), root.to_string_lossy().into_owned()];
         current(&args).unwrap();
         history(&args).unwrap();
         let json_args = vec![
             s("--root"),
-            base.to_string_lossy().into_owned(),
+            root.to_string_lossy().into_owned(),
             s("--json"),
         ];
         current(&json_args).unwrap();
         history(&json_args).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

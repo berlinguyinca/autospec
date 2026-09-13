@@ -18,6 +18,7 @@ use autospec_core::evaluation::ids::{
     AnchorCaseId, AnchorSuiteId, EvaluationId, EpochId, EvaluatorSlot, EvaluatorVersionRef,
 };
 use autospec_core::evaluation::policy::PromotionPolicy;
+use autospec_core::evaluation::promotion::PromotionState;
 use autospec_core::evaluation::qualification::Verdict;
 use autospec_core::evaluation::record::{
     ActiveRankingStatus, EvaluationRecord, Independence, RuntimeProvenance,
@@ -243,4 +244,46 @@ fn records_and_trials_are_write_once() {
     assert_eq!(err.kind, EvaluationErrorKind::Immutable);
     assert_eq!(store.records().unwrap().len(), 1);
     assert_eq!(store.record(&record.evaluation_id).unwrap(), record);
+}
+
+#[test]
+fn pin_seeds_an_empty_slot_and_rejects_repin_unknown_and_empty_actor() {
+    let root = TempProjectRoot::new();
+    let mut store = EvaluationStore::init(root.path(), PromotionPolicy::default(), 100).unwrap();
+    let def = fixture_definition(1);
+    store.register_evaluator(&def, 100).unwrap();
+
+    // Pinning the registered version seeds a committed, human-approved epoch.
+    let reference = def.version_ref();
+    let event = store.pin(reference, "operator", 101).unwrap();
+    assert_eq!(event.to, reference);
+    assert_eq!(event.epoch.epoch_id, EpochId(1));
+    assert_eq!(event.state, PromotionState::Committed);
+    assert_eq!(event.approvals.len(), 1);
+    assert_eq!(event.approvals[0].by, "operator");
+    // The successor epoch records the pin; the store's current pointer moved.
+    let current = store.current_epoch().unwrap();
+    assert_eq!(current.epoch_id, EpochId(1));
+    assert_eq!(current.version_of(def.slot), Some(1));
+    // The promotion event round-trips from disk.
+    assert_eq!(store.promotion(&event.id).unwrap(), event);
+    assert_eq!(store.promotions().unwrap().len(), 1);
+    assert_eq!(store.epoch_history().unwrap().len(), 2);
+
+    // Repinning the same slot is a promotion, not a pin.
+    let err = store.pin(reference, "operator", 102).unwrap_err();
+    assert_eq!(err.kind, EvaluationErrorKind::Invariant);
+    assert!(err.message.contains("already pins"), "{err}");
+
+    // Pinning an unregistered version fails (the definition must exist).
+    let mut unknown = def.clone();
+    unknown.version = 2;
+    let err = store.pin(unknown.version_ref(), "operator", 103).unwrap_err();
+    assert!(err.message.contains("evaluators/architecture/v2.json"), "{err}");
+
+    // A registered version pinned with a blank actor is rejected.
+    store.register_evaluator(&unknown, 103).unwrap();
+    let err = store.pin(unknown.version_ref(), "  ", 104).unwrap_err();
+    assert_eq!(err.kind, EvaluationErrorKind::Invariant);
+    assert!(err.message.contains("actor"), "{err}");
 }
