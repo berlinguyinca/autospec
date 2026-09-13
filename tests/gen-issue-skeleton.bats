@@ -1,5 +1,15 @@
 #!/usr/bin/env bats
-# tests/gen-issue-skeleton.bats — bats coverage for gen-issue-skeleton.sh
+bats_require_minimum_version 1.5.0
+# tests/gen-issue-skeleton.bats — legacy wrapper coverage for
+# scripts/gen-issue-skeleton.sh (now a thin wrapper over `autospec
+# issue-skeleton`, the Rust implementation in autospec_core::issue_skeleton,
+# issue #4440). The authoritative byte-exact golden tests live in
+# crates/autospec-core/tests/issue_skeleton.rs; this suite pins the wrapper's
+# CLI contract (arg/stdin/exit codes) during the one-release wrapper period.
+#
+# Note: the generation steps use `--separate-stderr` because the renderer
+# reports non-blocking lint warnings on stderr, and this bats-core `run`
+# otherwise merges stderr into `$output`, which would pollute the body.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 GEN_BIN="$REPO_ROOT/scripts/gen-issue-skeleton.sh"
@@ -11,7 +21,7 @@ EXPECTED_SECURITY="$REPO_ROOT/tests/fixtures/gen-issue-skeleton/expected-securit
 LINT_BIN="$REPO_ROOT/scripts/lint-issue.sh"
 
 @test "minimal-valid: --input emits issue body with team lenses that passes lint-issue.sh" {
-  run bash "$GEN_BIN" --input "$MINIMAL_YAML"
+  run --separate-stderr bash "$GEN_BIN" --input "$MINIMAL_YAML"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "^## Goal"
   echo "$output" | grep -q "^## Source spec"
@@ -41,7 +51,7 @@ LINT_BIN="$REPO_ROOT/scripts/lint-issue.sh"
 }
 
 @test "security profile renders validated security context and matches its golden" {
-  run bash "$GEN_BIN" --input "$SECURITY_YAML"
+  run --separate-stderr bash "$GEN_BIN" --input "$SECURITY_YAML"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "^## Evidence consumed$"
   echo "$output" | grep -q "^## Controls covered$"

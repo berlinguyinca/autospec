@@ -100,6 +100,7 @@ pub mod insights;
 pub mod integration;
 pub mod io_coverage;
 pub mod issue_lock;
+pub mod issue_skeleton;
 pub mod item_sweep;
 pub mod kv_overcommit;
 pub mod lint;
