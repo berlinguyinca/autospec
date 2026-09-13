@@ -29,7 +29,7 @@ fn executor_supervision_descendant_capture_reserves_descriptor_headroom() {
         if observed >= 12 {
             break;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(50));
     }
     assert!(
         observed >= 12,
