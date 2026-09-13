@@ -111,9 +111,224 @@ fn uncommitted_changes_still_count_as_produced_work() {
     assert_eq!(work.commits_ahead, 0);
     assert_eq!(work.uncommitted_paths, vec!["scratch.rs".to_string()]);
     assert!(work.committed_patch.is_none());
+    assert!(work.uncommitted_patch.is_some());
     assert!(!work.is_committed_only());
 
     let _ = fs::remove_dir_all(&root);
+}
+
+/// The discarded-runs case from #4582, verbatim: the agent staged its work and stopped.
+/// `staged=3 commits_ahead=0` used to produce a file list and no patch, because the only
+/// captured state was the committed one. Staging is an encoding of "the agent changed
+/// these files", and capture must not depend on which encoding it found.
+#[test]
+fn staged_only_work_is_captured_as_a_patch() {
+    let (root, base) = repository("staged-only");
+    for name in ["one.rs", "two.rs", "three.rs"] {
+        fs::write(root.join(name), format!("fn {name} {{}}\n")).expect("write the agent's change");
+        git(&root, &["add", name]);
+    }
+
+    let work = ProducedWork::detect(&root, &base).expect("detect produced work");
+    assert_eq!(work.commits_ahead, 0);
+    assert_eq!(work.uncommitted_paths.len(), 3);
+
+    let durable = std::env::temp_dir().join(format!(
+        "autospec-staged-capture-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::SeqCst)
+    ));
+    let written = work
+        .write_patch(&durable, "invocation-staged")
+        .expect("write the captured patch")
+        .expect("staged work has a patch to write — this is the #4582 regression");
+    let bytes = fs::read(&written).expect("read back the patch");
+    let rendered = String::from_utf8_lossy(&bytes);
+    for name in ["one.rs", "two.rs", "three.rs"] {
+        assert!(
+            rendered.contains(name),
+            "patch is missing {name}: {rendered}"
+        );
+    }
+    work.assert_captured(Some(&written))
+        .expect("a captured patch authorises the deletion");
+
+    let _ = fs::remove_dir_all(&durable);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Dirty-but-unstaged tracked changes are the same work in a different encoding.
+#[test]
+fn dirty_only_work_is_captured_as_a_patch() {
+    let (root, base) = repository("dirty-only");
+    fs::write(root.join("README.md"), "base, amended\n").expect("dirty the tracked file");
+
+    let work = ProducedWork::detect(&root, &base).expect("detect produced work");
+    assert_eq!(work.commits_ahead, 0);
+    let durable = std::env::temp_dir().join(format!(
+        "autospec-dirty-capture-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::SeqCst)
+    ));
+    let written = work
+        .write_patch(&durable, "invocation-dirty")
+        .expect("write the captured patch")
+        .expect("dirty work has a patch to write");
+    let bytes = fs::read(&written).expect("read back the patch");
+    let rendered = String::from_utf8_lossy(&bytes);
+    assert!(rendered.contains("base, amended"), "{rendered}");
+
+    let _ = fs::remove_dir_all(&durable);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Untracked files are in no diff of the index, so they need their own pass — and the
+/// most common "work" an agent leaves is a brand-new file it never `git add`ed.
+#[test]
+fn untracked_only_work_is_captured_as_a_patch() {
+    let (root, base) = repository("untracked-only");
+    fs::write(root.join("fresh.rs"), "fn fresh() {}\n").expect("write the new file");
+
+    let work = ProducedWork::detect(&root, &base).expect("detect produced work");
+    let durable = std::env::temp_dir().join(format!(
+        "autospec-untracked-capture-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::SeqCst)
+    ));
+    let written = work
+        .write_patch(&durable, "invocation-untracked")
+        .expect("write the captured patch")
+        .expect("an untracked file is work and has a patch to write");
+    let bytes = fs::read(&written).expect("read back the patch");
+    let rendered = String::from_utf8_lossy(&bytes);
+    assert!(rendered.contains("fn fresh() {}"), "{rendered}");
+
+    let _ = fs::remove_dir_all(&durable);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// All three encodings at once: a commit, a staged file, a dirty edit, and a new file.
+/// They are one work product, so they are one patch, in one file.
+#[test]
+fn a_mixed_state_is_captured_as_a_single_patch() {
+    let (root, base) = repository("mixed-state");
+    fs::write(root.join("committed.rs"), "fn committed() {}\n").expect("write");
+    git(&root, &["add", "committed.rs"]);
+    git(&root, &["commit", "--quiet", "-m", "first part"]);
+    fs::write(root.join("staged.rs"), "fn staged() {}\n").expect("write");
+    git(&root, &["add", "staged.rs"]);
+    fs::write(root.join("README.md"), "base, amended\n").expect("dirty the base file");
+    fs::write(root.join("fresh.rs"), "fn fresh() {}\n").expect("write the untracked file");
+
+    let work = ProducedWork::detect(&root, &base).expect("detect produced work");
+    assert_eq!(work.commits_ahead, 1);
+    let durable = std::env::temp_dir().join(format!(
+        "autospec-mixed-capture-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::SeqCst)
+    ));
+    let written = work
+        .write_patch(&durable, "invocation-mixed")
+        .expect("write the captured patch")
+        .expect("a mixed state has a patch to write");
+    let bytes = fs::read(&written).expect("read back the patch");
+    let rendered = String::from_utf8_lossy(&bytes);
+    for needle in [
+        "first part",
+        "fn committed() {}",
+        "fn staged() {}",
+        "base, amended",
+        "fn fresh() {}",
+    ] {
+        assert!(
+            rendered.contains(needle),
+            "patch is missing {needle:?}: {rendered}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&durable);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The summary is never written without the artifact it summarises: every non-empty
+/// detection yields a non-empty patch file, and only an empty detection yields none.
+#[test]
+fn a_non_empty_detection_always_yields_a_written_patch() {
+    let (root, base) = repository("summary-needs-artifact");
+    fs::write(root.join("a.rs"), "fn a() {}\n").expect("write");
+    git(&root, &["add", "a.rs"]);
+
+    let work = ProducedWork::detect(&root, &base).expect("detect produced work");
+    let durable = std::env::temp_dir().join(format!(
+        "autospec-summary-artifact-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::SeqCst)
+    ));
+    let written = work
+        .write_patch(&durable, "invocation-x")
+        .expect("write the captured patch")
+        .expect("non-empty work always has the artifact behind its summary");
+    assert!(fs::metadata(&written).expect("metadata").len() > 0);
+
+    let empty = ProducedWork::detect(&repository("summary-empty-artifact").0, &"HEAD")
+        .expect("detect an empty tree");
+    assert!(empty.is_empty());
+    assert_eq!(
+        empty
+            .write_patch(&durable, "invocation-empty")
+            .expect("no patch to write"),
+        None,
+        "an empty run writes no patch and no file that pretends otherwise"
+    );
+
+    let _ = fs::remove_dir_all(&durable);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The exit trap deletes the only copy, so the deletion is conditional on the capture:
+/// work without a non-empty patch refuses to go away, and says what it is holding.
+#[test]
+fn the_deletion_guard_refuses_work_without_a_patch() {
+    let (root, base) = repository("deletion-guard");
+    fs::write(root.join("held.rs"), "fn held() {}\n").expect("write the work");
+    git(&root, &["add", "held.rs"]);
+
+    let work = ProducedWork::detect(&root, &base).expect("detect produced work");
+    assert!(!work.is_empty());
+
+    let missing = std::env::temp_dir().join(format!(
+        "autospec-guard-missing-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::SeqCst)
+    ));
+    work.assert_captured(None)
+        .expect_err("no patch at all must not authorise the deletion");
+    let error = work
+        .assert_captured(Some(&missing))
+        .expect_err("work without a patch on disk refuses the deletion");
+    assert!(
+        error.contains("held.rs"),
+        "the refusal names the work it holds: {error}"
+    );
+
+    let empty_file = std::env::temp_dir().join(format!(
+        "autospec-guard-empty-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::SeqCst)
+    ));
+    fs::write(&empty_file, b"").expect("an empty patch file is no artifact");
+    work.assert_captured(Some(&empty_file))
+        .expect_err("an empty patch file is no artifact");
+
+    let written = work
+        .write_patch(empty_file.parent().unwrap(), "guard")
+        .expect("write")
+        .expect("the capture succeeds");
+    work.assert_captured(Some(&written))
+        .expect("a non-empty patch authorises the deletion");
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_file(&empty_file);
 }
 
 /// The verdict must still be reachable: a run that really did nothing reads as nothing.
