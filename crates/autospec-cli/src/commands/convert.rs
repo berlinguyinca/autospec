@@ -76,7 +76,7 @@ use std::process::{Command, Output};
 
 use autospec_core::conflict_resolution::{classify_file, resolution_for, ResolutionPlan};
 use autospec_core::conversion_gate::{test_count_contradiction, tests_added_by_patch};
-use autospec_core::conversion_pass::{select_fresh, LanguageHold, PassOutcome, PatchCandidate};
+use autospec_core::conversion_pass::{select_fresh, PassOutcome, PatchCandidate};
 use autospec_core::failure_attribution::attribute;
 use autospec_core::hold_memo::{re_gate, HoldRecord};
 use autospec_core::prefilter_scope::derive_prefilter_scope;
@@ -269,10 +269,10 @@ fn resolve_llm_root(explicit: Option<&Path>) -> Option<PathBuf> {
 
 /// One agent patch on disk: its node, issue, path, and input key.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PatchLocation {
+pub(crate) struct PatchLocation {
     node: String,
-    issue: u64,
-    path: PathBuf,
+    pub(crate) issue: u64,
+    pub(crate) path: PathBuf,
     patch_key: String,
 }
 
@@ -618,7 +618,7 @@ fn gate_packages(files: &[String]) -> Vec<String> {
 /// The file paths a `changes.patch` touches, from its `+++ b/<path>` lines.
 /// Binary additions (`+++ /dev/null` is a deletion; `+++ b/<path>` is the
 /// new path) are read by their `b/` side.
-fn patch_files(patch: &str) -> Vec<String> {
+pub(crate) fn patch_files(patch: &str) -> Vec<String> {
     patch
         .lines()
         .filter_map(|line| {
@@ -706,10 +706,10 @@ fn buffer_from_candidates(candidates: &[PatchCandidate]) -> ConversionBuffer {
     }
 }
 
-struct ConvertPlan {
+pub(crate) struct ConvertPlan {
     opts: Options,
     llm_root: PathBuf,
-    examined: Vec<PatchLocation>,
+    pub(crate) examined: Vec<PatchLocation>,
     candidates: Vec<PatchCandidate>,
     outcome: PassOutcome,
 }
@@ -779,42 +779,22 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
             None => false,
         };
 
-        // The language verdict is decided here, before any branch exists
-        // (issue #4559): the Rust gate cannot fail on a shell-only or a
-        // neither patch, so a green gate there would mean the gate did not
-        // read the patch. An unreadable patch yields an empty file list,
-        // which classifies as neither and is held — fail-closed.
-        let patch_text = fs::read_to_string(&patch.path).unwrap_or_default();
-        let language = autospec_core::patch_language::classify(&patch_files(&patch_text));
-
         candidates.push(PatchCandidate {
             issue: patch.issue,
             patch_key: patch.patch_key.clone(),
             branch_exists,
             pull_request_exists,
             held_recorded,
-            language,
+            language: super::convert_language::candidate_language(patch),
         });
     }
-
-    // The plan's outcome already carries the selection's skips: a pass that
-    // examined patches and offered none must not print the idle
-    // `converted=0 held=0 skipped=0` line (issue #4559, the skip-counting
-    // bug found while testing the language gate).
-    let selection = select_fresh(&candidates);
-    let outcome = PassOutcome::Examined(PassCounters {
-        examined: candidates.len(),
-        converted: 0,
-        held: 0,
-        skipped: selection.disqualified.len() + selection.language_held.len(),
-    });
 
     Ok(ConvertPlan {
         opts,
         llm_root,
         examined,
+        outcome: super::convert_language::plan_outcome(&candidates),
         candidates,
-        outcome,
     })
 }
 
@@ -982,18 +962,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
                 json!({ "issue": c.issue, "reason": reason.as_str() })
             })
             .collect();
-        let language_held: Vec<Value> = selection
-            .language_held
-            .iter()
-            .map(|hold| {
-                json!({
-                    "issue": hold.candidate.issue,
-                    "patch_key": hold.candidate.patch_key,
-                    "language": hold.language.as_str(),
-                    "reason": language_hold_reason(plan, hold),
-                })
-            })
-            .collect();
+        let language_held = super::convert_language::held_json(plan, &selection.language_held);
         let fresh: Vec<Value> = selection
             .fresh
             .iter()
@@ -1032,14 +1001,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             patch_key = c.patch_key
         );
     }
-    for hold in &selection.language_held {
-        println!(
-            "  HOLD  #{issue} ({reason}) {patch_key}",
-            issue = hold.candidate.issue,
-            reason = language_hold_reason(plan, hold),
-            patch_key = hold.candidate.patch_key
-        );
-    }
+    super::convert_language::render_holds(plan, &selection.language_held);
     println!("{}", plan.outcome.line("convert", "autospec convert", "enumerate $LLM"));
     // The buffer, on every run — including an idle one: the line that
     // makes a silent successful run distinguishable from a broken one
@@ -1049,20 +1011,6 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         println!("{alarm}");
     }
     Ok(())
-}
-
-/// The hold reason for a language-held candidate, from the files of the
-/// patch on disk: the reason names the deciding files (the shell files for
-/// a mixed hold — the prompt signal — or the whole list for a neither
-/// hold), and those live with the patch.
-fn language_hold_reason(plan: &ConvertPlan, hold: &LanguageHold) -> String {
-    let files = plan
-        .examined
-        .iter()
-        .find(|p| p.issue == hold.candidate.issue)
-        .map(|p| patch_files(&fs::read_to_string(&p.path).unwrap_or_default()))
-        .unwrap_or_default();
-    autospec_core::patch_language::hold_reason(hold.language, &files)
 }
 
 /// The real conversion of each selected patch (steps 3-6). Side effects are
@@ -1098,26 +1046,7 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     // buffer entirely — no patch on disk, so no queue entry held.
     let mut archived = 0;
 
-    // The language-held patches (issue #4559) are terminal, not a re-gate
-    // queue: they will never convert, so archiving them frees their queue
-    // entries and they are never re-offered — the archive directory, not a
-    // HELD ledger line, is the record (a ledger line would be re-offered
-    // when the base next moves).
-    for hold in &selection.language_held {
-        if let Some(patch) = plan.examined.iter().find(|p| p.issue == hold.candidate.issue) {
-            // The reason is computed while the patch is still on disk: it
-            // names the deciding files, which leave the buffer with the move.
-            let reason = language_hold_reason(plan, hold);
-            archive_language_held(patch);
-            counters.skipped += 1;
-            archived += 1;
-            println!(
-                "  ARCHIVED #{issue} (language: {reason})",
-                issue = patch.issue,
-            );
-        }
-    }
-
+    super::convert_language::archive_held(plan, &selection.language_held, &mut counters, &mut archived);
     for c in &selection.fresh {
         let patch = match plan.examined.iter().find(|p| p.issue == c.issue) {
             Some(p) => p,
@@ -1289,28 +1218,6 @@ fn apply_one(
         }
     };
     result
-}
-
-/// Move a language-held patch into its issue dir's `language-held/`
-/// archive — terminal, unlike the `superseded/` queue (issue #4559). Once
-/// moved, the file no longer matches the enumeration path
-/// (`out/issue-*/changes.patch`), so the pass never sees it again: these
-/// patches never convert, and their queue entry is freed with the move.
-fn archive_language_held(patch: &PatchLocation) {
-    let issue_dir = match patch.path.parent() {
-        Some(dir) => dir,
-        None => return,
-    };
-    let _ = fs::create_dir_all(issue_dir.join("language-held"));
-    let archive = autospec_core::stored_output::language_held_archive_path(
-        issue_dir,
-        patch.path.file_name().unwrap_or_default().to_str().unwrap_or_default(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    );
-    let _ = fs::rename(&patch.path, &archive);
 }
 
 /// How a `git apply --3way` attempt went: it applied, it conflicted, or the
