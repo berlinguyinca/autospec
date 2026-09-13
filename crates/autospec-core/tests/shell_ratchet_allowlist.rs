@@ -119,7 +119,11 @@ fn a_new_unlisted_file_is_a_blocking_finding() {
             lines: 1
         }]
     );
-    assert!(v.message("Rust").contains("scripts/b.sh"), "{}", v.message("Rust"));
+    assert!(
+        v.message("Rust").contains("scripts/b.sh"),
+        "{}",
+        v.message("Rust")
+    );
 }
 
 #[test]
@@ -159,7 +163,10 @@ fn a_count_below_the_entry_passes() {
     assert!(v.is_clean(), "{}", v.message("Rust"));
     assert!(matches!(
         v,
-        AllowlistVerdict::InSync { total: 2, ceiling: 3 }
+        AllowlistVerdict::InSync {
+            total: 2,
+            ceiling: 3
+        }
     ));
 }
 
@@ -226,7 +233,10 @@ fn the_shipped_allowlist_keeps_the_real_repository_scan_green() {
     let surface = measure(&root).expect("measuring the repository must succeed");
     let shipped = Allowlist::load(&root.join("tests/fixtures/shell-ratchet-allowlist.txt"))
         .expect("the shipped allowlist must parse");
-    assert!(!shipped.is_empty(), "the shipped allowlist must list the shell surface");
+    assert!(
+        !shipped.is_empty(),
+        "the shipped allowlist must list the shell surface"
+    );
     let v = allowlist_verdict(&surface, &shipped);
     assert!(
         v.is_clean(),
@@ -264,9 +274,7 @@ fn the_reseed_helper_writes_the_allowlist_from_the_tree() {
                 .iter()
                 .filter_map(|(p, entry)| match seeded.get(p) {
                     None => None, // file gone: the dead entry is dropped
-                    Some(count) if count != *entry => {
-                        Some(format!("{p} {entry} -> {count}"))
-                    }
+                    Some(count) if count != *entry => Some(format!("{p} {entry} -> {count}")),
                     Some(_) => None,
                 })
                 .collect();
