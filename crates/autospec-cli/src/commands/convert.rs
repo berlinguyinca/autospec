@@ -84,7 +84,7 @@ use autospec_core::unfed_pass::PassCounters;
 use autospec_core::verification::parse_test_run;
 use serde_json::{json, Value};
 
-use super::claim::{branch_liveness, BranchLiveness};
+use super::claim::{branch_liveness, local_branch_checked_out, BranchLiveness};
 use super::CommandFailure;
 
 /// The schema emitted by `autospec convert --json`.
@@ -365,6 +365,49 @@ fn enumerate_patches(root: &Path) -> Result<Vec<PatchLocation>, CommandFailure> 
 /// [`HoldRecord`]. The pass reads it to decide which held patches still
 /// disqualify (their re-gate holds) versus which are re-offered (the base
 /// moved). Appending a HELD line is the pass's "never discard" step.
+/// Print the pass's summary line, having first checked that it can be true.
+///
+/// `PassOutcome` has carried a `reconciles()` predicate, and a doc comment
+/// saying the counters "must reconcile", since it was written. Nothing in the
+/// running pass ever called it: the summary was printed whatever the arithmetic
+/// said (issue #4604). A pass reporting that it acted on more patches than it
+/// examined would emit a line that reads as authoritative and is impossible.
+///
+/// Every operational decision about this fleet is made from that one line, so
+/// the line now states whether it can be trusted. The counters are still
+/// printed -- suppressing them would destroy the evidence needed to find the
+/// accounting defect -- but they are no longer offered as fact.
+fn report_outcome(outcome: &PassOutcome) {
+    let (line, alarm) = outcome_report(outcome);
+    println!("{line}");
+    if let Some(alarm) = alarm {
+        eprintln!("{alarm}");
+    }
+}
+
+/// The summary line, and the alarm that must accompany it when the pass's own
+/// arithmetic is impossible.
+///
+/// Split from the printing so the decision is testable without capturing
+/// stdout -- the check this issue is about should not itself be reachable only
+/// through a full pass.
+fn outcome_report(outcome: &PassOutcome) -> (String, Option<String>) {
+    let line = outcome.line("convert", "autospec convert", "enumerate $LLM");
+    if outcome.reconciles() {
+        (line, None)
+    } else {
+        (
+            line,
+            Some(
+                "ALARM: the pass's own counters do not reconcile -- it reports acting on more \
+                 patches than it examined. The line above is not a result; it is evidence of \
+                 an accounting defect in the pass. Do not act on these numbers."
+                    .to_string(),
+            ),
+        )
+    }
+}
+
 fn load_held(path: &Path) -> Result<BTreeMap<u64, HoldRecord>, CommandFailure> {
     let Ok(text) = fs::read_to_string(path) else {
         return Ok(BTreeMap::new());
@@ -590,17 +633,154 @@ fn base_changed_files(base_sha: &str, base_ref: &str) -> Option<Vec<String>> {
 /// unmerged with no worktree) does not: redoing it overwrites the stale
 /// branch, so the pass re-offers it. `Unknown` fails closed (disqualify):
 /// offering a patch whose attempt state cannot be verified risks a duplicate.
-fn attempt_flags(repo: Option<&str>, branch: &str) -> (bool, bool) {
+fn attempt_flags(
+    repo: Option<&str>,
+    branch: &str,
+    prefetched: Option<&AttemptIndex>,
+) -> (bool, bool) {
     let Some(repo) = repo else {
         // No repo to ask: the liveness is not checked (a plan-only gap the
         // caller reports), so the patch is not disqualified on this axis.
         return (false, false);
     };
-    match branch_liveness(repo, branch) {
+    let liveness = match prefetched {
+        Some(index) => index.liveness(branch),
+        None => branch_liveness(repo, branch),
+    };
+    match liveness {
         BranchLiveness::Live => (false, true),
         BranchLiveness::Dead => (false, false),
         BranchLiveness::Unknown => (false, true),
     }
+}
+
+/// The remote half of branch liveness for a whole pass, fetched once
+/// (issue #4587).
+///
+/// `branch_liveness` asks the remote per branch. Its order matters and this
+/// index reproduces it exactly:
+///
+/// 1. a local worktree holding the branch makes the attempt live;
+/// 2. otherwise a branch absent from the remote is `NoBranch` — answered
+///    without asking about pull requests at all, which is why a backlog of
+///    mostly-absent branches showed as a long run of `ls-remote` calls;
+/// 3. otherwise an open or merged pull request makes it live;
+/// 4. otherwise the attempt is abandoned, and abandoned is not live.
+///
+/// Steps 2 and 3 are set-membership tests over answers the remote gives in one
+/// call each, and neither changes during a pass. Step 1 stays per-branch
+/// because it is local and cheap — moving it here would trade a correct check
+/// for no saving.
+///
+/// Over a 563-patch backlog this is two round-trips instead of up to three per
+/// candidate; a scheduled pass previously spent its whole period in selection
+/// and never reached a gate.
+#[derive(Debug, Default)]
+struct AttemptIndex {
+    /// Branch names present on the remote, from one prefixed `ls-remote`.
+    remote_branches: std::collections::BTreeSet<String>,
+    /// Branch names carrying an open or merged pull request.
+    live_pr_branches: std::collections::BTreeSet<String>,
+}
+
+impl AttemptIndex {
+    /// The verdict for one branch, in `attempt_liveness`'s order.
+    fn liveness(&self, branch: &str) -> BranchLiveness {
+        if branch.trim().is_empty() {
+            return BranchLiveness::Dead;
+        }
+        // Step 1, kept per-branch and local. A lookup failure here is the one
+        // case this index cannot resolve, so it reports `Unknown` and the
+        // caller's fail-closed arm applies.
+        match local_branch_checked_out(&format!("refs/heads/{branch}")) {
+            Ok(true) => return BranchLiveness::Live,
+            Ok(false) => {}
+            Err(_) => return BranchLiveness::Unknown,
+        }
+        if !self.remote_branches.contains(branch) {
+            return BranchLiveness::Dead;
+        }
+        if self.live_pr_branches.contains(branch) {
+            return BranchLiveness::Live;
+        }
+        BranchLiveness::Dead
+    }
+}
+
+/// Fetch a pass's remote liveness facts in two calls (issue #4587).
+///
+/// `None` when either call fails, so the caller keeps the per-branch path.
+/// Treating a failed batch as "nothing exists" would re-offer every patch and
+/// open duplicate pull requests, which is precisely the outcome the liveness
+/// check exists to prevent.
+fn prefetch_attempt_index(repo: &str, branch_prefix: &str) -> Option<AttemptIndex> {
+    let heads = Command::new("git")
+        .args([
+            "ls-remote",
+            "--heads",
+            "origin",
+            &format!("{branch_prefix}*"),
+        ])
+        .output()
+        .ok()?;
+    if !heads.status.success() {
+        return None;
+    }
+    let mut index = AttemptIndex::default();
+    for line in String::from_utf8_lossy(&heads.stdout).lines() {
+        if let Some((_, reference)) = line.split_once('\t') {
+            if let Some(name) = reference.strip_prefix("refs/heads/") {
+                index.remote_branches.insert(name.to_string());
+            }
+        }
+    }
+
+    let prs = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--limit",
+            "500",
+            "--json",
+            "headRefName,state",
+        ])
+        .output()
+        .ok()?;
+    if !prs.status.success() {
+        return None;
+    }
+    for (head, state) in parse_pull_request_heads(&String::from_utf8_lossy(&prs.stdout)) {
+        if head.starts_with(branch_prefix) && (state == "OPEN" || state == "MERGED") {
+            index.live_pr_branches.insert(head);
+        }
+    }
+    Some(index)
+}
+
+/// `(headRefName, state)` pairs from `gh pr list --json headRefName,state`.
+///
+/// Tolerant of field order, which `gh` does not promise.
+fn parse_pull_request_heads(body: &str) -> Vec<(String, String)> {
+    body.split('{')
+        .skip(1)
+        .filter_map(|chunk| {
+            let head = json_string_field(chunk, "headRefName")?;
+            let state = json_string_field(chunk, "state")?;
+            Some((head, state))
+        })
+        .collect()
+}
+
+/// The value of one string field in a flat JSON object fragment.
+fn json_string_field(chunk: &str, field: &str) -> Option<String> {
+    let rest = chunk.split(&format!("\"{field}\":")).nth(1)?;
+    let rest = rest.trim_start().strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 /// The gate scope tokens for the files a patch touches, derived from the
@@ -762,10 +942,23 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
         );
     }
 
+    // The remote half of liveness, fetched once for the pass (issue #4587).
+    // `None` means a fetch failed and the per-branch path is used, so
+    // correctness never depends on the batch succeeding.
+    let attempt_index = repo
+        .as_deref()
+        .and_then(|repo| prefetch_attempt_index(repo, &opts.branch_prefix));
+    if repo.is_some() && attempt_index.is_none() {
+        eprintln!(
+            "WARN: could not prefetch branch liveness; falling back to one query per candidate"
+        );
+    }
+
     let mut candidates = Vec::new();
     for patch in &examined {
         let branch = format!("{}{}", opts.branch_prefix, patch.issue);
-        let (branch_exists, pull_request_exists) = attempt_flags(repo.as_deref(), &branch);
+        let (branch_exists, pull_request_exists) =
+            attempt_flags(repo.as_deref(), &branch, attempt_index.as_ref());
 
         // HELD is a queue: a recorded hold disqualifies only while its
         // re-gate still holds. A changed patch, or a dependent file that
@@ -1057,6 +1250,9 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         match apply_one(plan, &repo, &base_ref, &base_sha, patch) {
             ApplyResult::Converted => counters.converted += 1,
             ApplyResult::Held => counters.held += 1,
+            // Not converted and not held: the pass could not tell whether this
+            // patch is good, so it says so and leaves the patch alone.
+            ApplyResult::BaseUnverifiable => counters.skipped += 1,
             ApplyResult::Archived => {
                 counters.skipped += 1;
                 archived += 1;
@@ -1065,7 +1261,7 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     }
 
     let outcome = PassOutcome::Examined(counters);
-    println!("{}", outcome.line("convert", "autospec convert", "enumerate $LLM"));
+    report_outcome(&outcome);
     let _ = held_path; // the HELD ledger is written inside apply_one
 
     // The buffer after the run, not just the run itself (#4558 ask 3):
@@ -1085,6 +1281,13 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     Ok(())
 }
 
+mod gate;
+
+use gate::{
+    announce_placement, classify_stage_failure, gate_placement, report_base_broken, run_cargo,
+    stage_name, was_never_placed, GateResult,
+};
+
 enum ApplyResult {
     /// The patch passed the gate and a PR was opened.
     Converted,
@@ -1093,6 +1296,10 @@ enum ApplyResult {
     /// The patch no longer applies to the base; it was archived, never
     /// discarded, and its issue returns to the eligible pool.
     Archived,
+    /// The base is broken, so the patch could not be verified (issue #4596).
+    /// No HELD line is written: the patch is untouched and is re-offered on the
+    /// next pass, which will verify it against a green base.
+    BaseUnverifiable,
 }
 
 fn apply_one(
@@ -1202,6 +1409,17 @@ fn apply_one(
                         record_held_and_result(plan, base_sha, patch, "PR could not be opened")
                     }
                 }
+                GateResult::BaseUnverifiable { stage, detail } => {
+                    teardown_worktree(&worktree);
+                    report_base_broken(base_sha, &stage, &detail);
+                    eprintln!(
+                        "SKIP #{issue}: the `{stage}` stage fails at the base ({base}), so this \
+                         patch cannot be verified; it is untouched and will be re-offered.",
+                        issue = patch.issue,
+                        base = &base_sha[..base_sha.len().min(8)],
+                    );
+                    ApplyResult::BaseUnverifiable
+                }
                 GateResult::Fail(output) => {
                     // Step 6: record a HELD line with the failing-test set from
                     // the authoritative failures: block, never the progress
@@ -1275,16 +1493,6 @@ fn conflict_summary(worktree: &Path) -> String {
     format!("conflict (refusing auto-resolution): {}", parts.join("; "))
 }
 
-enum GateResult {
-    Pass,
-    /// A stage failed; the stage's output.
-    Fail(String),
-    /// Every stage was green but the evidence contradicts the patch: the
-    /// patch adds test functions and the test count is unchanged (issue
-    /// #4532). The reason names the contradiction; it is the HELD reason.
-    Contradiction(String),
-}
-
 /// The gate's test-stage argv at the given scope: `test --no-fail-fast`
 /// plus the scope tokens. The baseline count and the gate's test stage run
 /// this same argv, so they measure the same set of tests.
@@ -1328,6 +1536,7 @@ fn run_gate(
     // (handled separately — its output is the evidence for the
     // unchanged-count contradiction). Each stage is its own cargo argv; the
     // pinned toolchain is inherited from the environment (rust-toolchain.toml).
+    announce_placement();
     let mut stages: Vec<Vec<String>> = vec![vec!["fmt".to_string(), "--check".to_string()]];
     let mut build = vec!["build".to_string()];
     build.extend_from_slice(packages);
@@ -1346,7 +1555,17 @@ fn run_gate(
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            return GateResult::Fail(text);
+            if was_never_placed(&output) {
+                return GateResult::BaseUnverifiable {
+                    stage: stage_name(stage),
+                    detail: format!(
+                        "the work was never placed on an execution host ({}); the patch is \
+                         unmeasured, not defective",
+                        gate_placement()
+                    ),
+                };
+            }
+            return classify_stage_failure(worktree, stage, text);
         }
     }
 
@@ -1360,7 +1579,17 @@ fn run_gate(
         String::from_utf8_lossy(&output.stderr)
     );
     if output.status.code() != Some(0) {
-        return GateResult::Fail(text);
+        if was_never_placed(&output) {
+            return GateResult::BaseUnverifiable {
+                stage: stage_name(&stage),
+                detail: format!(
+                    "the work was never placed on an execution host ({}); the patch is \
+                     unmeasured, not defective",
+                    gate_placement()
+                ),
+            };
+        }
+        return classify_stage_failure(worktree, &stage, text);
     }
 
     // Green stages are not yet a pass: the unchanged-count contradiction
@@ -1505,14 +1734,6 @@ fn run_capture_in(dir: &Path, args: &[&str]) -> Option<Output> {
         .ok()
 }
 
-fn run_cargo(dir: &Path, stage: &[String]) -> Option<Output> {
-    Command::new("cargo")
-        .args(stage)
-        .current_dir(dir)
-        .output()
-        .ok()
-}
-
 fn run_git(args: &[&str]) -> Result<(), CommandFailure> {
     let output = Command::new("git").args(args).output().map_err(|error| {
         CommandFailure::transient(format!("could not run git {args:?}: {error}"))
@@ -1571,6 +1792,65 @@ fn infer_repo() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- batched selection liveness (issue #4587) ---------------------------
+
+    fn index(remote: &[&str], live_prs: &[&str]) -> AttemptIndex {
+        AttemptIndex {
+            remote_branches: remote.iter().map(|s| s.to_string()).collect(),
+            live_pr_branches: live_prs.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_index_reproduces_attempt_liveness_order() {
+        // Absent from the remote is dead WITHOUT consulting pull requests --
+        // the short-circuit that makes a mostly-absent backlog a long run of
+        // ls-remote calls, and the reason batching them is worth anything.
+        assert_eq!(index(&[], &["conv-1"]).liveness("conv-1"), BranchLiveness::Dead);
+        // Present with an open or merged pull request: live.
+        assert_eq!(index(&["conv-2"], &["conv-2"]).liveness("conv-2"), BranchLiveness::Live);
+        // Present with no live pull request is abandoned, and abandoned is not
+        // live: redoing it overwrites the stale branch.
+        assert_eq!(index(&["conv-3"], &[]).liveness("conv-3"), BranchLiveness::Dead);
+        // An empty branch name is not an attempt.
+        assert_eq!(index(&[], &[]).liveness("   "), BranchLiveness::Dead);
+    }
+
+    #[test]
+    fn a_live_pull_request_on_a_similar_branch_does_not_leak() {
+        // Membership is exact: a prefix match is not a branch match, or the
+        // pass would treat conv-12 as keeping conv-1 in play.
+        let i = index(&["conv-1", "conv-12"], &["conv-12"]);
+        assert_eq!(i.liveness("conv-12"), BranchLiveness::Live);
+        assert_eq!(i.liveness("conv-1"), BranchLiveness::Dead);
+    }
+
+    #[test]
+    fn pull_request_heads_parse_regardless_of_field_order() {
+        let body = r#"[{"headRefName":"conv-7","state":"OPEN"},
+                       {"state":"MERGED","headRefName":"conv-8"},
+                       {"state":"CLOSED","headRefName":"conv-9"}]"#;
+        assert_eq!(
+            parse_pull_request_heads(body),
+            vec![
+                ("conv-7".to_string(), "OPEN".to_string()),
+                ("conv-8".to_string(), "MERGED".to_string()),
+                ("conv-9".to_string(), "CLOSED".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_open_and_merged_pull_requests_are_live() {
+        // CLOSED is the abandoned case the pass must re-offer, not skip.
+        let body = r#"[{"headRefName":"conv-9","state":"CLOSED"}]"#;
+        let live: Vec<_> = parse_pull_request_heads(body)
+            .into_iter()
+            .filter(|(_, state)| state == "OPEN" || state == "MERGED")
+            .collect();
+        assert!(live.is_empty(), "CLOSED must not count as live");
+    }
 
     #[test]
     fn the_unfed_line_is_not_the_idle_line() {
@@ -2076,5 +2356,58 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
         assert_eq!(held[&9999].patch_key, "unrecorded-9999");
         assert_eq!(held[&9999].reason, "clippy=2");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+
+
+    // --- #4604: a stated invariant must be consulted, not only tested --------
+
+    #[test]
+    fn a_reconciling_pass_reports_its_line_and_nothing_else() {
+        let outcome = PassOutcome::Examined(PassCounters {
+            examined: 10,
+            converted: 3,
+            held: 2,
+            skipped: 1,
+        });
+        let (line, alarm) = outcome_report(&outcome);
+        assert!(line.contains("examined"), "the line still carries the counts");
+        assert!(alarm.is_none(), "sound arithmetic needs no alarm");
+    }
+
+    #[test]
+    fn a_pass_that_acted_on_more_than_it_examined_is_not_reported_as_fact() {
+        // The impossible case: more converted than examined. Before #4604 this
+        // printed exactly like a real result.
+        let outcome = PassOutcome::Examined(PassCounters {
+            examined: 1,
+            converted: 5,
+            held: 0,
+            skipped: 0,
+        });
+        let (line, alarm) = outcome_report(&outcome);
+        assert!(
+            alarm.is_some(),
+            "impossible counters must not be presented as a result"
+        );
+        assert!(
+            line.contains("examined"),
+            "the counters are still printed -- they are the evidence for the defect"
+        );
+    }
+
+    #[test]
+    fn an_unfed_pass_has_nothing_to_reconcile_and_raises_no_alarm() {
+        let (_line, alarm) = outcome_report(&PassOutcome::Unfed);
+        assert!(alarm.is_none());
+    }
+
+    #[test]
+    fn an_idle_pass_and_an_unfed_pass_still_read_differently() {
+        // The distinction this type exists to preserve: nothing to do is not
+        // the same as never given anything.
+        let (idle, _) = outcome_report(&PassOutcome::Examined(PassCounters::default()));
+        let (unfed, _) = outcome_report(&PassOutcome::Unfed);
+        assert_ne!(idle, unfed);
     }
 }
