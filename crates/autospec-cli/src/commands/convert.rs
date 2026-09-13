@@ -1206,6 +1206,9 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         match apply_one(plan, &repo, &base_ref, &base_sha, patch) {
             ApplyResult::Converted => counters.converted += 1,
             ApplyResult::Held => counters.held += 1,
+            // Not converted and not held: the pass could not tell whether this
+            // patch is good, so it says so and leaves the patch alone.
+            ApplyResult::BaseUnverifiable => counters.skipped += 1,
             ApplyResult::Archived => {
                 counters.skipped += 1;
                 archived += 1;
@@ -1234,6 +1237,13 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     Ok(())
 }
 
+mod gate;
+
+use gate::{
+    announce_placement, classify_stage_failure, gate_placement, report_base_broken, run_cargo,
+    stage_name, was_never_placed, GateResult,
+};
+
 enum ApplyResult {
     /// The patch passed the gate and a PR was opened.
     Converted,
@@ -1242,6 +1252,10 @@ enum ApplyResult {
     /// The patch no longer applies to the base; it was archived, never
     /// discarded, and its issue returns to the eligible pool.
     Archived,
+    /// The base is broken, so the patch could not be verified (issue #4596).
+    /// No HELD line is written: the patch is untouched and is re-offered on the
+    /// next pass, which will verify it against a green base.
+    BaseUnverifiable,
 }
 
 fn apply_one(
@@ -1351,6 +1365,17 @@ fn apply_one(
                         record_held_and_result(plan, base_sha, patch, "PR could not be opened")
                     }
                 }
+                GateResult::BaseUnverifiable { stage, detail } => {
+                    teardown_worktree(&worktree);
+                    report_base_broken(base_sha, &stage, &detail);
+                    eprintln!(
+                        "SKIP #{issue}: the `{stage}` stage fails at the base ({base}), so this \
+                         patch cannot be verified; it is untouched and will be re-offered.",
+                        issue = patch.issue,
+                        base = &base_sha[..base_sha.len().min(8)],
+                    );
+                    ApplyResult::BaseUnverifiable
+                }
                 GateResult::Fail(output) => {
                     // Step 6: record a HELD line with the failing-test set from
                     // the authoritative failures: block, never the progress
@@ -1424,16 +1449,6 @@ fn conflict_summary(worktree: &Path) -> String {
     format!("conflict (refusing auto-resolution): {}", parts.join("; "))
 }
 
-enum GateResult {
-    Pass,
-    /// A stage failed; the stage's output.
-    Fail(String),
-    /// Every stage was green but the evidence contradicts the patch: the
-    /// patch adds test functions and the test count is unchanged (issue
-    /// #4532). The reason names the contradiction; it is the HELD reason.
-    Contradiction(String),
-}
-
 /// The gate's test-stage argv at the given scope: `test --no-fail-fast`
 /// plus the scope tokens. The baseline count and the gate's test stage run
 /// this same argv, so they measure the same set of tests.
@@ -1477,6 +1492,7 @@ fn run_gate(
     // (handled separately — its output is the evidence for the
     // unchanged-count contradiction). Each stage is its own cargo argv; the
     // pinned toolchain is inherited from the environment (rust-toolchain.toml).
+    announce_placement();
     let mut stages: Vec<Vec<String>> = vec![vec!["fmt".to_string(), "--check".to_string()]];
     let mut build = vec!["build".to_string()];
     build.extend_from_slice(packages);
@@ -1495,7 +1511,17 @@ fn run_gate(
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            return GateResult::Fail(text);
+            if was_never_placed(&output) {
+                return GateResult::BaseUnverifiable {
+                    stage: stage_name(stage),
+                    detail: format!(
+                        "the work was never placed on an execution host ({}); the patch is \
+                         unmeasured, not defective",
+                        gate_placement()
+                    ),
+                };
+            }
+            return classify_stage_failure(worktree, stage, text);
         }
     }
 
@@ -1509,7 +1535,17 @@ fn run_gate(
         String::from_utf8_lossy(&output.stderr)
     );
     if output.status.code() != Some(0) {
-        return GateResult::Fail(text);
+        if was_never_placed(&output) {
+            return GateResult::BaseUnverifiable {
+                stage: stage_name(&stage),
+                detail: format!(
+                    "the work was never placed on an execution host ({}); the patch is \
+                     unmeasured, not defective",
+                    gate_placement()
+                ),
+            };
+        }
+        return classify_stage_failure(worktree, &stage, text);
     }
 
     // Green stages are not yet a pass: the unchanged-count contradiction
@@ -1649,14 +1685,6 @@ fn teardown_worktree(worktree: &Path) {
 fn run_capture_in(dir: &Path, args: &[&str]) -> Option<Output> {
     Command::new("git")
         .args(args)
-        .current_dir(dir)
-        .output()
-        .ok()
-}
-
-fn run_cargo(dir: &Path, stage: &[String]) -> Option<Output> {
-    Command::new("cargo")
-        .args(stage)
         .current_dir(dir)
         .output()
         .ok()
@@ -2286,4 +2314,6 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
         assert_eq!(held[&9999].reason, "clippy=2");
         let _ = fs::remove_dir_all(&dir);
     }
+
+
 }

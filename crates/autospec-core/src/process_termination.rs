@@ -73,10 +73,7 @@ const NOT_BRACKETABLE_FIRST: [char; 9] = ['^', '(', ')', '*', '+', '?', '|', '{'
 /// - empty -> `Err(Empty)`
 /// - `^foo`, `]foo`, ... -> `Err(FirstCharNotBracketable)`
 pub fn bracket_pattern(pattern: &str) -> Result<String, BracketError> {
-    let first = pattern
-        .chars()
-        .next()
-        .ok_or(BracketError::Empty)?;
+    let first = pattern.chars().next().ok_or(BracketError::Empty)?;
     if first == '[' {
         return Ok(pattern.to_string());
     }
@@ -124,14 +121,20 @@ impl KillReport {
             self.pattern, self.bracketed, self.signal
         );
         if self.killed.is_empty() && self.failed.is_empty() {
-            out.push_str(": matched 0 pid(s) — a kill that matches nothing is a false \
-                         negative, not a clean state; check the pattern")
+            out.push_str(
+                ": matched 0 pid(s) — a kill that matches nothing is a false \
+                         negative, not a clean state; check the pattern",
+            )
         } else {
             if !self.killed.is_empty() {
                 out.push_str(&format!(
                     ": killed {} pid(s) ({})",
                     self.killed.len(),
-                    self.killed.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                    self.killed
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
             if !self.failed.is_empty() {
@@ -149,7 +152,11 @@ impl KillReport {
                 out.push_str(&format!(
                     "; excluded {} session pid(s) ({})",
                     self.excluded.len(),
-                    self.excluded.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                    self.excluded
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
         }
@@ -290,4 +297,28 @@ fn signal_name(signal: Signal) -> String {
     }
 }
 
-
+/// Whether the process with this pid still exists.
+///
+/// Answers the question a lock has to ask before it reports a wait: is anyone
+/// actually working behind this? A lock file naming a dead process serialises
+/// nothing, and reporting it as held makes a leak indistinguishable from a busy
+/// run — observed as 47 minutes of "already running" with nothing running
+/// (#4599).
+///
+/// On Linux this reads `/proc/<pid>`, which needs no dependency and no signal.
+/// Where `/proc` is absent the answer is **alive**: refusing to call a live
+/// process dead matters far more than detecting every leak, because being wrong
+/// in the other direction means two holders at once — the exact condition a
+/// lock exists to prevent.
+///
+/// A pid can be reused, so a `true` answer does not prove the *original*
+/// holder is alive. Callers must therefore report a stale lock rather than
+/// reclaim one on this answer alone.
+pub fn process_is_alive(pid: u32) -> bool {
+    let proc_pid = std::path::Path::new("/proc").join(pid.to_string());
+    if proc_pid.exists() {
+        return true;
+    }
+    // No /proc at all (not Linux): the probe cannot answer, so assume alive.
+    !std::path::Path::new("/proc/self").exists()
+}

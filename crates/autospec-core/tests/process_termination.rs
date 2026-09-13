@@ -14,10 +14,7 @@ use nix::unistd::getpid;
 
 #[test]
 fn brackets_the_first_character_of_a_plain_pattern() {
-    assert_eq!(
-        bracket_pattern("cargo.*test").unwrap(),
-        "[c]argo.*test"
-    );
+    assert_eq!(bracket_pattern("cargo.*test").unwrap(), "[c]argo.*test");
     assert_eq!(
         bracket_pattern("autospec worker").unwrap(),
         "[a]utospec worker"
@@ -26,10 +23,7 @@ fn brackets_the_first_character_of_a_plain_pattern() {
 
 #[test]
 fn bracketing_is_idempotent_on_an_already_bracketed_pattern() {
-    assert_eq!(
-        bracket_pattern("[c]argo.*test").unwrap(),
-        "[c]argo.*test"
-    );
+    assert_eq!(bracket_pattern("[c]argo.*test").unwrap(), "[c]argo.*test");
     assert_eq!(bracket_pattern("[a-z]+").unwrap(), "[a-z]+");
 }
 
@@ -106,7 +100,10 @@ fn kill_matching_terminates_the_sentinel_and_never_the_own_session() {
     // `sleep 30` and the marker (the only thing that makes it a
     // target) would vanish from the process table with it.
     let mut child = Command::new("bash")
-        .args(["-c", &format!("for i in 1 2 3 4 5 6; do sleep 1; done # {marker}")])
+        .args([
+            "-c",
+            &format!("for i in 1 2 3 4 5 6; do sleep 1; done # {marker}"),
+        ])
         .spawn()
         .expect("spawning the sentinel must succeed");
     let sentinel_pid = child.id();
