@@ -21,12 +21,6 @@
 #   AUTOSPEC_REPO            repo override (owner/repo format)
 
 set -eu
-# The Rust claim CLI's retirement gate (crates/autospec-cli/.../claim/
-# open_beneath.rs :: private_heartbeat_directory_identity) requires every
-# session-sidecar directory to be mode 0700 and owned by the effective user,
-# or `autospec claim release` defers retirement and orphans the sidecar
-# (#3502). `umask 077` makes every directory and file this writer creates
-# 0700/0600, so the shell writer conforms to that contract. Do not relax it.
 umask 077
 
 # Honor both env-var names so writers and the watchdog never point at different
