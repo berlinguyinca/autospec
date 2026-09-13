@@ -220,8 +220,8 @@ fn the_shipped_allowlist_keeps_the_real_repository_scan_green() {
     // (tests/lint/test_bats_negation_checker.bats): scan the real tree with
     // the shipped allowlist. Red means the allowlist and the tree disagree —
     // a new shell file, a file past its entry, or an entry whose file is
-    // gone. Fix the disagreement in the same commit; reseed only via the
-    // gated helper, which refuses to raise an entry.
+    // gone. Fix the disagreement in the same commit; the gated reseed helper
+    // only drops dead entries — it never changes a live one.
     let root = repo_root();
     let surface = measure(&root).expect("measuring the repository must succeed");
     let shipped = Allowlist::load(&root.join("tests/fixtures/shell-ratchet-allowlist.txt"))
@@ -241,11 +241,14 @@ fn the_shipped_allowlist_keeps_the_real_repository_scan_green() {
 
 #[test]
 fn the_reseed_helper_writes_the_allowlist_from_the_tree() {
-    // Gated: CI runs without the env var and the helper is a no-op. An
-    // operator reseeding after a deliberate allowlist change runs the suite
-    // with AUTOSPEC_SHELL_RATCHET_RESEED=1. The reseed refuses to raise an
-    // entry — the mechanical path may only fall; a deliberate raise is a hand
-    // edit with a documented reason, not a reseed.
+    // Gated: CI runs without the env var and the helper is a no-op. It exists
+    // for the one mechanical job a reseed is safe for: the initial seed, and
+    // dropping entries whose files are gone. It refuses to change a LIVE
+    // entry in either direction — a rise breaks the one-way property, and a
+    // fall can erase a deliberate raise; both are decisions made in a commit
+    // with a reason, not a reseed. It also refuses to mint an entry for a
+    // counted file that has none: new shell surface is a finding to write in
+    // Rust, not a budget to open.
     if std::env::var_os("AUTOSPEC_SHELL_RATCHET_RESEED").is_none() {
         return;
     }
@@ -253,17 +256,37 @@ fn the_reseed_helper_writes_the_allowlist_from_the_tree() {
     let path = root.join("tests/fixtures/shell-ratchet-allowlist.txt");
     let surface = measure(&root).expect("measuring the repository must succeed");
     let seeded = Allowlist::seed(&surface);
-    if let Ok(shipped) = Allowlist::load(&path) {
-        let rises = raised_entries(&shipped, &seeded);
-        assert!(
-            rises.is_empty(),
-            "reseed refused: these entries would rise: {}",
-            rises
+    match Allowlist::load(&path) {
+        Err(_) => {} // no shipped allowlist: the initial seed writes it
+        Ok(shipped) => {
+            let changed: Vec<String> = shipped
+                .entries()
                 .iter()
-                .map(|(p, (b, h))| format!("{p} {b} -> {h}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+                .filter_map(|(p, entry)| match seeded.get(p) {
+                    None => None, // file gone: the dead entry is dropped
+                    Some(count) if count != *entry => {
+                        Some(format!("{p} {entry} -> {count}"))
+                    }
+                    Some(_) => None,
+                })
+                .collect();
+            assert!(
+                changed.is_empty(),
+                "reseed refused: these live entries would change (a decision, not a reseed): {}",
+                changed.join(", ")
+            );
+            let unlisted: Vec<String> = seeded
+                .entries()
+                .keys()
+                .filter(|p| shipped.get(p.as_str()).is_none())
+                .cloned()
+                .collect();
+            assert!(
+                unlisted.is_empty(),
+                "reseed refused: these counted files have no entry (new shell surface): {}",
+                unlisted.join(", ")
+            );
+        }
     }
     seeded.save(&path).expect("the reseed write must succeed");
 }

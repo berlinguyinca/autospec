@@ -10,8 +10,10 @@
   Removing shell lowers the entries it touches in the same commit, and an
   entry whose file is gone is a finding of its own, so the allowlist cannot
   drift above reality. The shipped allowlist is pinned by a test that scans
-  the real repository (the bats ratchet's shape), and reseed is an env-gated
-  helper (`AUTOSPEC_SHELL_RATCHET_RESEED=1`) that refuses to raise an entry.
+  the real repository (the bats ratchet's shape), and the env-gated reseed
+  helper (`AUTOSPEC_SHELL_RATCHET_RESEED=1`) only drops dead entries — it
+  refuses to change a live entry in either direction, since a raise breaks
+  the one-way property and a fall can erase a deliberate raise.
   `autospec_core::shell_ratchet` replaces `verdict`/`RatchetVerdict` and
   `diff_verdict`/`RatchetDiffVerdict` with `allowlist_verdict`,
   `allowlist_diff_verdict`, `raised_entries`, and the `Allowlist` type.
