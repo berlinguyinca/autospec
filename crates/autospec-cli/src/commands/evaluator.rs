@@ -2,10 +2,7 @@
 
 pub mod args;
 mod epoch_cmds;
-mod fsutil;
 mod registry_cmds;
-pub mod store;
-pub mod types;
 
 use crate::commands::CommandFailure;
 

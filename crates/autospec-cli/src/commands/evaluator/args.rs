@@ -3,9 +3,19 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::store::EvaluationStore;
-use super::types::EvaluatorVersionRef;
-use crate::commands::CommandFailure;
+use autospec_core::evaluation::ids::EvaluatorVersionRef;
+use autospec_core::evaluation::store::{EvaluationError, EvaluationStore};
+use crate::commands::{CommandFailure, CommandFailureKind};
+
+impl From<EvaluationError> for CommandFailure {
+    fn from(error: EvaluationError) -> Self {
+        CommandFailure {
+            message: error.to_string(),
+            exit_code: 2,
+            kind: CommandFailureKind::Diagnostic,
+        }
+    }
+}
 
 /// Store-relative flags shared by every subcommand.
 #[derive(Debug)]
@@ -140,15 +150,15 @@ pub fn positional_ref(
     }
     let text = positional
         .ok_or_else(|| CommandFailure::diagnostic(format!("{command} requires <slot@version>")))?;
-    let reference: EvaluatorVersionRef = text.parse().map_err(|err| {
+    let reference = EvaluatorVersionRef::parse(&text).map_err(|err| {
         CommandFailure::diagnostic(format!("invalid <slot@version> {text:?}: {err}"))
     })?;
     Ok((reference, flags))
 }
 
 /// Open the store under `<root>/.autospec/evaluation`.
-pub fn open_store(root: &std::path::Path) -> EvaluationStore {
-    EvaluationStore::new(root.join(".autospec").join("evaluation"))
+pub fn open_store(root: &std::path::Path) -> Result<EvaluationStore, CommandFailure> {
+    EvaluationStore::open(root).map_err(CommandFailure::from)
 }
 
 #[cfg(test)]

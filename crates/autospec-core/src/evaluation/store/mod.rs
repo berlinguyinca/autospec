@@ -19,6 +19,7 @@
 pub mod io;
 pub mod journal;
 pub mod layout;
+mod pin;
 
 use std::fmt;
 
