@@ -522,3 +522,32 @@ fn assert_recovery_accountability_targets_existing_epic(fixture: &ForegroundFixt
     assert!(calls.contains("issue\nedit\n999"));
     assert!(!calls.contains("issue\ncomment\n999"));
 }
+
+#[test]
+fn tree_snapshot_excludes_version_control_metadata_by_construction() {
+    // #4534: a tree snapshot that includes `.git` asserts that reading a
+    // repository does not touch it -- git rewrites `.git/index` as a side
+    // effect of being read, so a test that snapshots a live repository
+    // would turn a correct command into a red test. The exclusion is built
+    // into the snapshot itself, so a future test that snapshots a tree with
+    // a live `.git` cannot rediscover the defect.
+    let root = temp_dir("autospec-tree-snapshot-contract");
+    fs::create_dir_all(root.join("repo/.git")).expect("create .git");
+    fs::write(root.join("repo/.git/index"), b"v1").expect("write index");
+    fs::write(root.join("repo/kept.txt"), b"kept").expect("write kept file");
+    let before = snapshot_tree(&root);
+    // The side effect a git read performs: the index is rewritten.
+    fs::write(root.join("repo/.git/index"), b"v2").expect("rewrite index");
+    let after = snapshot_tree(&root);
+    assert_eq!(before, after, "a git read must not show up in the snapshot");
+    let mut leaked = false;
+    for key in after.keys() {
+        if key.to_string_lossy().contains(".git") {
+            leaked = true;
+        }
+    }
+    assert!(!leaked, "no version-control metadata in the snapshot");
+    let kept = PathBuf::from("repo/kept.txt");
+    assert!(after.contains_key(&kept), "kept file");
+    let _ = fs::remove_dir_all(&root);
+}

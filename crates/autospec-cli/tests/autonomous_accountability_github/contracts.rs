@@ -595,9 +595,9 @@ fn snapshot_tree(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
         for entry in fs::read_dir(path).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
-            if path.is_dir() {
+            if path.is_dir() && path.file_name() != Some(std::ffi::OsStr::new(".git")) {
                 visit(root, &path, snapshot);
-            } else {
+            } else if !path.is_dir() {
                 snapshot.insert(
                     path.strip_prefix(root).unwrap().to_path_buf(),
                     fs::read(path).unwrap(),
