@@ -173,16 +173,43 @@ pub fn publish_overwrite(path: &Path, bytes: &[u8]) -> Result<PublishReceipt, Sa
     let previous = path.metadata().ok().map(|_| path.to_path_buf());
     reject_if_held(path, &open_file_holders(path))?;
     let temp = temp_path_for(path);
+    let mut guard = TempGuard(temp.clone());
     write_temp_bytes(&temp, bytes)?;
     // Re-check immediately before the rename: a reader that opened the file
     // after the first check is still caught here. The residual window is
     // sub-millisecond; only the versioned path can never disturb a reader.
+    // A refusal here still removes the temp file (#4526): a refused publish
+    // leaves no trace in the target directory.
     reject_if_held(path, &open_file_holders(path))?;
     rename_temp(&temp, path)?;
+    guard.disarm();
     Ok(PublishReceipt {
         published_to: path.to_path_buf(),
         previous,
     })
+}
+
+/// The temp file of an in-flight overwrite, removed unless the rename
+/// succeeded: a refusal between the write and the rename must not leave a
+/// `.safe-publish-*` file behind in the target directory (#4526). After a
+/// successful rename the removal is a no-op: the temp file is the target
+/// now.
+struct TempGuard(PathBuf);
+
+impl TempGuard {
+    /// The rename succeeded (or the temp was already removed by the error
+    /// path): stop the guard from touching the target.
+    fn disarm(&mut self) {
+        self.0 = PathBuf::new();
+    }
+}
+
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        if !self.0.as_os_str().is_empty() {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
 }
 
 /// Versioned publish: write the new bytes to the next free versioned sibling
@@ -192,8 +219,10 @@ pub fn publish_overwrite(path: &Path, bytes: &[u8]) -> Result<PublishReceipt, Sa
 pub fn publish_versioned(path: &Path, bytes: &[u8]) -> Result<PublishReceipt, SafePublishError> {
     if path.metadata().is_err() {
         let temp = temp_path_for(path);
+        let mut guard = TempGuard(temp.clone());
         write_temp_bytes(&temp, bytes)?;
         rename_temp(&temp, path)?;
+        guard.disarm();
         return Ok(PublishReceipt {
             published_to: path.to_path_buf(),
             previous: None,
@@ -201,8 +230,10 @@ pub fn publish_versioned(path: &Path, bytes: &[u8]) -> Result<PublishReceipt, Sa
     }
     let target = next_versioned_path(path);
     let temp = temp_path_for(&target);
+    let mut guard = TempGuard(temp.clone());
     write_temp_bytes(&temp, bytes)?;
     rename_temp(&temp, &target)?;
+    guard.disarm();
     Ok(PublishReceipt {
         published_to: target,
         previous: Some(path.to_path_buf()),
@@ -312,5 +343,43 @@ fn io_err(operation: &str, path: &Path, error: std::io::Error) -> SafePublishErr
         operation: operation.to_owned(),
         path: path.to_path_buf(),
         source: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod temp_guard_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn the_guard_removes_an_unrefused_temp_and_leaves_a_published_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "autospec-safe-publish-guard-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let temp = dir.join(".x.safe-publish-test-0");
+
+        // Disarmed after the rename: the temp file is the target now, and
+        // the guard must not delete it.
+        fs::write(&temp, "published").unwrap();
+        {
+            let mut guard = TempGuard(temp.clone());
+            guard.disarm();
+        }
+        assert!(temp.exists(), "a disarmed guard must leave the target");
+
+        // Still armed (a refusal between write and rename): the temp file
+        // is removed, so a refused publish leaves no trace (#4526).
+        fs::write(&temp, "unpublished").unwrap();
+        {
+            let guard = TempGuard(temp.clone());
+        }
+        assert!(!temp.exists(), "an armed guard must remove the temp");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
