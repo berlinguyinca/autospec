@@ -534,19 +534,41 @@ fn executor_supervision_descendant_capture_reserves_descriptor_headroom() {
 
     let mut set =
         bridge::OwnedProcessSet::from_forked_child(leader.id()).expect("capture tree leader");
-    let ceiling = bridge::open_descriptor_count().expect("open descriptor count") + 36;
+    // The ceiling is the open count plus one reserve (32) plus four: the
+    // capture opens one pidfd per descendant, so the budget check is meant
+    // to fire with the full reserve still free.
+    let ceiling = bridge::open_descriptor_count().expect("open descriptor count")
+        + bridge::DESCENDANT_DESCRIPTOR_RESERVE
+        + 4;
     bridge::set_descriptor_limit_override(ceiling);
     let constrained = set.capture_descendants_while_leader_live();
-    let free = bridge::free_descriptor_slots().expect("free descriptor slots");
     bridge::set_descriptor_limit_override(0);
 
     let error = constrained.expect_err("a constrained descriptor budget must fail closed");
     assert!(error.contains("descriptor budget"), "{error}");
+    // The assertion reads the number the budget check itself saw, embedded
+    // in the error and read atomically at the moment of the check. The old
+    // form re-read `free_descriptor_slots()` afterwards, which races the fd
+    // churn of sibling tests in this binary: the check fires at 32 free,
+    // and any descriptor a sibling opens between the check and the re-read
+    // shows up as 31 — the verdict then depended on which targets ran beside
+    // this one (#4557: green in a 225-target workspace run, red when the
+    // target ran alone, same commit).
+    let observed = error
+        .split("budget: ")
+        .nth(1)
+        .and_then(|rest| rest.split(" slots free").next())
+        .and_then(|digits| digits.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("cannot read the observed free slots: {error}"));
     assert!(
-        free >= 32,
-        "descendant capture must leave at least 32 descriptor slots free, saw {free}"
+        observed <= bridge::DESCENDANT_DESCRIPTOR_RESERVE,
+        "the budget check fired above the reserve: {observed}"
     );
 
+    // The headroom the reserve exists for, proven the way it is real: after
+    // the fail-closed stop the process can still open descriptors and
+    // capture the whole tree unconstrained. That is the EMFILE-proof the
+    // old absolute re-read was trying, and failing, to show.
     let mut guard = bridge::AdoptedProcessGuard::new(set);
     guard
         .processes_mut()
