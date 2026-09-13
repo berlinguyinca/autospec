@@ -118,14 +118,16 @@ fn foreground_scan_recovers_stale_pending_startup_heartbeat_pending_before_acqui
             "prior-claim",
             false,
         ),
-        (
-            "current-generation",
-            "2000-01-01T00:00:00Z".to_string(),
-            "blocked-worker",
-            branch,
-            "blocked-claim",
-            false,
-        ),
+        // The "current-generation" subcase (stale claim + expired-dead heartbeat
+        // for the current claim id) once expected acquisition to lose. The gate
+        // that enforced it (`branch_blocks_stale_recovery`, #2864) was removed in
+        // #4104: recovery now proceeds over an abandoned bare branch and an
+        // expired-dead current-generation heartbeat is quarantined, not blocking.
+        // The subcase then failed deterministically in healthy environments and
+        // only "passed" in crowded runs where a load-induced lookup failure
+        // happened to block recovery — a verdict about the environment, not the
+        // claim protocol (#4557). Re-specify it against the post-#4104 contract
+        // before re-adding.
         (
             "live-prior",
             "2000-01-01T00:00:00Z".to_string(),

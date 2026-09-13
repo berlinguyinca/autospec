@@ -503,6 +503,12 @@ fn autonomous_executor_bridge_freeze_captures_descendant_forked_in_cleanup_windo
 }
 
 #[cfg(target_os = "linux")]
+// #4557: the budget error and the `free >= 32` assertion are only supportable while no
+// other test thread in this shared binary opens or closes descriptors — the counts are
+// process-global, so a 225-target workspace run measures the crowd, not the reserve.
+// It runs alone in CI's isolation step (`--exact --include-ignored`), where its verdict
+// holds.
+#[ignore = "fd verdict depends on concurrent test threads (#4557); run alone with --exact --include-ignored"]
 #[test]
 fn executor_supervision_descendant_capture_reserves_descriptor_headroom() {
     // Break caught: a wide real process tree exhausted RLIMIT_NOFILE while descendant pidfds
