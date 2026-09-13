@@ -36,6 +36,8 @@ mod codex_sandbox;
 mod commit_rust;
 mod continuation_event;
 #[cfg(target_os = "linux")]
+mod descendant_headroom;
+#[cfg(target_os = "linux")]
 mod descendant_spawn;
 mod dispatcher_temporary;
 #[cfg(unix)]

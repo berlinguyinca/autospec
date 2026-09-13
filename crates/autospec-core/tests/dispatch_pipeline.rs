@@ -59,11 +59,11 @@ fn pipeline(topology: PipelineTopology) -> DispatchPipeline {
 }
 
 fn queue(stamped_at: Option<u64>, entries: &[u64]) -> QueueFile {
-    QueueFile {
-        entries: entries.to_vec(),
-        refreshed_at: stamped_at,
-        refreshed_by: stamped_at.map(|_| "refresh-queue".to_string()),
-    }
+    let mut file = QueueFile::default();
+    file.entries = entries.to_vec();
+    file.refreshed_at = stamped_at;
+    file.refreshed_by = stamped_at.map(|_| "refresh-queue".to_string());
+    file
 }
 
 // ── Invariant 2: staleness is a named failure, never "no work" ──────────────

@@ -639,11 +639,12 @@ mod tests {
     fn walk_summary_from_tick_partitions_and_reconciles() {
         use crate::dispatch_pipeline::{EntryState, LifecycleLedger};
         const NOW: u64 = 1_800_000_000;
-        let queue = QueueFile {
+        let mut queue = QueueFile {
             entries: vec![1, 2, 3, 4, 5],
-            refreshed_at: Some(NOW - 60),
-            refreshed_by: Some("test".to_string()),
+            ..Default::default()
         };
+        queue.refreshed_at = Some(NOW - 60);
+        queue.refreshed_by = Some("test".to_string());
         let mut ledger = LifecycleLedger::new();
         ledger.hold(1, "in flight", NOW);
         ledger.record(2, EntryState::Produced, NOW);
@@ -668,11 +669,12 @@ mod tests {
     fn walk_summary_required_on_zero_eligible_nonempty() {
         use crate::dispatch_pipeline::{EntryState, LifecycleLedger};
         const NOW: u64 = 1_800_000_000;
-        let queue = QueueFile {
+        let mut queue = QueueFile {
             entries: vec![1, 2],
-            refreshed_at: Some(NOW - 60),
-            refreshed_by: Some("test".to_string()),
+            ..Default::default()
         };
+        queue.refreshed_at = Some(NOW - 60);
+        queue.refreshed_by = Some("test".to_string());
         let mut ledger = LifecycleLedger::new();
         ledger.hold(1, "in flight", NOW);
         ledger.record(2, EntryState::Produced, NOW);
@@ -689,11 +691,7 @@ mod tests {
     #[test]
     fn walk_summary_empty_queue_not_required() {
         use crate::dispatch_pipeline::LifecycleLedger;
-        let queue = QueueFile {
-            entries: Vec::new(),
-            refreshed_at: None,
-            refreshed_by: None,
-        };
+        let queue = QueueFile::default();
         let ledger = LifecycleLedger::new();
         let tick = DispatchTick::run(&queue, &ledger);
         let summary = WalkSummary::from_tick(&queue, &tick);

@@ -160,6 +160,24 @@ fn overwrite_refuses_while_a_reader_holds_the_file() {
     fs::write(&file, "old content\n").unwrap();
 
     let holder = Holder::spawn(&dir, &file);
+    // The holder must actually hold before the refusal is asserted: `tail -f`
+    // needs a moment to open the file, and a publish that races that open is
+    // a different scenario. Polling the same /proc fact the producer checks
+    // makes the precondition deterministic instead of load-dependent
+    // (#4526).
+    // The poll sleep is at the deadline-ratchet threshold (50 ms): the open
+    // completes in a few milliseconds, and twenty polls bound the wait at
+    // a second.
+    for _ in 0..20 {
+        if matches!(open_file_holders(&file), OpenersStatus::Holders(_)) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        matches!(open_file_holders(&file), OpenersStatus::Holders(_)),
+        "the holder must hold before the refusal is asserted"
+    );
     match publish_overwrite(&file, b"new content\n") {
         Err(SafePublishError::Refused { path, holders }) => {
             assert_eq!(path, file);
