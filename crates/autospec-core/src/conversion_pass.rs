@@ -45,6 +45,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::patch_language::PatchLanguage;
 use crate::unfed_pass::{examined_line, unfed_line, PassCounters};
 
 /// Why a patch on disk is not offered to the pass: something already
@@ -109,6 +110,11 @@ pub struct PatchCandidate {
     pub pull_request_exists: bool,
     /// A recorded HELD entry owns this issue and its re-gate still holds.
     pub held_recorded: bool,
+    /// The patch's language class ([`crate::patch_language::classify`])
+    /// from its file list. Only [`PatchLanguage::RustGo`] is offerable: the
+    /// Rust gate cannot fail on a shell-only or a neither patch, so a green
+    /// gate there means the gate did not read the patch (issue #4559).
+    pub language: PatchLanguage,
 }
 
 /// The disqualifier for a candidate's three booleans, or `None` when the
@@ -129,14 +135,27 @@ pub fn disqualification(
     }
 }
 
+/// A patch held for its language, not its attempt state: it will never
+/// convert, so the hold is terminal (archivable), not a re-gate queue entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageHold {
+    pub candidate: Candidate,
+    pub language: PatchLanguage,
+}
+
 /// The result of selecting the fresh patches to attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Selection {
-    /// The patches to attempt this pass: those with no disqualifier.
+    /// The patches to attempt this pass: those with no disqualifier and an
+    /// offerable language.
     pub fresh: Vec<Candidate>,
-    /// The patches not offered, each paired with the disqualifier that
-    /// excluded it.
+    /// The patches not offered by attempt state, each paired with the
+    /// disqualifier that excluded it.
     pub disqualified: Vec<(Candidate, Disqualification)>,
+    /// The patches not offered by language (issue #4559): shell-only, mixed,
+    /// or neither — the gate cannot evaluate them, so they are held
+    /// unevaluated, never gated, never branched.
+    pub language_held: Vec<LanguageHold>,
 }
 
 /// The "11, not 121" selection (step 2 of the pass).
@@ -148,14 +167,24 @@ pub struct Selection {
 pub fn select_fresh(candidates: &[PatchCandidate]) -> Selection {
     let mut selection = Selection::default();
     for candidate in candidates {
+        // Attempt state wins: the cheapest local fact (a branch, a PR, a
+        // HELD entry) is cited before the language verdict, which costs a
+        // patch read. A branch-owned shell patch is reported as branch-held.
         match disqualification(
             candidate.branch_exists,
             candidate.pull_request_exists,
             candidate.held_recorded,
         ) {
-            None => selection.fresh.push(Candidate {
+            None if candidate.language.offerable() => selection.fresh.push(Candidate {
                 issue: candidate.issue,
                 patch_key: candidate.patch_key.clone(),
+            }),
+            None => selection.language_held.push(LanguageHold {
+                candidate: Candidate {
+                    issue: candidate.issue,
+                    patch_key: candidate.patch_key.clone(),
+                },
+                language: candidate.language,
             }),
             Some(reason) => selection.disqualified.push((
                 Candidate {
@@ -195,14 +224,35 @@ impl Selection {
         ]
     }
 
+    /// The not-offered patches grouped by language, in shell → mixed →
+    /// neither order. Mixed is counted on its own deliberately: an agent
+    /// asked for Rust that produced shell is a prompt signal, not just
+    /// another hold (issue #4559).
+    pub fn language_counts(&self) -> [(PatchLanguage, usize); 3] {
+        let count = |want: PatchLanguage| {
+            self.language_held
+                .iter()
+                .filter(|hold| hold.language == want)
+                .count()
+        };
+        [
+            (PatchLanguage::Shell, count(PatchLanguage::Shell)),
+            (PatchLanguage::Mixed, count(PatchLanguage::Mixed)),
+            (PatchLanguage::Neither, count(PatchLanguage::Neither)),
+        ]
+    }
+
     /// The one-line plan summary: how many were examined, how many are fresh,
-    /// and how each disqualifier accounted for the rest. `examined` is the
-    /// size of the input the pass was handed — a zero fresh count read against
-    /// it is what keeps an idle pass distinct from a broken one.
+    /// and how each disqualifier and language class accounted for the rest.
+    /// `examined` is the size of the input the pass was handed — a zero fresh
+    /// count read against it is what keeps an idle pass distinct from a
+    /// broken one, and a pass that held everything must not print the idle
+    /// counters (issue #4559).
     pub fn line(&self, examined: usize) -> String {
         let [(branch, branch_n), (pr, pr_n), (held, held_n)] = self.disqualified_counts();
+        let [(shell, shell_n), (mixed, mixed_n), (neither, neither_n)] = self.language_counts();
         format!(
-            "conversion pass: examined={examined} fresh={} ({} {} {} {} {} {})",
+            "conversion pass: examined={examined} fresh={} ({} {} {} {} {} {}; language: {} {} {} {} {} {})",
             self.fresh.len(),
             branch_n,
             branch.as_str(),
@@ -210,6 +260,12 @@ impl Selection {
             pr.as_str(),
             held_n,
             held.as_str(),
+            shell_n,
+            shell.as_str(),
+            mixed_n,
+            mixed.as_str(),
+            neither_n,
+            neither.as_str(),
         )
     }
 }
@@ -354,6 +410,7 @@ mod tests {
             branch_exists: true,
             pull_request_exists: true,
             held_recorded: true,
+            language: PatchLanguage::Shell,
         };
         let selection = select_fresh(&[all]);
         assert_eq!(
@@ -361,6 +418,50 @@ mod tests {
             Disqualification::Branch,
             "branch is checked first and is the cited reason"
         );
+    }
+
+    #[test]
+    fn attempt_state_wins_over_language_and_language_holds_are_terminal() {
+        // A branch-owned shell patch is reported as branch-held (the cheap
+        // fact is cited first); a fresh shell patch is language-held, and a
+        // fresh Rust patch is offered — the three buckets reconcile.
+        let candidates = vec![
+            with_flag(fresh(1), |c| {
+                c.branch_exists = true;
+                c.language = PatchLanguage::Shell;
+            }),
+            with_flag(fresh(2), |c| c.language = PatchLanguage::Shell),
+            with_flag(fresh(3), |c| c.language = PatchLanguage::Mixed),
+            with_flag(fresh(4), |c| c.language = PatchLanguage::Neither),
+            fresh(5),
+        ];
+        let selection = select_fresh(&candidates);
+        assert_eq!(selection.fresh_count(), 1);
+        assert_eq!(selection.fresh[0].issue, 5);
+        assert_eq!(selection.disqualified.len(), 1);
+        assert_eq!(selection.disqualified[0].1, Disqualification::Branch);
+        let held: Vec<(u64, PatchLanguage)> = selection
+            .language_held
+            .iter()
+            .map(|h| (h.candidate.issue, h.language))
+            .collect();
+        assert_eq!(
+            held,
+            vec![
+                (2, PatchLanguage::Shell),
+                (3, PatchLanguage::Mixed),
+                (4, PatchLanguage::Neither)
+            ]
+        );
+        // The buckets reconcile against the input size.
+        assert_eq!(
+            selection.fresh.len() + selection.disqualified.len() + selection.language_held.len(),
+            candidates.len()
+        );
+        let counts = selection.language_counts();
+        assert_eq!(counts[0], (PatchLanguage::Shell, 1));
+        assert_eq!(counts[1], (PatchLanguage::Mixed, 1));
+        assert_eq!(counts[2], (PatchLanguage::Neither, 1));
     }
 
     #[test]

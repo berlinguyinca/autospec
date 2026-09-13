@@ -114,6 +114,8 @@ pub mod merge_gate;
 pub mod name_scope;
 pub mod negative_evidence;
 pub mod not_reproducible;
+pub mod patch_archive;
+pub mod patch_language;
 pub mod planning;
 pub mod platform_gate;
 
