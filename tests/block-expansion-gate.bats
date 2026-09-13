@@ -348,9 +348,7 @@ ENDMARKER
         local sf="$REPO_ROOT/skills/$skill/SKILL.md"
         [ -f "$sf" ] || continue
         # Skipped skills must NOT have been markered with the core block.
-        if grep -qF 'autospec-block:harness-adapter-core' "$sf"; then
-            false
-        fi
+        if grep -qF 'autospec-block:harness-adapter-core' "$sf"; then false; fi
         # They still describe an adapter / dispatch capability inline.
         grep -qE 'Required capabilities & harness adapter|Subagent (model tier|dispatch)' "$sf"
     done

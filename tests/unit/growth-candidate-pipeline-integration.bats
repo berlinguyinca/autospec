@@ -27,9 +27,7 @@ ledline() { echo "{\"round\":1,\"source\":\"keyword-gap\",\"title\":\"seen\",\"n
   # 2. dedup against ledger
   bash "$S/growth-candidate-dedup.sh" "$TMP/cands.jsonl" "$GROWTH_LEDGER" > "$TMP/deduped.jsonl"
   [ "$(grep -c '"norm_title"' "$TMP/deduped.jsonl")" -eq 2 ]
-  if grep -q '"norm_title":"seen"' "$TMP/deduped.jsonl"; then
-      false
-  fi
+  if grep -q '"norm_title":"seen"' "$TMP/deduped.jsonl"; then false; fi
 
   # 3. verify each survivor (all real:true here) -> collect
   echo '{"real":true,"reason":"ok"}' > "$TMP/v.json"

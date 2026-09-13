@@ -132,9 +132,7 @@ MD
   [ "$output" = ".autospec/state/knowledge-graph.json" ]
   grep -q '## State Of The Repo' "$TEST_TMPDIR/repo/.autospec/reports/digital-twin.md"
   grep -q 'multiple charting libraries' "$TEST_TMPDIR/repo/.autospec/reports/technology-registry.md"
-  if grep -q 'sk-' "$TEST_TMPDIR/repo/.autospec/reports/settings-registry.md"; then
-      false
-  fi
+  if grep -q 'sk-' "$TEST_TMPDIR/repo/.autospec/reports/settings-registry.md"; then false; fi
 
   cp "$TEST_TMPDIR/repo/.autospec/state/repository-inventory.json" "$TEST_TMPDIR/first.json"
   run bash "$BUILD" --repo-root "$TEST_TMPDIR/repo"

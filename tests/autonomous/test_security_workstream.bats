@@ -73,9 +73,7 @@ RS
     jq -e 'select(.dimension == "unsafe" and .file == "src/missing-invariant.rs" and .line == 2)' "$WORK/ranked.jsonl" >/dev/null
     jq -e 'select(.dimension == "unsafe" and .file == "src/reviewed.rs" and .line == 2)' "$WORK/ranked.jsonl" >/dev/null
     [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "src/multiple.rs")] | length' "$WORK/ranked.jsonl")" -eq 2 ]
-    if jq -e 'select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")' "$WORK/ranked.jsonl" >/dev/null; then
-        false
-    fi
+    if jq -e 'select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")' "$WORK/ranked.jsonl" >/dev/null; then false; fi
 
     cat >> "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
 

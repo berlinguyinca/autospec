@@ -88,9 +88,7 @@ teardown() {
 
     # A pending-classification gap-remediation issue was filed for the survivor.
     grep -q "issue create" "$GH_CREATE_LOG"
-    if grep -q "auto-implement" "$GH_CREATE_LOG"; then
-        false
-    fi
+    if grep -q "auto-implement" "$GH_CREATE_LOG"; then false; fi
     grep -q "needs-classify" "$GH_CREATE_LOG"
     grep -q "gap-remediation" "$GH_CREATE_LOG"
 

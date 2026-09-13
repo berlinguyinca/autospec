@@ -192,9 +192,7 @@ was_removed() { grep -qF "$1" "$REMOVE_LOG"; }
 
     run_gc
     [ "$status" -eq 0 ]
-    if was_removed "$wt"; then
-        false
-    fi
+    if was_removed "$wt"; then false; fi
     [ ! -s "$RUNTIME_CLEANUP_LOG" ]
 }
 
@@ -208,9 +206,7 @@ was_removed() { grep -qF "$1" "$REMOVE_LOG"; }
 
     run_gc
     [ "$status" -eq 0 ]
-    if was_removed "$wt"; then
-        false
-    fi
+    if was_removed "$wt"; then false; fi
     [ ! -s "$RUNTIME_CLEANUP_LOG" ]
 }
 

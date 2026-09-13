@@ -76,9 +76,7 @@ EOS
     printf '%s\n' "$output" > "$expanded"
     # The placeholder still resolves — the block is not silently emptied.
     grep -q 'SKILL_NAME=autospec-run' "$expanded"
-    if grep -q '="\$1"' "$expanded"; then
-        false
-    fi
+    if grep -q '="\$1"' "$expanded"; then false; fi
     ! grep -q '="\$2"' "$expanded"
 }
 

@@ -175,9 +175,7 @@ EOF
     run bash "$SCAN" --tree --root "$FIX" --only pii
     [ "$status" -eq 0 ]
     # pii-ui.js ("email address" prose) and pii-nosink.py (assignment, no sink) must NOT appear
-    if printf '%s' "$output" | grep -q 'pii-ui.js'; then
-        false
-    fi
+    if printf '%s' "$output" | grep -q 'pii-ui.js'; then false; fi
     ! printf '%s' "$output" | grep -q 'pii-nosink.py'
 }
 

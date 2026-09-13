@@ -238,9 +238,7 @@ open('big.py', 'w').write('\n'.join(lines) + '\n')
 "
     git add big.py
     run env AUTOSPEC_COMPLEXITY_ENFORCE=1 bash "$GATES" --staged
-    if printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'; then
-        false
-    fi
+    if printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'; then false; fi
     [ "$status" -eq 1 ]
     printf '%s\n' "$output" | grep -q "^COMPLEXITY:big.py:.*AUTOSPEC_MAX_FUNC_LOC"
 }
@@ -288,9 +286,7 @@ open('big.py', 'w').write('\n'.join(lines) + '\n')
     run bash "$GATES" --staged
     # The delegated linter still emits its absolute finding; the wrapper drops it
     # because the file did not get longer.
-    if printf '%s\n' "$output" | grep -q 'file is 899 LOC'; then
-        false
-    fi
+    if printf '%s\n' "$output" | grep -q 'file is 899 LOC'; then false; fi
     ! printf '%s\n' "$output" | grep -q 'AUTOSPEC_MAX_FILE_LOC'
 }
 

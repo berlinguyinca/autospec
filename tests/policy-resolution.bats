@@ -91,9 +91,7 @@ JSON
   run bash "$SCRIPT" --repo "$TEST_TMP/repo" --project-class client-project --event-file "$TEST_TMP/event.json"
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -q '"privacy_tier":"metadata-only"'
-  if printf '%s\n' "$output" | grep -q 'artifact_details'; then
-      false
-  fi
+  if printf '%s\n' "$output" | grep -q 'artifact_details'; then false; fi
   ! printf '%s\n' "$output" | grep -q 'secret log'
 }
 

@@ -175,9 +175,7 @@ claim_release() {
 
     [ "$status" -eq 0 ]
     grep -Fx auto-implement "$LABELS"
-    if grep -Fx in-progress-by-bot "$LABELS"; then
-        false
-    fi
+    if grep -Fx in-progress-by-bot "$LABELS"; then false; fi
     run jq -r '.[0].body | contains("\"state\":\"released\"")' "$COMMENTS"
     [ "$output" = "true" ]
 }
@@ -188,12 +186,8 @@ claim_release() {
     run claim_release --issue 42 --repo testorg/testrepo --worker-id worker-a --state merged --pr 99
 
     [ "$status" -eq 0 ]
-    if grep -Fx in-progress-by-bot "$LABELS"; then
-        false
-    fi
-    if grep -Fx auto-implement "$LABELS"; then
-        false
-    fi
+    if grep -Fx in-progress-by-bot "$LABELS"; then false; fi
+    if grep -Fx auto-implement "$LABELS"; then false; fi
     run jq -r '.[0].body | contains("\"state\":\"merged\"") and contains("\"pr\":\"99\"")' "$COMMENTS"
     [ "$output" = "true" ]
 }

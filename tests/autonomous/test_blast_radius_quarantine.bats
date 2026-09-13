@@ -114,9 +114,7 @@ teardown() {
 
     [ "$status" -eq 0 ]
     printf '%s\n' "$output" | grep -q '^quarantine fenced_surface$'
-    if printf '%s\n' "$output" | grep -q '^merge-ok$'; then
-        false
-    fi
+    if printf '%s\n' "$output" | grep -q '^merge-ok$'; then false; fi
     [ ! -s "$QA_LOG" ]
     grep -q 'autospec:needs-human' "$GH_LOG"
     [ -f "$quarantine" ]

@@ -62,9 +62,7 @@ assert_dead() {
     run bash -c "source '$LIB'; autospec_kill_tree $LEADER_PID none"
     [ "$status" -eq 0 ]
     wait "$LEADER_PID" 2>/dev/null || true # linter:allow-VACUOUS_OR_TRUE reaps the zombie; the assertion is the next line
-    if kill -0 "$LEADER_PID" 2>/dev/null; then
-        false
-    fi
+    if kill -0 "$LEADER_PID" 2>/dev/null; then false; fi
     kill -0 "$CHILD_PID" 2>/dev/null
     kill -0 "$ORPHAN_PID" 2>/dev/null
     kill -0 "$NESTED_PID" 2>/dev/null

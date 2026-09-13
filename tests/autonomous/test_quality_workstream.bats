@@ -74,12 +74,8 @@ JSONL
     [ "$status" -eq 0 ]
     [[ "$output" == *"quarantined tests::sometimes_times_out"* ]]
     grep -q '"flakes":1' "$WORK/flakes.jsonl"
-    if grep -q '"coverage":100' "$WORK/flakes.jsonl"; then
-        false
-    fi
-    if grep -q '"mutation":100' "$WORK/flakes.jsonl"; then
-        false
-    fi
+    if grep -q '"coverage":100' "$WORK/flakes.jsonl"; then false; fi
+    if grep -q '"mutation":100' "$WORK/flakes.jsonl"; then false; fi
     grep -q '"test":"tests::sometimes_times_out"' "$WORK/quarantine.jsonl"
     grep -q 'failed 2/5 retries' "$WORK/issues/autospec-cli-tests-sometimes-times-out.md"
     grep -q 'hardening' "$WORK/issues/autospec-cli-tests-sometimes-times-out.md"

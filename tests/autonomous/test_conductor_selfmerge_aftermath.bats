@@ -335,9 +335,7 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"code_health:self_originated_parked"* ]]
   grep -q '^issues=202 kind=absent$' "$RUN_CMD_LOG"
-  if grep -q 'issues=101' "$RUN_CMD_LOG"; then
-      false
-  fi
+  if grep -q 'issues=101' "$RUN_CMD_LOG"; then false; fi
   grep -q 'self-originated tiers parked' "$NOTIFY_LOG"
 }
 
@@ -356,9 +354,7 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"code_health:self_originated_parked"* ]]
   grep -q '^issues=202 kind=absent$' "$RUN_CMD_LOG"
-  if grep -q 'issues=101' "$RUN_CMD_LOG"; then
-      false
-  fi
+  if grep -q 'issues=101' "$RUN_CMD_LOG"; then false; fi
   grep -q 'self-originated tiers parked: max_open_prs' "$NOTIFY_LOG"
 }
 
@@ -436,9 +432,7 @@ EOF
 
   [ "$status" -eq 0 ]
   grep -q '^issues=101 kind=integration$' "$RUN_CMD_LOG"
-  if grep -q '^rollup-update' "$INT_CALL_LOG"; then
-      false
-  fi
+  if grep -q '^rollup-update' "$INT_CALL_LOG"; then false; fi
   [ ! -f "$PAUSE_FILE" ]
 }
 

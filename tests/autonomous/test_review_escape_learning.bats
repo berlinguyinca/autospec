@@ -99,9 +99,7 @@ JSON
   run_candidates
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  if printf '%s\n' "$output" | grep -q .; then
-      false
-  fi
+  if printf '%s\n' "$output" | grep -q .; then false; fi
   [ ! -s "$LIFECYCLE" ]
 }
 

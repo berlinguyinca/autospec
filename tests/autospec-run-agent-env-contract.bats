@@ -14,9 +14,7 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
     grep -q 'autospec runtime env up --repo "$PWD"' "$expanded"
     grep -q 'AUTOSPEC_PUBLIC_URL.*canonical browser/QA URL' "$expanded"
     grep -q 'autospec runtime env down --repo /tmp/wt-<BRANCH>' "$surface"
-    if grep -q 'agent-env.sh' "$surface"; then
-        false
-    fi
+    if grep -q 'agent-env.sh' "$surface"; then false; fi
   done
 }
 
@@ -44,9 +42,7 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   block="$REPO_ROOT/templates/skill-blocks/runtime-resource-preflight.md"
   [ -f "$block" ]
   grep -q 'autospec runtime env normalize-compose --repo "$PWD" --check' "$block"
-  if grep -B2 -A2 'normalize-compose --repo' "$block" | grep -Eq '\[ -f .*runtime\.yml|manifest.*exists'; then
-      false
-  fi
+  if grep -B2 -A2 'normalize-compose --repo' "$block" | grep -Eq '\[ -f .*runtime\.yml|manifest.*exists'; then false; fi
 }
 
 @test "Phase 4 cleanup releases runtime resources before Git removal" {
@@ -58,8 +54,6 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
     "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
     "$REPO_ROOT/skills/autospec-run/opencode/agent.md"; do
     grep -E 'autospec runtime env down --repo /tmp/wt-<BRANCH>.*autospec-runtime-worktree-cleanup\.sh.*worktree remove /tmp/wt-<BRANCH>' "$surface"
-    if grep -E 'autospec runtime env down .*\|\| true' "$surface"; then
-        false
-    fi
+    if grep -E 'autospec runtime env down .*\|\| true' "$surface"; then false; fi
   done
 }

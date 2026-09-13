@@ -242,9 +242,7 @@ run_sweep() {
     grep -q 'Current blob:' "$BATS_TEST_TMPDIR/recurrence-body"
     grep -q '"filing_status":"reopened"' "$VERDICT"
     [ "$(issue_body 43 | grep -c 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/classify.py scope=<file>')" -eq 1 ]
-    if issue_body 43 | grep -q 'pending-reopen'; then
-        false
-    fi
+    if issue_body 43 | grep -q 'pending-reopen'; then false; fi
 
     : > "$GH_LOG"
     : > "$VERDICT"
@@ -263,9 +261,7 @@ run_sweep() {
     run_sweep
 
     [ "$status" -eq 0 ]
-    if grep -q '^create$' "$GH_LOG"; then
-        false
-    fi
+    if grep -q '^create$' "$GH_LOG"; then false; fi
     [ "$(issue_body 50 | grep -Fc 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/a\nfile.py scope=<file>')" -eq 1 ]
     issue_body 50 | grep -Fq "blob=$blob"
     ! issue_body 50 | grep -q 'pending-reopen'
@@ -291,9 +287,7 @@ run_sweep() {
     run_sweep
     [ "$status" -eq 0 ]
     [ "$(cat "$GH_LOG")" = $'reopen:51\nedit:51' ]
-    if grep -q '^create$' "$GH_LOG"; then
-        false
-    fi
+    if grep -q '^create$' "$GH_LOG"; then false; fi
     body="$(issue_body 51)"
     [[ "$body" != *'autospec-qa-brute-force:pending-reopen:v1'* ]]
     [ "$(grep -Fc 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/a\nfile.py scope=<file>' <<< "$body")" -eq 1 ]
@@ -326,9 +320,7 @@ run_sweep() {
 
     [ "$status" -eq 0 ]
     [ "$(cat "$GH_LOG")" = $'comment:44\nedit:44' ]
-    if grep -q '^create$' "$GH_LOG"; then
-        false
-    fi
+    if grep -q '^create$' "$GH_LOG"; then false; fi
     grep -q '"filing_status":"not-filed-edit-failed"' "$VERDICT"
 
     : > "$GH_LOG"
@@ -353,9 +345,7 @@ run_sweep() {
     run_sweep
     [ "$status" -eq 0 ]
     [ "$(cat "$GH_LOG")" = $'comment:46\nedit:46\nreopen:46\nedit:46' ]
-    if grep -q '^create$' "$GH_LOG"; then
-        false
-    fi
+    if grep -q '^create$' "$GH_LOG"; then false; fi
     [ "$(issue_body 46 | grep -c 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/classify.py scope=<file>')" -eq 1 ]
     issue_body 46 | grep -q "blob=$blob_a"
     ! issue_body 46 | grep -q 'pending-reopen'
@@ -376,9 +366,7 @@ run_sweep() {
     run_sweep
     [ "$status" -eq 0 ]
     [ "$(cat "$GH_LOG")" = $'reopen:47\nedit:47' ]
-    if grep -q '^create$' "$GH_LOG"; then
-        false
-    fi
+    if grep -q '^create$' "$GH_LOG"; then false; fi
     [ "$(issue_body 47 | grep -c 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/classify.py scope=<file>')" -eq 1 ]
     ! issue_body 47 | grep -q 'pending-reopen'
 }
@@ -398,9 +386,7 @@ run_sweep() {
     run_sweep
     [ "$status" -eq 0 ]
     [ "$(cat "$GH_LOG")" = $'reopen:48\nedit:48' ]
-    if grep -q '^create$' "$GH_LOG"; then
-        false
-    fi
+    if grep -q '^create$' "$GH_LOG"; then false; fi
     ! issue_body 48 | grep -q 'pending-reopen'
 }
 
@@ -419,12 +405,8 @@ run_sweep() {
 
     run_sweep
     [ "$status" -eq 0 ]
-    if grep -q '^create$' "$GH_LOG"; then
-        false
-    fi
-    if issue_body 49 | grep -q 'pending-reopen'; then
-        false
-    fi
+    if grep -q '^create$' "$GH_LOG"; then false; fi
+    if issue_body 49 | grep -q 'pending-reopen'; then false; fi
 
     : > "$GH_LOG"
     : > "$VERDICT"
@@ -514,12 +496,8 @@ run_sweep() {
     grep -q '^label$' "$GH_LOG"
     grep -q '^create$' "$GH_LOG"
     grep -q 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/classify.py scope=<file> blob=' "$BATS_TEST_TMPDIR/create-body"
-    if grep -q '/tmp/' "$BATS_TEST_TMPDIR/create-title"; then
-        false
-    fi
-    if grep -q '/tmp/' "$BATS_TEST_TMPDIR/create-body"; then
-        false
-    fi
+    if grep -q '/tmp/' "$BATS_TEST_TMPDIR/create-title"; then false; fi
+    if grep -q '/tmp/' "$BATS_TEST_TMPDIR/create-body"; then false; fi
     grep -q '"filing_status":"created"' "$VERDICT"
 }
 

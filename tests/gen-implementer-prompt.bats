@@ -69,9 +69,7 @@ FIX="$REPO_ROOT/tests/fixtures/gen-implementer-prompt"
     --stack-profile "$WORK/state/stack-profile.json"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'missing: accessible_primitives reduced_motion_reset'
-  if echo "$output" | grep -q 'ignore all previous instructions'; then
-      false
-  fi
+  if echo "$output" | grep -q 'ignore all previous instructions'; then false; fi
   [ ! -e "$WORK/pwned" ]
   rm -rf "$WORK"
 }
@@ -80,9 +78,7 @@ FIX="$REPO_ROOT/tests/fixtures/gen-implementer-prompt"
   run bash "$BIN" --issue-body "$FIX/issue-438.md" --branch feat/x \
     --stack-profile /nonexistent/stack-profile.json
   [ "$status" -eq 0 ]
-  if echo "$output" | grep -qi "do not hand-roll"; then
-      false
-  fi
+  if echo "$output" | grep -qi "do not hand-roll"; then false; fi
   echo "$output" | grep -q "begin coding now"
 }
 

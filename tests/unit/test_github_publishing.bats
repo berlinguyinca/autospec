@@ -457,9 +457,7 @@ JSON
   [ "$status" -eq 0 ]
   grep -q 'issue list --search autospec-local-issue-id: 001-test-add-baseline-testing-evidence' "$TEST_TMPDIR/gh.log"
   grep -q 'issue edit 77' "$TEST_TMPDIR/gh.log"
-  if grep -q 'issue create' "$TEST_TMPDIR/gh.log"; then
-      false
-  fi
+  if grep -q 'issue create' "$TEST_TMPDIR/gh.log"; then false; fi
   run jq -r '.issues[] | select(.local_issue_id=="001-test-add-baseline-testing-evidence") | .github_issue_number' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
   [ "$output" = "77" ]
 }
@@ -509,9 +507,7 @@ JSON
 
   [ "$status" -eq 0 ]
   grep -q 'issue view 44' "$TEST_TMPDIR/gh.log"
-  if grep -q 'issue reopen 44' "$TEST_TMPDIR/gh.log"; then
-      false
-  fi
+  if grep -q 'issue reopen 44' "$TEST_TMPDIR/gh.log"; then false; fi
   grep -q 'closed; skipped' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.md"
 
   : > "$TEST_TMPDIR/gh.log"

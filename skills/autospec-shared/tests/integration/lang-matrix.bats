@@ -106,9 +106,7 @@ EOF
 }
 
 @test "node: cli avoids debug logging APIs" {
-    if grep -Eq 'console\.(log|debug|info|warn|error)|(^|[^[:alnum:]_])debugger([^[:alnum:]_]|$)' "${MATRIX_DIR}/node/src/cli.ts"; then
-        false
-    fi
+    if grep -Eq 'console\.(log|debug|info|warn|error)|(^|[^[:alnum:]_])debugger([^[:alnum:]_]|$)' "${MATRIX_DIR}/node/src/cli.ts"; then false; fi
 }
 
 @test "node: walker detects cli_command entry_point in cli.ts" {

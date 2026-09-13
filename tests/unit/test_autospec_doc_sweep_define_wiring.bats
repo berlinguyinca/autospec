@@ -39,9 +39,7 @@ setup() {
     # orchestrator, not the old parallel generator.
     block="$(awk '/^### Auto-docs step/{f=1} f{print} /^## Autonomous mode/{if(f)exit}' "$f")"
     printf '%s' "$block" | grep -q 'doc-orchestrator.mjs'
-    if printf '%s' "$block" | grep -q 'gen-docs-from-spec.mjs'; then
-        false
-    fi
+    if printf '%s' "$block" | grep -q 'gen-docs-from-spec.mjs'; then false; fi
   done
 }
 

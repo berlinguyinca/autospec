@@ -342,8 +342,6 @@ EOF
   DRAIN="$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh"
   grep -q 'lib/autospec-process-tree.sh' "$DRAIN"
   grep -q 'autospec_kill_tree "\$child_pid" separate-recursive' "$DRAIN"
-  if grep -q 'pgrep -P' "$DRAIN"; then
-      false
-  fi
+  if grep -q 'pgrep -P' "$DRAIN"; then false; fi
   ! grep -q '^kill_tree()' "$DRAIN"
 }

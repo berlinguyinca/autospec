@@ -93,15 +93,9 @@ MD
     out="$(printf '%s\n' "$output" | grep 'UI_SECTIONS_INCOMPLETE')"
     missing="$(printf '%s' "$out" | sed 's/ (UI issues.*//')"
     printf '%s' "$missing" | grep -q 'Motion & feedback'
-    if printf '%s' "$missing" | grep -q 'Design reference'; then
-        false
-    fi
-    if printf '%s' "$missing" | grep -q 'Interaction states'; then
-        false
-    fi
-    if printf '%s' "$missing" | grep -q 'UX flows'; then
-        false
-    fi
+    if printf '%s' "$missing" | grep -q 'Design reference'; then false; fi
+    if printf '%s' "$missing" | grep -q 'Interaction states'; then false; fi
+    if printf '%s' "$missing" | grep -q 'UX flows'; then false; fi
     ! printf '%s' "$missing" | grep -q 'Device & viewport'
 }
 
@@ -113,15 +107,9 @@ MD
     out="$(printf '%s\n' "$output" | grep 'UI_SECTIONS_INCOMPLETE')"
     missing="$(printf '%s' "$out" | sed 's/ (UI issues.*//')"
     printf '%s' "$missing" | grep -q 'Device & viewport'
-    if printf '%s' "$missing" | grep -q 'Design reference'; then
-        false
-    fi
-    if printf '%s' "$missing" | grep -q 'Interaction states'; then
-        false
-    fi
-    if printf '%s' "$missing" | grep -q 'UX flows'; then
-        false
-    fi
+    if printf '%s' "$missing" | grep -q 'Design reference'; then false; fi
+    if printf '%s' "$missing" | grep -q 'Interaction states'; then false; fi
+    if printf '%s' "$missing" | grep -q 'UX flows'; then false; fi
     ! printf '%s' "$missing" | grep -q 'Motion & feedback'
 }
 
@@ -271,9 +259,7 @@ MD
     } > "$TMP/b.md"
     run bash -c "bash '$LINT' '$TMP/b.md' 2>&1"
     [ "$status" -eq 0 ]
-    if printf '%s\n' "$output" | grep -q 'BODY_TOO_LONG'; then
-        false
-    fi
+    if printf '%s\n' "$output" | grep -q 'BODY_TOO_LONG'; then false; fi
     # The same headings must still register as present, or this would pass because the
     # sections went invisible to both checks rather than because they are exempt.
     ! printf '%s\n' "$output" | grep -q 'UI_SECTIONS_INCOMPLETE'

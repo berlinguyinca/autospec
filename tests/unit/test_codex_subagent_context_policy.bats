@@ -13,8 +13,6 @@ setup() {
 
   for file in "${files[@]}"; do
     grep -Fq 'Codex native subagents with explicit `agent_type`, `model`, or `reasoning_effort` MUST use a bounded handoff, not a full-history fork' "$file"
-    if grep -Fq 'for Codex native subagents, fork/inherit the current conversation context' "$file"; then
-        false
-    fi
+    if grep -Fq 'for Codex native subagents, fork/inherit the current conversation context' "$file"; then false; fi
   done
 }

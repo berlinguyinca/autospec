@@ -13,9 +13,7 @@ RUN_TRIO=(
 
 @test "no second Tier-A regression meta-review dispatch remains in run trio" {
   for f in "${RUN_TRIO[@]}"; do
-    if grep -q 'dispatch a second `TIER_A` subagent' "$f"; then
-        false
-    fi
+    if grep -q 'dispatch a second `TIER_A` subagent' "$f"; then false; fi
   done
 }
 
