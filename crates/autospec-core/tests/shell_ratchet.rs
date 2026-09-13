@@ -1,5 +1,6 @@
 use autospec_core::shell_ratchet::{
-    delta, diff_verdict, measure, verdict, RatchetDiffVerdict, RatchetVerdict,
+    allowlist_diff_verdict, allowlist_verdict, delta, measure, Allowlist, AllowlistDiffVerdict,
+    AllowlistFinding,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -99,54 +100,110 @@ fn measure_records_per_file_line_counts() {
 }
 
 #[test]
-fn a_fix_that_grows_an_existing_file_is_admitted_and_recorded() {
-    // A bug fix frequently needs more lines than the bug — a missing guard,
-    // an extra case. That growth must pass, and it must be recorded.
+fn a_repair_that_fits_the_file_s_accumulated_slack_is_admitted_and_recorded() {
+    // b.sh was at 6 lines; a prior patch shrank it to 5 and kept its entry,
+    // accumulating one line of slack. A repair that spends that slack lands,
+    // and the change is recorded per file.
     let tmp = Tmp::new("t");
-    write(tmp.path(), "scripts/a.sh", "echo one\necho two\n");
-    let base = measure(tmp.path()).unwrap();
     write(
         tmp.path(),
-        "scripts/a.sh",
-        "echo one\necho two\nif [[ -t 1 ]]; then\n  :\nfi\n",
+        "scripts/b.sh",
+        "echo one\necho two\necho three\necho four\necho five\n",
+    );
+    let base = measure(tmp.path()).unwrap();
+    let allowlist = Allowlist::parse("scripts/b.sh 6\n").unwrap();
+    write(
+        tmp.path(),
+        "scripts/b.sh",
+        "echo one\necho two\necho three\necho four\necho five\nfix\n",
     );
     let head = measure(tmp.path()).unwrap();
-    // The ceiling is tight on purpose: the head total (5) is above it, and a
-    // total-only ratchet would refuse the fix.
-    let v = diff_verdict(&base, &head, 3);
-    assert!(!v.is_regression(), "{}", v.message());
-    assert_eq!(v.hold_reason(), "modifies existing shell");
-    let RatchetDiffVerdict::Admitted { delta, .. } = &v else {
-        panic!("expected admitted: {}", v.message());
+    let v = allowlist_diff_verdict(&base, &allowlist, &head, &allowlist);
+    assert!(!v.is_regression(), "{}", v.message("Rust"));
+    assert_eq!(v.hold_reason(), "in sync with the shell allowlist");
+    let AllowlistDiffVerdict::Admitted { delta, .. } = &v else {
+        panic!("expected admitted: {}", v.message("Rust"));
     };
     assert!(delta.maintenance_only());
-    assert_eq!(delta.modified.get("scripts/a.sh"), Some(&(2, 5)));
-    assert!(delta.new_files.is_empty());
+    assert_eq!(delta.modified.get("scripts/b.sh"), Some(&(5, 6)));
     // The growth is reportable in the message, not just in the record.
     assert!(
-        v.message().contains("scripts/a.sh 2 -> 5"),
+        v.message("Rust").contains("scripts/b.sh 5 -> 6"),
         "{}",
-        v.message()
+        v.message("Rust")
     );
 }
 
 #[test]
-fn a_new_shell_file_is_refused_even_when_the_ceiling_has_slack() {
-    // New surface is what the moratorium exists to stop. Ceiling slack does
-    // not turn a new file into a fix.
+fn a_repair_that_grows_a_file_past_its_entry_is_refused() {
+    // The same repair one line too big: over the entry, refused. Raising the
+    // entry to cover the growth is refused too — the one-way property is on
+    // the entry, not on the file.
+    let tmp = Tmp::new("t");
+    write(tmp.path(), "scripts/b.sh", "echo one\necho two\necho three\n");
+    let base = measure(tmp.path()).unwrap();
+    let allowlist = Allowlist::parse("scripts/b.sh 3\n").unwrap();
+    write(
+        tmp.path(),
+        "scripts/b.sh",
+        "echo one\necho two\necho three\nfix\nmore\n",
+    );
+    let head = measure(tmp.path()).unwrap();
+
+    let v = allowlist_diff_verdict(&base, &allowlist, &head, &allowlist);
+    assert!(v.is_regression(), "{}", v.message("Rust"));
+    assert_eq!(v.hold_reason(), "grows shell past its allowlisted entry");
+    let AllowlistDiffVerdict::Refused { findings, .. } = &v else {
+        panic!("expected refusal: {}", v.message("Rust"));
+    };
+    assert_eq!(
+        findings,
+        &[AllowlistFinding::ExceededEntry {
+            path: "scripts/b.sh".to_string(),
+            lines: 5,
+            entry: 3
+        }]
+    );
+
+    let raised = Allowlist::parse("scripts/b.sh 5\n").unwrap();
+    let v = allowlist_diff_verdict(&base, &allowlist, &head, &raised);
+    assert!(v.is_regression(), "{}", v.message("Rust"));
+    let AllowlistDiffVerdict::Refused { findings, .. } = &v else {
+        panic!("expected refusal: {}", v.message("Rust"));
+    };
+    assert_eq!(
+        findings,
+        &[AllowlistFinding::RaisedEntry {
+            path: "scripts/b.sh".to_string(),
+            base: 3,
+            head: 5
+        }]
+    );
+}
+
+#[test]
+fn a_new_shell_file_is_refused_even_when_other_files_have_slack() {
+    // New surface is what the moratorium exists to stop. Another file's slack
+    // does not turn a new file into a fix.
     let tmp = Tmp::new("t");
     write(tmp.path(), "scripts/a.sh", "echo one\n");
     let base = measure(tmp.path()).unwrap();
+    let allowlist = Allowlist::parse("scripts/a.sh 10\n").unwrap(); // 9 of slack
     write(tmp.path(), "scripts/b.sh", "echo new\n");
     let head = measure(tmp.path()).unwrap();
-    let v = diff_verdict(&base, &head, 100);
-    assert!(v.is_regression(), "{}", v.message());
+    let v = allowlist_diff_verdict(&base, &allowlist, &head, &allowlist);
+    assert!(v.is_regression(), "{}", v.message("Rust"));
     assert_eq!(v.hold_reason(), "adds a new shell file");
-    let RatchetDiffVerdict::RefusedNewFiles { delta, .. } = &v else {
-        panic!("expected refusal: {}", v.message());
+    let AllowlistDiffVerdict::Refused { delta, findings, .. } = &v else {
+        panic!("expected refusal: {}", v.message("Rust"));
     };
     assert_eq!(delta.new_files.get("scripts/b.sh"), Some(&1));
     assert_eq!(delta.new_lines(), 1);
+    assert!(findings.contains(&AllowlistFinding::UnlistedFile {
+        path: "scripts/b.sh".to_string(),
+        lines: 1
+    }));
+    assert!(v.message("Rust").contains("scripts/b.sh"), "{}", v.message("Rust"));
 }
 
 #[test]
@@ -154,25 +211,50 @@ fn a_new_bats_file_is_refused_like_shell() {
     let tmp = Tmp::new("t");
     write(tmp.path(), "scripts/a.sh", "echo one\n");
     let base = measure(tmp.path()).unwrap();
-    write(
-        tmp.path(),
-        "tests/unit/x.bats",
-        "@test \"y\" {\n  true\n}\n",
-    );
+    let allowlist = Allowlist::seed(&base);
+    write(tmp.path(), "tests/unit/x.bats", "@test \"y\" {\n  true\n}\n");
     let head = measure(tmp.path()).unwrap();
-    let v = diff_verdict(&base, &head, 100);
-    assert!(v.is_regression(), "{}", v.message());
+    let v = allowlist_diff_verdict(&base, &allowlist, &head, &allowlist);
+    assert!(v.is_regression(), "{}", v.message("Rust"));
     assert_eq!(v.hold_reason(), "adds a new shell file");
-    assert!(v.message().contains("tests/unit/x.bats"), "{}", v.message());
+    assert!(v.message("Rust").contains("tests/unit/x.bats"), "{}", v.message("Rust"));
 }
 
 #[test]
-fn a_mixed_change_is_refused_for_the_new_file_and_records_the_fix() {
+fn listing_a_new_file_is_not_a_raise_but_the_entry_itself_is() {
+    // A patch that adds the file AND its allowlist entry is not saved by the
+    // listing: the entry for a path absent from the base rose from zero, and
+    // that is the refusal.
+    let tmp = Tmp::new("t");
+    write(tmp.path(), "scripts/a.sh", "echo one\n");
+    let base = measure(tmp.path()).unwrap();
+    let base_allow = Allowlist::seed(&base);
+    write(tmp.path(), "scripts/b.sh", "echo new\n");
+    let head = measure(tmp.path()).unwrap();
+    let head_allow = Allowlist::parse("scripts/a.sh 1\nscripts/b.sh 1\n").unwrap();
+    let v = allowlist_diff_verdict(&base, &base_allow, &head, &head_allow);
+    assert!(v.is_regression(), "{}", v.message("Rust"));
+    let AllowlistDiffVerdict::Refused { findings, .. } = &v else {
+        panic!("expected refusal: {}", v.message("Rust"));
+    };
+    assert_eq!(
+        findings,
+        &[AllowlistFinding::RaisedEntry {
+            path: "scripts/b.sh".to_string(),
+            base: 0,
+            head: 1
+        }]
+    );
+}
+
+#[test]
+fn a_mixed_change_is_refused_and_names_every_finding_and_records_the_fix() {
     // The refusal and the repair are different things: the verdict must name
     // both, so releasing the fix does not require re-litigating the new file.
     let tmp = Tmp::new("t");
     write(tmp.path(), "scripts/a.sh", "echo one\necho two\n");
     let base = measure(tmp.path()).unwrap();
+    let base_allow = Allowlist::seed(&base);
     write(
         tmp.path(),
         "scripts/a.sh",
@@ -180,22 +262,34 @@ fn a_mixed_change_is_refused_for_the_new_file_and_records_the_fix() {
     );
     write(tmp.path(), "scripts/b.sh", "echo new\n");
     let head = measure(tmp.path()).unwrap();
-    let v = diff_verdict(&base, &head, 100);
+    let v = allowlist_diff_verdict(&base, &base_allow, &head, &base_allow);
     assert!(v.is_regression());
     assert_eq!(v.hold_reason(), "adds a new shell file");
-    let RatchetDiffVerdict::RefusedNewFiles { delta, .. } = &v else {
-        panic!("expected refusal: {}", v.message());
+    let AllowlistDiffVerdict::Refused {
+        delta, findings, ..
+    } = &v
+    else {
+        panic!("expected refusal: {}", v.message("Rust"));
     };
     assert_eq!(delta.new_files.get("scripts/b.sh"), Some(&1));
     assert_eq!(delta.modified.get("scripts/a.sh"), Some(&(2, 4)));
-    let msg = v.message();
-    assert!(msg.contains("scripts/b.sh"), "{}", msg);
-    assert!(msg.contains("scripts/a.sh 2 -> 4"), "{}", msg);
-    assert!(msg.contains("porting issue"), "{}", msg);
+    assert!(findings.contains(&AllowlistFinding::ExceededEntry {
+        path: "scripts/a.sh".to_string(),
+        lines: 4,
+        entry: 2
+    }));
+    assert!(findings.contains(&AllowlistFinding::UnlistedFile {
+        path: "scripts/b.sh".to_string(),
+        lines: 1
+    }));
+    let msg = v.message("Rust");
+    assert!(msg.contains("scripts/b.sh"), "{msg}");
+    assert!(msg.contains("scripts/a.sh 2 -> 4"), "{msg}");
+    assert!(msg.contains("porting issue"), "{msg}");
 }
 
 #[test]
-fn removing_shell_is_admitted_and_recorded() {
+fn removing_shell_lowers_its_entry_in_the_same_commit() {
     let tmp = Tmp::new("t");
     write(
         tmp.path(),
@@ -203,15 +297,32 @@ fn removing_shell_is_admitted_and_recorded() {
         "echo one\necho two\necho three\n",
     );
     let base = measure(tmp.path()).unwrap();
-    std::fs::remove_file(tmp.path().join("scripts/a.sh")).unwrap();
+    let base_allow = Allowlist::seed(&base);
+    fs::remove_file(tmp.path().join("scripts/a.sh")).unwrap();
     let head = measure(tmp.path()).unwrap();
-    let v = diff_verdict(&base, &head, 100);
-    assert!(!v.is_regression(), "{}", v.message());
-    let RatchetDiffVerdict::Admitted { delta, .. } = &v else {
-        panic!("expected admitted: {}", v.message());
+    // The entry goes with the file, in the same commit: no separate step.
+    let head_allow = Allowlist::seed(&head);
+    let v = allowlist_diff_verdict(&base, &base_allow, &head, &head_allow);
+    assert!(!v.is_regression(), "{}", v.message("Rust"));
+    let AllowlistDiffVerdict::Admitted { delta, .. } = &v else {
+        panic!("expected admitted: {}", v.message("Rust"));
     };
     assert_eq!(delta.removed_files, vec!["scripts/a.sh".to_string()]);
     assert!(delta.modified.is_empty());
+    // Leaving the entry behind is drift: the file is gone, the budget is not.
+    let v = allowlist_diff_verdict(&base, &base_allow, &head, &base_allow);
+    assert!(v.is_regression(), "{}", v.message("Rust"));
+    assert_eq!(v.hold_reason(), "allowlist out of sync with the tree");
+    let AllowlistDiffVerdict::Refused { findings, .. } = &v else {
+        panic!("expected refusal: {}", v.message("Rust"));
+    };
+    assert_eq!(
+        findings,
+        &[AllowlistFinding::StaleEntry {
+            path: "scripts/a.sh".to_string(),
+            entry: 3
+        }]
+    );
 }
 
 #[test]
@@ -219,19 +330,20 @@ fn an_unchanged_tree_admits_with_nothing_recorded() {
     let tmp = Tmp::new("t");
     write(tmp.path(), "scripts/a.sh", "echo one\n");
     let base = measure(tmp.path()).unwrap();
+    let allowlist = Allowlist::seed(&base);
     let head = measure(tmp.path()).unwrap();
-    let v = diff_verdict(&base, &head, 100);
+    let v = allowlist_diff_verdict(&base, &allowlist, &head, &allowlist);
     assert!(!v.is_regression());
-    assert_eq!(v.hold_reason(), "modifies existing shell");
-    let RatchetDiffVerdict::Admitted { delta, .. } = &v else {
-        panic!("expected admitted: {}", v.message());
+    assert_eq!(v.hold_reason(), "in sync with the shell allowlist");
+    let AllowlistDiffVerdict::Admitted { delta, .. } = &v else {
+        panic!("expected admitted: {}", v.message("Rust"));
     };
     assert!(delta.maintenance_only());
     assert!(delta.modified.is_empty());
     assert!(
-        v.message().contains("existing files modified: none"),
+        v.message("Rust").contains("existing files modified: none"),
         "{}",
-        v.message()
+        v.message("Rust")
     );
 }
 
@@ -242,7 +354,7 @@ fn delta_names_new_modified_and_removed() {
     write(tmp.path(), "scripts/gone.sh", "echo bye\n");
     let base = measure(tmp.path()).unwrap();
     write(tmp.path(), "scripts/grow.sh", "echo one\necho two\nthree\n");
-    std::fs::remove_file(tmp.path().join("scripts/gone.sh")).unwrap();
+    fs::remove_file(tmp.path().join("scripts/gone.sh")).unwrap();
     write(tmp.path(), "scripts/fresh.sh", "echo new\n");
     let head = measure(tmp.path()).unwrap();
     let d = delta(&base, &head);
@@ -254,43 +366,14 @@ fn delta_names_new_modified_and_removed() {
 }
 
 #[test]
-fn at_the_ceiling_holds_and_one_over_regresses() {
-    let tmp = Tmp::new("t");
-    write(tmp.path(), "a.sh", "echo one\necho two\necho three\n");
-    let s = measure(tmp.path()).unwrap();
-
-    // Exactly at the ceiling is not a regression: a change that removes one
-    // line and adds one must pass.
-    let held = verdict(&s, 3);
-    assert!(!held.is_regression(), "{}", held.message("Rust"));
-    assert_eq!(
-        held,
-        RatchetVerdict::Held {
-            total: 3,
-            ceiling: 3,
-            slack: 0
-        }
-    );
-
-    let regressed = verdict(&s, 2);
-    assert!(regressed.is_regression());
-    assert_eq!(
-        regressed,
-        RatchetVerdict::Regressed {
-            total: 3,
-            ceiling: 2,
-            excess: 1
-        }
-    );
-}
-
-#[test]
-fn the_regression_message_names_the_two_acceptable_responses() {
+fn the_drifted_message_names_the_two_acceptable_responses() {
     // A ratchet that only says "failed" teaches nothing. The message has to
-    // tell an agent what to do instead, or it will simply raise the ceiling.
+    // tell an agent what to do instead, or it will simply reseed the file.
     let tmp = Tmp::new("t");
     write(tmp.path(), "a.sh", "echo one\n");
-    let msg = verdict(&measure(tmp.path()).unwrap(), 0).message("Rust");
+    let allow = Allowlist::parse("a.sh 0\n").unwrap();
+    let v = allowlist_verdict(&measure(tmp.path()).unwrap(), &allow);
+    let msg = v.message("Rust");
     assert!(
         msg.contains("crates/"),
         "must point at the compiled alternative: {msg}"
@@ -300,17 +383,17 @@ fn the_regression_message_names_the_two_acceptable_responses() {
         "must name the language the patch should have been written in: {msg}"
     );
     assert!(
-        msg.contains("remove more shell"),
+        msg.contains("lower the entries"),
         "must offer the removal path: {msg}"
     );
     assert!(
         msg.contains("deliberately"),
-        "raising the ceiling must be a decision: {msg}"
+        "raising an entry must be a decision: {msg}"
     );
 }
 
 #[test]
-fn the_regression_message_redirects_to_the_resolved_language() {
+fn the_refused_message_redirects_to_the_resolved_language() {
     // Issue #4447: a gate that rejects without redirecting makes backlog, not
     // code. A rejected agent must be told the language the patch should have
     // been written in, resolved from the repository — Go for metabolomics-us/*,
@@ -319,12 +402,14 @@ fn the_regression_message_redirects_to_the_resolved_language() {
 
     let tmp = Tmp::new("t");
     write(tmp.path(), "a.sh", "echo one\n");
-    let regressed = verdict(&measure(tmp.path()).unwrap(), 0);
+    let s = measure(tmp.path()).unwrap();
+    let allow = Allowlist::default(); // nothing listed: the file is unlisted
+    let drifted = allowlist_verdict(&s, &allow);
 
     let go = implementation_language("metabolomics-us/inferweave-gateway")
         .expect("metabolomics-us/* resolves to Go")
         .as_str();
-    let go_msg = regressed.message(go);
+    let go_msg = drifted.message(go);
     assert!(
         go_msg.contains("implementation language is Go"),
         "must name Go for a metabolomics-us repo: {go_msg}"
@@ -337,7 +422,7 @@ fn the_regression_message_redirects_to_the_resolved_language() {
     let rust = implementation_language("berlinguyinca/autospec")
         .expect("berlinguyinca/autospec resolves to Rust")
         .as_str();
-    let rust_msg = regressed.message(rust);
+    let rust_msg = drifted.message(rust);
     assert!(
         rust_msg.contains("implementation language is Rust"),
         "must name Rust for this repository: {rust_msg}"
@@ -352,39 +437,4 @@ fn an_unreadable_subtree_does_not_fail_the_measurement() {
     write(tmp.path(), "a.sh", "echo one\n");
     let s = measure(tmp.path()).unwrap();
     assert_eq!(s.total_lines(), 1);
-}
-
-/// The repository ceiling. This number may FALL and may never RISE.
-///
-/// Lower it in the same change that removes shell — a ceiling left above the
-/// real count is slack that the next script will silently consume, and the
-/// ratchet stops meaning anything. It was set 64k too high on the first
-/// attempt, from a line count that included blank lines; the measurement and
-/// the ceiling must come from the same counter, which is why this is pinned
-/// to `measure()` rather than to a shell one-liner.
-const REPOSITORY_CEILING: usize = 227_188;
-
-#[test]
-fn the_repository_stays_under_its_shell_ceiling() {
-    // Walk up to the workspace root: tests run with CWD at the crate.
-    let mut root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for _ in 0..3 {
-        if root.join("Cargo.lock").exists() && root.join("crates").exists() {
-            break;
-        }
-        root = match root.parent() {
-            Some(p) => p.to_path_buf(),
-            None => break,
-        };
-    }
-    let surface = measure(&root).expect("measuring the repository must succeed");
-    let v = verdict(&surface, REPOSITORY_CEILING);
-    assert!(
-        !v.is_regression(),
-        "{}\n\nshell={} bats={} files={}",
-        v.message("Rust"),
-        surface.lines.get("shell").copied().unwrap_or(0),
-        surface.lines.get("bats").copied().unwrap_or(0),
-        surface.total_files()
-    );
 }
