@@ -44,6 +44,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::process_termination::process_is_alive;
 use serde::{Deserialize, Serialize};
 
 /// How many times a new failure must reproduce alone and single-threaded
@@ -165,6 +166,17 @@ pub enum GateLockError {
         /// The holder's pid, if the lock file carried one.
         holder_pid: Option<u32>,
     },
+    /// The lock file exists, but the process it names is **gone** (issue
+    /// #4599). This is a leak, not a wait: no run is being serialised against,
+    /// and every later attempt will report `Held` forever.
+    ///
+    /// It is reported rather than silently reclaimed. The caller decides —
+    /// a pid can be reused, and deleting a lock on a guess is how two gates end
+    /// up running at once, which is the condition the lock exists to prevent.
+    Stale {
+        /// The pid recorded in the lock file. That process no longer exists.
+        holder_pid: u32,
+    },
     /// A filesystem error.
     Io(String),
 }
@@ -206,8 +218,14 @@ impl GateLock {
         {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(GateLockError::Held {
-                    holder_pid: read_holder_pid(&path),
+                // A lock is only a wait if someone is still working behind it.
+                // A file naming a dead process serialises nothing, and reporting
+                // it as `Held` makes a leak indistinguishable from a busy run --
+                // observed as 47 minutes of "already running" with nothing
+                // running (#4599).
+                return Err(match read_holder_pid(&path) {
+                    Some(pid) if !process_is_alive(pid) => GateLockError::Stale { holder_pid: pid },
+                    holder_pid => GateLockError::Held { holder_pid },
                 });
             }
             Err(error) => return Err(GateLockError::Io(error.to_string())),
@@ -761,5 +779,84 @@ mod tests {
             "{}",
             ready.line()
         );
+    }
+}
+
+#[cfg(test)]
+mod stale_lock_tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("autospec-gatelock-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // The lock lives under `<root>/gates/`, which `try_acquire` creates for
+        // itself; tests that plant a lock file directly must create it first.
+        fs::create_dir_all(GateLock::path_for(&dir).parent().expect("lock parent"))
+            .expect("temp root");
+        dir
+    }
+
+    #[test]
+    fn a_lock_naming_a_live_process_is_held_and_must_be_waited_for() {
+        let root = temp_root("live");
+        let lock = GateLock::try_acquire(&root).expect("first acquire");
+        // This process is the holder, and it is obviously alive.
+        match GateLock::try_acquire(&root) {
+            Err(GateLockError::Held { holder_pid }) => {
+                assert_eq!(holder_pid, Some(std::process::id()));
+            }
+            other => panic!("a live holder must report Held, got {other:?}"),
+        }
+        lock.release().expect("release");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_lock_naming_a_dead_process_is_reported_stale_not_held() {
+        // The #4599 failure: a holder that is gone serialises nothing, but
+        // every later attempt reported "already running" forever.
+        let root = temp_root("dead");
+        let path = GateLock::path_for(&root);
+        // pid 0 is never a live user process, so the probe can only say "gone".
+        fs::write(&path, "0\n").expect("write lock");
+        match GateLock::try_acquire(&root) {
+            Err(GateLockError::Stale { holder_pid }) => assert_eq!(holder_pid, 0),
+            other => panic!("a dead holder must report Stale, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stale_lock_is_reported_and_never_silently_reclaimed() {
+        // Reporting is the whole behaviour: a pid can be reused, and deleting a
+        // lock on a guess is how two gates end up running at once.
+        let root = temp_root("noreclaim");
+        let path = GateLock::path_for(&root);
+        fs::write(&path, "0\n").expect("write lock");
+        let _ = GateLock::try_acquire(&root);
+        assert!(path.exists(), "a stale lock must survive the report");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_lock_file_with_no_pid_is_held_because_nothing_can_be_proven() {
+        let root = temp_root("nopid");
+        let path = GateLock::path_for(&root);
+        fs::write(&path, "").expect("write lock");
+        match GateLock::try_acquire(&root) {
+            Err(GateLockError::Held { holder_pid: None }) => {}
+            other => panic!("an unreadable holder cannot be called dead, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn this_process_is_alive_and_pid_zero_is_not() {
+        assert!(crate::process_termination::process_is_alive(
+            std::process::id()
+        ));
+        assert!(!crate::process_termination::process_is_alive(0));
     }
 }

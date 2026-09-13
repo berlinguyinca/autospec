@@ -296,3 +296,29 @@ fn signal_name(signal: Signal) -> String {
         other => format!("{other:?}"),
     }
 }
+
+/// Whether the process with this pid still exists.
+///
+/// Answers the question a lock has to ask before it reports a wait: is anyone
+/// actually working behind this? A lock file naming a dead process serialises
+/// nothing, and reporting it as held makes a leak indistinguishable from a busy
+/// run — observed as 47 minutes of "already running" with nothing running
+/// (#4599).
+///
+/// On Linux this reads `/proc/<pid>`, which needs no dependency and no signal.
+/// Where `/proc` is absent the answer is **alive**: refusing to call a live
+/// process dead matters far more than detecting every leak, because being wrong
+/// in the other direction means two holders at once — the exact condition a
+/// lock exists to prevent.
+///
+/// A pid can be reused, so a `true` answer does not prove the *original*
+/// holder is alive. Callers must therefore report a stale lock rather than
+/// reclaim one on this answer alone.
+pub fn process_is_alive(pid: u32) -> bool {
+    let proc_pid = std::path::Path::new("/proc").join(pid.to_string());
+    if proc_pid.exists() {
+        return true;
+    }
+    // No /proc at all (not Linux): the probe cannot answer, so assume alive.
+    !std::path::Path::new("/proc/self").exists()
+}
