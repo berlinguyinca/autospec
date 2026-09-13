@@ -37,6 +37,7 @@ pub mod claim;
 pub mod claim_lifecycle;
 pub mod code_intel;
 pub mod config_fidelity;
+pub mod conflict_merge;
 pub mod conflict_resolution;
 pub mod construction_sites;
 pub mod context;
