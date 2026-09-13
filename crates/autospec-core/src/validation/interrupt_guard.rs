@@ -134,6 +134,9 @@ pub fn install() -> bool {
         // with the conventional signal status (130 for SIGINT, 143 for
         // SIGTERM) exactly as if no handler were installed.
         let default = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
+        // SAFETY: inside the async-signal-safe handler; `sigaction` and `kill`
+        // are raw syscalls that take no locks and allocate nothing, so restoring
+        // SIG_DFL and re-raising the fatal signal is safe in this context.
         unsafe {
             let _ = sigaction(kind, &default);
             let _ = kill(getpid(), kind);
@@ -146,6 +149,9 @@ pub fn install() -> bool {
             SaFlags::SA_NODEFER,
             SigSet::empty(),
         );
+        // SAFETY: `sigaction` with a `SigHandler::Handler` is the only way to
+        // receive SIGINT/SIGTERM; the handler is async-signal-safe (see above),
+        // so registering it is sound.
         if unsafe { sigaction(kind, &action) }.is_err() {
             return false;
         }

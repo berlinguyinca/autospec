@@ -209,6 +209,10 @@ fn should_skip_bats_in_fast_mode(program: &Path) -> bool {
 /// interrupt guard so an interrupted run kills every live fixture group
 /// (#2568). No-op on platforms without process groups.
 fn apply_process_group_isolation(command: &mut Command) {
+    // SAFETY: `pre_exec` runs in the forked child between `fork()` and
+    // `exec()`; `setpgid(0, 0)` is async-signal-safe and pid/pgid 0 target the
+    // current process, so this only places the child in its own process group.
+    // No allocation, no locks, no shared state.
     #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
