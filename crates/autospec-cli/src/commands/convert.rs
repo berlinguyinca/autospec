@@ -365,6 +365,49 @@ fn enumerate_patches(root: &Path) -> Result<Vec<PatchLocation>, CommandFailure> 
 /// [`HoldRecord`]. The pass reads it to decide which held patches still
 /// disqualify (their re-gate holds) versus which are re-offered (the base
 /// moved). Appending a HELD line is the pass's "never discard" step.
+/// Print the pass's summary line, having first checked that it can be true.
+///
+/// `PassOutcome` has carried a `reconciles()` predicate, and a doc comment
+/// saying the counters "must reconcile", since it was written. Nothing in the
+/// running pass ever called it: the summary was printed whatever the arithmetic
+/// said (issue #4604). A pass reporting that it acted on more patches than it
+/// examined would emit a line that reads as authoritative and is impossible.
+///
+/// Every operational decision about this fleet is made from that one line, so
+/// the line now states whether it can be trusted. The counters are still
+/// printed -- suppressing them would destroy the evidence needed to find the
+/// accounting defect -- but they are no longer offered as fact.
+fn report_outcome(outcome: &PassOutcome) {
+    let (line, alarm) = outcome_report(outcome);
+    println!("{line}");
+    if let Some(alarm) = alarm {
+        eprintln!("{alarm}");
+    }
+}
+
+/// The summary line, and the alarm that must accompany it when the pass's own
+/// arithmetic is impossible.
+///
+/// Split from the printing so the decision is testable without capturing
+/// stdout -- the check this issue is about should not itself be reachable only
+/// through a full pass.
+fn outcome_report(outcome: &PassOutcome) -> (String, Option<String>) {
+    let line = outcome.line("convert", "autospec convert", "enumerate $LLM");
+    if outcome.reconciles() {
+        (line, None)
+    } else {
+        (
+            line,
+            Some(
+                "ALARM: the pass's own counters do not reconcile -- it reports acting on more \
+                 patches than it examined. The line above is not a result; it is evidence of \
+                 an accounting defect in the pass. Do not act on these numbers."
+                    .to_string(),
+            ),
+        )
+    }
+}
+
 fn load_held(path: &Path) -> Result<BTreeMap<u64, HoldRecord>, CommandFailure> {
     let Ok(text) = fs::read_to_string(path) else {
         return Ok(BTreeMap::new());
@@ -1218,7 +1261,7 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     }
 
     let outcome = PassOutcome::Examined(counters);
-    println!("{}", outcome.line("convert", "autospec convert", "enumerate $LLM"));
+    report_outcome(&outcome);
     let _ = held_path; // the HELD ledger is written inside apply_one
 
     // The buffer after the run, not just the run itself (#4558 ask 3):
@@ -2316,4 +2359,55 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
     }
 
 
+
+    // --- #4604: a stated invariant must be consulted, not only tested --------
+
+    #[test]
+    fn a_reconciling_pass_reports_its_line_and_nothing_else() {
+        let outcome = PassOutcome::Examined(PassCounters {
+            examined: 10,
+            converted: 3,
+            held: 2,
+            skipped: 1,
+        });
+        let (line, alarm) = outcome_report(&outcome);
+        assert!(line.contains("examined"), "the line still carries the counts");
+        assert!(alarm.is_none(), "sound arithmetic needs no alarm");
+    }
+
+    #[test]
+    fn a_pass_that_acted_on_more_than_it_examined_is_not_reported_as_fact() {
+        // The impossible case: more converted than examined. Before #4604 this
+        // printed exactly like a real result.
+        let outcome = PassOutcome::Examined(PassCounters {
+            examined: 1,
+            converted: 5,
+            held: 0,
+            skipped: 0,
+        });
+        let (line, alarm) = outcome_report(&outcome);
+        assert!(
+            alarm.is_some(),
+            "impossible counters must not be presented as a result"
+        );
+        assert!(
+            line.contains("examined"),
+            "the counters are still printed -- they are the evidence for the defect"
+        );
+    }
+
+    #[test]
+    fn an_unfed_pass_has_nothing_to_reconcile_and_raises_no_alarm() {
+        let (_line, alarm) = outcome_report(&PassOutcome::Unfed);
+        assert!(alarm.is_none());
+    }
+
+    #[test]
+    fn an_idle_pass_and_an_unfed_pass_still_read_differently() {
+        // The distinction this type exists to preserve: nothing to do is not
+        // the same as never given anything.
+        let (idle, _) = outcome_report(&PassOutcome::Examined(PassCounters::default()));
+        let (unfed, _) = outcome_report(&PassOutcome::Unfed);
+        assert_ne!(idle, unfed);
+    }
 }
