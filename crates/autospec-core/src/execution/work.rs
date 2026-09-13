@@ -12,6 +12,16 @@
 //! survives the workspace. The patch is returned rather than written, because this module
 //! cannot know which directories outlive the run — see [`ProducedWork::write_patch`] for
 //! the durable-sink half, whose path the caller chooses.
+//!
+//! Capture must not depend on which of the equivalent states the producer happened to
+//! leave behind (#4582). Staged, committed, and working-tree-dirty are three encodings of
+//! "the agent changed these files"; a capture that yields a patch for one of them and
+//! silently `None` for the others is a data-loss path disguised as a conditional — ten
+//! completed runs were discarded that way when the only captured state was the committed
+//! one. `detect` therefore captures the uncommitted states as patch bytes too, and
+//! `write_patch` writes whichever parts exist, so a non-empty detection always yields a
+//! non-empty patch. [`ProducedWork::assert_captured`] is the deletion guard a caller runs
+//! before tearing a scratch tree down: work without a durable patch refuses the deletion.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,6 +39,11 @@ pub struct ProducedWork {
     /// Held as bytes because `git format-patch` reproduces file content verbatim, and a
     /// diff that only round-trips when it happens to be UTF-8 is not a backup.
     pub committed_patch: Option<Vec<u8>>,
+    /// Staged, dirty, and untracked changes as a patch, present whenever
+    /// `uncommitted_paths` is non-empty. This is the state the committed-only capture
+    /// used to drop (#4582): the common one, since an agent that stages and stops has
+    /// produced work a commits-only diff cannot see.
+    pub uncommitted_patch: Option<Vec<u8>>,
 }
 
 impl ProducedWork {
@@ -58,10 +73,19 @@ impl ProducedWork {
         } else {
             None
         };
+        // The uncommitted states are captured with the same exclusions: a file the
+        // caller's verdict discounts is not agent work, and patching it in would make the
+        // artifact disagree with the count that authorised the capture.
+        let uncommitted_patch = if uncommitted_paths.is_empty() {
+            None
+        } else {
+            Some(uncommitted_patch(repository, exclusions)?)
+        };
         Ok(Self {
             uncommitted_paths,
             commits_ahead,
             committed_patch,
+            uncommitted_patch,
         })
     }
 
@@ -83,10 +107,25 @@ impl ProducedWork {
     /// `directory` must outlive the run's workspace — the point of the patch is to
     /// survive a scratch directory being wiped, and writing it inside that directory
     /// would preserve nothing. Returns `Ok(None)` when there was no patch to write.
+    ///
+    /// The patch is the union of whichever states hold work (#4582): the commits ahead
+    /// of base (with their messages) first, then the staged, dirty, and untracked
+    /// changes. A non-empty detection therefore always yields a non-empty file — a
+    /// summary without the artifact it summarises is the outcome this exists to prevent.
     pub fn write_patch(&self, directory: &Path, name: &str) -> Result<Option<PathBuf>, String> {
-        let Some(patch) = self.committed_patch.as_deref() else {
+        let mut patch: Vec<u8> = Vec::new();
+        if let Some(part) = &self.committed_patch {
+            patch.extend_from_slice(part);
+        }
+        if let Some(part) = &self.uncommitted_patch {
+            if !patch.is_empty() {
+                patch.push(b'\n');
+            }
+            patch.extend_from_slice(part);
+        }
+        if patch.is_empty() {
             return Ok(None);
-        };
+        }
         fs::create_dir_all(directory).map_err(|error| {
             format!(
                 "create captured work directory {}: {error}",
@@ -94,9 +133,29 @@ impl ProducedWork {
             )
         })?;
         let path = directory.join(format!("{name}.patch"));
-        fs::write(&path, patch)
+        fs::write(&path, &patch)
             .map_err(|error| format!("write captured work patch {}: {error}", path.display()))?;
         Ok(Some(path))
+    }
+
+    /// The deletion guard (#4582): a scratch tree may go away only when everything it
+    /// holds is either absent or durably captured.
+    ///
+    /// `written` is the path [`ProducedWork::write_patch`] returned. An empty detection
+    /// passes unconditionally; a non-empty one passes only when a non-empty patch exists
+    /// at that path. Anything else is an error naming the work, so the caller cannot
+    /// proceed to the teardown that would delete the only copy.
+    pub fn assert_captured(&self, written: Option<&Path>) -> Result<(), String> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        match written {
+            Some(path) if fs::metadata(path).is_ok_and(|meta| meta.len() > 0) => Ok(()),
+            _ => Err(format!(
+                "refusing to delete the scratch tree: {} and no non-empty captured patch exists",
+                self.to_json()
+            )),
+        }
     }
 
     pub fn to_json(&self) -> String {
@@ -107,10 +166,11 @@ impl ProducedWork {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "{{\"produced_work\":{},\"uncommitted_paths\":[{paths}],\"commits_ahead\":{},\"patch_bytes\":{}}}",
+            "{{\"produced_work\":{},\"uncommitted_paths\":[{paths}],\"commits_ahead\":{},\"patch_bytes\":{},\"uncommitted_patch_bytes\":{}}}",
             !self.is_empty(),
             self.commits_ahead,
             self.committed_patch.as_ref().map_or(0, Vec::len),
+            self.uncommitted_patch.as_ref().map_or(0, Vec::len),
         )
     }
 }
@@ -162,6 +222,58 @@ fn committed_patch(repository: &Path, base_ref: &str) -> Result<Vec<u8>, String>
         repository,
         &["format-patch", "--stdout", "--no-signature", &range],
     )
+}
+
+/// The staged, dirty, and untracked states as patch bytes, under the same exclusions the
+/// detection was run with. Read-only: the index is never touched, so a detection cannot
+/// leave the tree in a state the agent did not choose.
+fn uncommitted_patch(repository: &Path, exclusions: &[&str]) -> Result<Vec<u8>, String> {
+    // `git diff HEAD` covers the two tracked states at once — index vs HEAD (staged) and
+    // worktree vs index (dirty) collapse into worktree vs HEAD. Untracked files are in
+    // neither, so they are diffed against /dev/null one by one below.
+    let mut args = vec!["diff", "HEAD", "--", "."];
+    args.extend_from_slice(exclusions);
+    let mut patch = git_stdout(repository, &args)?;
+
+    let mut list_args = vec![
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        ".",
+    ];
+    list_args.extend_from_slice(exclusions);
+    let listing = git_stdout(repository, &list_args)?;
+    for entry in listing.split(|byte| *byte == 0) {
+        if entry.is_empty() {
+            continue;
+        }
+        let file = String::from_utf8_lossy(entry).into_owned();
+        patch.push(b'\n');
+        patch.extend_from_slice(&untracked_diff(repository, &file)?);
+    }
+    Ok(patch)
+}
+
+/// The `--no-index` diff of one untracked file against the empty state. Unlike plain
+/// `diff`, git's exit code here is the verdict: 1 means "differences found", which is
+/// the success case for a file that exists.
+fn untracked_diff(repository: &Path, file: &str) -> Result<Vec<u8>, String> {
+    let output = Command::new("git")
+        .args(["diff", "--no-index", "--", "/dev/null", file])
+        .current_dir(repository)
+        .output()
+        .map_err(|error| format!("git is required to detect produced work but did not run ({error}); nothing was measured"))?;
+    match output.status.code() {
+        Some(0) => Ok(Vec::new()),
+        Some(1) => Ok(output.stdout),
+        other => Err(format!(
+            "git diff --no-index {file} exited {other:?} in {}: {}",
+            repository.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
 }
 
 fn git_stdout(repository: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
