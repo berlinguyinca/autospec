@@ -140,7 +140,11 @@ fn a_repair_that_grows_a_file_past_its_entry_is_refused() {
     // entry to cover the growth is refused too — the one-way property is on
     // the entry, not on the file.
     let tmp = Tmp::new("t");
-    write(tmp.path(), "scripts/b.sh", "echo one\necho two\necho three\n");
+    write(
+        tmp.path(),
+        "scripts/b.sh",
+        "echo one\necho two\necho three\n",
+    );
     let base = measure(tmp.path()).unwrap();
     let allowlist = Allowlist::parse("scripts/b.sh 3\n").unwrap();
     write(
@@ -194,7 +198,10 @@ fn a_new_shell_file_is_refused_even_when_other_files_have_slack() {
     let v = allowlist_diff_verdict(&base, &allowlist, &head, &allowlist);
     assert!(v.is_regression(), "{}", v.message("Rust"));
     assert_eq!(v.hold_reason(), "adds a new shell file");
-    let AllowlistDiffVerdict::Refused { delta, findings, .. } = &v else {
+    let AllowlistDiffVerdict::Refused {
+        delta, findings, ..
+    } = &v
+    else {
         panic!("expected refusal: {}", v.message("Rust"));
     };
     assert_eq!(delta.new_files.get("scripts/b.sh"), Some(&1));
@@ -203,7 +210,11 @@ fn a_new_shell_file_is_refused_even_when_other_files_have_slack() {
         path: "scripts/b.sh".to_string(),
         lines: 1
     }));
-    assert!(v.message("Rust").contains("scripts/b.sh"), "{}", v.message("Rust"));
+    assert!(
+        v.message("Rust").contains("scripts/b.sh"),
+        "{}",
+        v.message("Rust")
+    );
 }
 
 #[test]
@@ -212,12 +223,20 @@ fn a_new_bats_file_is_refused_like_shell() {
     write(tmp.path(), "scripts/a.sh", "echo one\n");
     let base = measure(tmp.path()).unwrap();
     let allowlist = Allowlist::seed(&base);
-    write(tmp.path(), "tests/unit/x.bats", "@test \"y\" {\n  true\n}\n");
+    write(
+        tmp.path(),
+        "tests/unit/x.bats",
+        "@test \"y\" {\n  true\n}\n",
+    );
     let head = measure(tmp.path()).unwrap();
     let v = allowlist_diff_verdict(&base, &allowlist, &head, &allowlist);
     assert!(v.is_regression(), "{}", v.message("Rust"));
     assert_eq!(v.hold_reason(), "adds a new shell file");
-    assert!(v.message("Rust").contains("tests/unit/x.bats"), "{}", v.message("Rust"));
+    assert!(
+        v.message("Rust").contains("tests/unit/x.bats"),
+        "{}",
+        v.message("Rust")
+    );
 }
 
 #[test]

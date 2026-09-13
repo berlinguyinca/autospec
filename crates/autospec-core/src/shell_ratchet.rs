@@ -462,11 +462,13 @@ impl AllowlistDiffVerdict {
                     .any(|f| matches!(f, AllowlistFinding::UnlistedFile { .. }))
                 {
                     "adds a new shell file"
-                } else if findings.iter().any(|f| matches!(
-                    f,
-                    AllowlistFinding::ExceededEntry { .. }
-                        | AllowlistFinding::RaisedEntry { .. }
-                )) {
+                } else if findings.iter().any(|f| {
+                    matches!(
+                        f,
+                        AllowlistFinding::ExceededEntry { .. }
+                            | AllowlistFinding::RaisedEntry { .. }
+                    )
+                }) {
                     "grows shell past its allowlisted entry"
                 } else {
                     "allowlist out of sync with the tree"

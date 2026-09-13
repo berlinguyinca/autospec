@@ -7307,7 +7307,7 @@ fn gh_json_has_entries(stdout: &[u8]) -> Result<bool, CommandFailure> {
 
 /// Whether a local worktree has the branch checked out, i.e. a live attempt
 /// may still be writing to it.
-fn local_branch_checked_out(reference: &str) -> Result<bool, CommandFailure> {
+pub(crate) fn local_branch_checked_out(reference: &str) -> Result<bool, CommandFailure> {
     let output = Command::new("git")
         .args(["worktree", "list", "--porcelain"])
         .output()
