@@ -9,6 +9,8 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use autospec_core::toolchain_preflight;
+
 use super::run_git_in;
 
 /// The exit status a gate wrapper uses to say "I could not place this work".
@@ -89,6 +91,69 @@ pub(super) fn announce_placement() {
         return;
     }
     eprintln!("gate: running the work via `{}`", gate_placement());
+}
+
+/// The gate's tool preconditions (issue #4589), checked before the pass
+/// judges anything.
+///
+/// A missing tool is an environment failure, not a verdict. The incident this
+/// closes: a cron `PATH` without the Rust toolchain made the test stage
+/// produce no `test result:` line, and the fail-closed baseline check
+/// correctly held every patch — 28 consecutive HELD records, each
+/// indistinguishable in the durable ledger from a patch that genuinely
+/// failed its gate, and each pointing the operator at the patch instead of
+/// the host. One named `FATAL` before any judging is the only correct
+/// output; the pass checks itself because a scheduled wrapper inherits none
+/// of a login shell's environment.
+///
+/// `git` and `gh` are always required on this host: the pass branches and
+/// applies with `git` and checks liveness and opens PRs with `gh`. `cargo`
+/// is required here only when the gate runs here — with `AUTOSPEC_GATE_WRAPPER`
+/// set, the gate's `cargo` runs on the execution host the wrapper names
+/// (#4598), and the submit host may legitimately lack it.
+pub(super) fn gate_tool_precondition() -> Result<(), String> {
+    let missing = missing_gate_tools();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(fatal_line(&missing))
+}
+
+/// The same check in plan mode, where no gate runs: warn, do not refuse. A
+/// plan is still useful on a broken host (it says what would be judged),
+/// but it must not hide that `--apply` would refuse.
+pub(super) fn gate_tool_warning() {
+    let missing = missing_gate_tools();
+    if missing.is_empty() {
+        return;
+    }
+    eprintln!(
+        "WARN: {} not on PATH; --apply would refuse before judging any patch",
+        missing.join(", ")
+    );
+}
+
+fn missing_gate_tools() -> Vec<String> {
+    let required: &[&str] = if gate_wrapper().is_empty() {
+        toolchain_preflight::GATE_TOOLS
+    } else {
+        &["git", "gh"]
+    };
+    let path = std::env::var_os("PATH")
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    toolchain_preflight::missing_tools(required, &path)
+}
+
+/// The single line a broken host earns, naming every missing tool in one
+/// place instead of once per judged patch.
+pub(super) fn fatal_line(missing: &[String]) -> String {
+    format!(
+        "FATAL: {} not on PATH; the gate cannot run, so no patch was judged and nothing \
+         was recorded. Fix the host -- a scheduled wrapper inherits none of a login \
+         shell's environment -- and rerun.",
+        missing.join(", ")
+    )
 }
 
 /// Where a failing gate stage's failure came from.
@@ -359,5 +424,17 @@ mod tests {
             }
             _ => panic!("a placement failure must never be held against the patch"),
         }
+    }
+
+    // --- #4589: the pass verifies its own preconditions before judging -----
+
+    #[test]
+    fn the_fatal_line_names_every_missing_tool_once() {
+        // One environment failure is one line naming the tools, not one HELD
+        // record per judged patch.
+        let line = fatal_line(&["cargo".to_string(), "git".to_string()]);
+        assert!(line.starts_with("FATAL: cargo, git not on PATH"), "{line}");
+        assert!(line.contains("no patch was judged"), "{line}");
+        assert!(line.contains("nothing was recorded"), "{line}");
     }
 }

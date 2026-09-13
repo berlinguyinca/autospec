@@ -173,6 +173,7 @@ pub mod summarization;
 pub mod symptom_attribution;
 pub mod threshold_calibration;
 pub mod toolchain_gate;
+pub mod toolchain_preflight;
 pub mod tractability;
 pub mod unfed_pass;
 pub mod untested_public_items;

@@ -1000,8 +1000,14 @@ fn convert(args: &[String]) -> Result<(), CommandFailure> {
         return archive_issues(&plan);
     }
     if plan.opts.apply {
+        // The gate's tools are verified before any patch is judged (#4589):
+        // one named FATAL for a broken host, never one HELD record per patch.
+        if let Err(fatal) = gate::gate_tool_precondition() {
+            return Err(CommandFailure::status(fatal, 1));
+        }
         return run_apply(&plan);
     }
+    gate::gate_tool_warning();
     render_plan(&plan)
 }
 
@@ -1182,11 +1188,6 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     run_git(&["fetch", "origin"])?;
 
     let selection = plan.selection();
-    let held_path = plan
-        .opts
-        .held_file
-        .clone()
-        .unwrap_or_else(|| plan.llm_root.join("held.txt"));
     let base_sha = run_git_capture(&["rev-parse", "HEAD"])?;
 
     let mut counters = PassCounters {
@@ -1219,7 +1220,6 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
 
     let outcome = PassOutcome::Examined(counters);
     println!("{}", outcome.line("convert", "autospec convert", "enumerate $LLM"));
-    let _ = held_path; // the HELD ledger is written inside apply_one
 
     // The buffer after the run, not just the run itself (#4558 ask 3):
     // converted patches leave the waiting count (their PR is live) but
