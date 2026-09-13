@@ -5,9 +5,10 @@
 //! renders the holds, archives them on `--apply`, and keeps the pass's
 //! counters honest.
 //!
-//! This module exists as a sibling of `convert.rs` rather than as additions
-//! to it: the pass's command file is already past the size ratchet's
-//! threshold, and an oversized file may be edited and shrunk but not grown.
+//! This module exists as a child of the convert module rather than as
+//! additions to `convert.rs`: the pass's command file is already past the
+//! size ratchet's threshold, and an oversized file may be edited and
+//! shrunk but not grown.
 
 use std::fs;
 
@@ -16,7 +17,7 @@ use autospec_core::patch_language::{self, PatchLanguage};
 use autospec_core::unfed_pass::PassCounters;
 use serde_json::{json, Value};
 
-use super::convert::{patch_files, ConvertPlan, PatchLocation};
+use super::{patch_files, ConvertPlan, PatchLocation};
 
 /// The patch's language class (issue #4559), decided before any branch
 /// exists: the Rust gate cannot fail on a shell-only or a neither patch, so

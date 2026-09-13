@@ -86,6 +86,7 @@ use serde_json::{json, Value};
 
 use super::claim::{branch_liveness, local_branch_checked_out, BranchLiveness};
 use super::CommandFailure;
+mod language;
 
 /// The schema emitted by `autospec convert --json`.
 pub const CONVERT_PLAN_SCHEMA: &str = "autospec.convert-plan.v1";
@@ -935,7 +936,7 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
             branch_exists,
             pull_request_exists,
             held_recorded,
-            language: super::convert_language::candidate_language(patch),
+            language: language::candidate_language(patch),
         });
     }
 
@@ -943,7 +944,7 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
         opts,
         llm_root,
         examined,
-        outcome: super::convert_language::plan_outcome(&candidates),
+        outcome: language::plan_outcome(&candidates),
         candidates,
     })
 }
@@ -1112,7 +1113,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
                 json!({ "issue": c.issue, "reason": reason.as_str() })
             })
             .collect();
-        let language_held = super::convert_language::held_json(plan, &selection.language_held);
+        let language_held = language::held_json(plan, &selection.language_held);
         let fresh: Vec<Value> = selection
             .fresh
             .iter()
@@ -1151,7 +1152,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             patch_key = c.patch_key
         );
     }
-    super::convert_language::render_holds(plan, &selection.language_held);
+    language::render_holds(plan, &selection.language_held);
     println!("{}", plan.outcome.line("convert", "autospec convert", "enumerate $LLM"));
     // The buffer, on every run — including an idle one: the line that
     // makes a silent successful run distinguishable from a broken one
@@ -1196,7 +1197,7 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     // buffer entirely — no patch on disk, so no queue entry held.
     let mut archived = 0;
 
-    super::convert_language::archive_held(plan, &selection.language_held, &mut counters, &mut archived);
+    language::archive_held(plan, &selection.language_held, &mut counters, &mut archived);
     for c in &selection.fresh {
         let patch = match plan.examined.iter().find(|p| p.issue == c.issue) {
             Some(p) => p,

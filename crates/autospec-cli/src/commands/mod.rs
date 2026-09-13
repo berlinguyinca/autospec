@@ -143,7 +143,6 @@ macro_rules! commands {
 }
 
 // Helper modules (not commands) stay as plain declarations outside the table.
-pub mod convert_language;
 pub mod dispatch_spec;
 pub mod managed_project;
 
