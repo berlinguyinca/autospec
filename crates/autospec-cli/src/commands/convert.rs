@@ -90,6 +90,7 @@ use super::CommandFailure;
 mod git;
 mod language;
 mod progress;
+mod sizing;
 
 use git::{run_capture_in, run_git, run_git_capture, run_git_in, teardown_worktree};
 
@@ -103,8 +104,8 @@ const USAGE: &str = "\
 USAGE:
     autospec convert [--llm-root DIR] [--repo OWNER/NAME] [--base BRANCH]
                      [--held-file PATH] [--branch-prefix PREFIX]
-                     [--free-slots N] [--apply] [--archive] [--json]
-                     [--convert-ledger PATH] [ISSUE ...]
+                     [--free-slots N] [--deadline SECS] [--apply] [--archive]
+                     [--json] [--convert-ledger PATH] [ISSUE ...]
 
 PLAN (default): enumerate $LLM/*/out/issue-*/changes.patch, select the patches
 not already attempted (a live branch/PR, or a recorded HELD entry whose
@@ -182,6 +183,12 @@ struct Options {
     held_file: Option<PathBuf>,
     branch_prefix: String,
     free_slots: Option<usize>,
+    /// The pass's own deadline in seconds (#4607): the pass sizes its batch
+    /// to it — it stops *starting* new patches when the remaining time is
+    /// less than what a patch has been observed to cost in this pass, and
+    /// finishes the one in flight. `None` (no deadline given) keeps the old
+    /// behavior: work through the whole batch.
+    deadline: Option<u64>,
     apply: bool,
     archive: bool,
     as_json: bool,
@@ -197,6 +204,7 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
         held_file: None,
         branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
         free_slots: None,
+        deadline: None,
         apply: false,
         archive: false,
         as_json: false,
@@ -228,6 +236,16 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
                     })?,
                 );
             }
+            "--deadline" => {
+                let raw = value(args, &mut i, &arg)?;
+                opts.deadline = Some(
+                    raw.parse::<u64>().map_err(|_| {
+                        CommandFailure::diagnostic(format!(
+                            "--deadline must be a non-negative integer number of seconds, got {raw:?}\n{USAGE}"
+                        ))
+                    })?,
+                );
+            }
             "--apply" => opts.apply = true,
             "--archive" => opts.archive = true,
             "--json" => opts.as_json = true,
@@ -254,6 +272,17 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
             }
         }
         i += 1;
+    }
+    // The deadline can also come from the environment: the scheduler that
+    // runs a scheduled pass is the one that knows the deadline, and the env
+    // is how it hands the pass its own time box without the pass inventing
+    // one (#4607). The flag, when given, is explicit and wins.
+    if opts.deadline.is_none() {
+        if let Ok(raw) = std::env::var("AUTOSPEC_CONVERT_DEADLINE") {
+            if let Ok(secs) = raw.trim().parse::<u64>() {
+                opts.deadline = Some(secs);
+            }
+        }
     }
     Ok(opts)
 }
@@ -1230,17 +1259,42 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         converted: 0,
         held: 0,
         skipped: selection.disqualified.len(),
+        deferred: 0,
     };
     // Patches archived this run (superseded by the base): they leave the
     // buffer entirely — no patch on disk, so no queue entry held.
     let mut archived = 0;
 
     language::archive_held(plan, &selection.language_held, &mut counters, &mut archived);
-    for c in &selection.fresh {
+    // The pass sizes its batch to its own deadline (#4607): it stops
+    // *starting* new patches when the remaining time is less than what a
+    // patch has been observed to cost in this pass, and finishes the one in
+    // flight. The candidates it never reaches are deferred, not lost — they
+    // stay on disk, keep their queue entries, and are re-offered next pass —
+    // but the outcome says so: a pass that quietly did 1 of 12 and one that
+    // did 12 of 12 must not print the same shape of line.
+    let started = std::time::Instant::now();
+    let fresh = &selection.fresh;
+    let mut last_cost: Option<std::time::Duration> = None;
+    for (index, c) in fresh.iter().enumerate() {
+        if let Some(deadline_secs) = plan.opts.deadline {
+            let remaining =
+                std::time::Duration::from_secs(deadline_secs).saturating_sub(started.elapsed());
+            if sizing::should_defer(remaining, last_cost) {
+                counters.deferred = fresh.len() - index;
+                progress::report_line(&format!(
+                    "  DEFER  {} candidate(s) not started: the remaining time is below the \
+                     observed per-item cost; they stay on disk for the next pass",
+                    counters.deferred
+                ));
+                break;
+            }
+        }
         let patch = match plan.examined.iter().find(|p| p.issue == c.issue) {
             Some(p) => p,
             None => continue,
         };
+        let item_started = std::time::Instant::now();
         match apply_one(plan, &repo, &base_ref, &base_sha, patch) {
             ApplyResult::Converted => {
                 counters.converted += 1;
@@ -1255,6 +1309,7 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
                 archived += 1;
             }
         }
+        last_cost = Some(item_started.elapsed());
     }
 
     let outcome = PassOutcome::Examined(counters);
@@ -1822,6 +1877,7 @@ mod tests {
             converted: 0,
             held: 0,
             skipped: 0,
+            deferred: 0,
         })
         .line("convert", "autospec convert", "enumerate $LLM");
         assert_ne!(unfed.message, idle);
@@ -2171,6 +2227,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             held_file: None,
             branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
             free_slots: None,
+            deadline: None,
             apply: false,
             archive: true,
             as_json: false,
@@ -2295,6 +2352,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             held_file: Some(out.clone()),
             branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
             free_slots: None,
+            deadline: None,
             apply: false,
             archive: false,
             as_json: false,
@@ -2328,10 +2386,15 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             converted: 3,
             held: 2,
             skipped: 1,
+            deferred: 4,
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(line.contains("examined"), "the line still carries the counts");
+        // The deferral is part of the accounting the line reports: 3+2+1+4
+        // accounts for all 10, so no alarm — and the line names the four
+        // that were never started (#4607).
         assert!(alarm.is_none(), "sound arithmetic needs no alarm");
+        assert!(line.contains("deferred=4"), "the line must carry the deferral");
     }
 
     #[test]
@@ -2343,6 +2406,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             converted: 5,
             held: 0,
             skipped: 0,
+            deferred: 0,
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(

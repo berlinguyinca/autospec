@@ -512,12 +512,27 @@ mod tests {
             converted: 0,
             held: 0,
             skipped: 0,
+            deferred: 0,
         })
         .line(tool, script, selector);
         assert_ne!(unfed, idle, "the incident is the two lines being equal");
         // The idle line leads with the input size; the unfed line names the
         // empty-input branch and the selector that would feed it.
         assert!(idle.contains("examined=0"), "{idle}");
+        // The line accounts for every counter a pass can carry, including
+        // the candidates it declined to start (#4607): a pass that did 1 of
+        // 12 and deferred 11 prints a different line than one that did 12
+        // of 12, and the shape of the line says so.
+        let partial = PassOutcome::Examined(PassCounters {
+            examined: 12,
+            converted: 1,
+            held: 0,
+            skipped: 0,
+            deferred: 11,
+        })
+        .line(tool, script, selector);
+        assert!(partial.contains("deferred=11"), "{partial}");
+        assert_ne!(partial, idle, "a partial pass must not print the idle line");
         assert!(unfed.contains("no issues given"), "{unfed}");
         assert!(unfed.contains(selector), "{unfed}");
     }
@@ -530,6 +545,7 @@ mod tests {
             converted: 1,
             held: 1,
             skipped: 1,
+            deferred: 0,
         });
         assert_eq!(examined.counters().unwrap().examined, 3);
     }
@@ -542,6 +558,7 @@ mod tests {
             converted: 1,
             held: 1,
             skipped: 1,
+            deferred: 0,
         });
         assert!(ok.reconciles());
         let impossible = PassOutcome::Examined(PassCounters {
@@ -549,11 +566,22 @@ mod tests {
             converted: 3,
             held: 1,
             skipped: 0,
+            deferred: 0,
         });
         assert!(
             !impossible.reconciles(),
             "acting on more than examined is impossible"
         );
+        // Deferral is part of the accounting: a pass that deferred more than
+        // it did not examine does not reconcile either.
+        let deferred_impossible = PassOutcome::Examined(PassCounters {
+            examined: 2,
+            converted: 0,
+            held: 0,
+            skipped: 0,
+            deferred: 3,
+        });
+        assert!(!deferred_impossible.reconciles());
     }
 
     #[test]
