@@ -394,7 +394,7 @@ impl StructuralValidator {
                 let Ok(contents) = read(&path) else {
                     continue;
                 };
-                flags.extend(sentinel_flags(&contents));
+                flags.extend(sentinel_flags_in_source(&contents));
             }
         }
 
@@ -3005,6 +3005,51 @@ fn hex_values(document: &str) -> BTreeSet<String> {
     hexes
 }
 
+/// Sentinel flag files referenced by source, as opposed to struct fields that
+/// merely end in `.flag`.
+///
+/// `sentinel_flags` matches any token ending in `.flag`, which is right for
+/// reading the documentation and wrong for scanning code: Rust field accesses
+/// like `find(|o| &o.flag == arg)` yield "o.flag", and the check then demands
+/// that a closure's field be documented as a sentinel file. Adding it to
+/// docs/FLAGS.md would document something that does not exist, so the check is
+/// what needs fixing.
+///
+/// A real sentinel is always written as a path or inside a string --
+/// `~/.autospec/explore-stop.flag`, `"$DIR/autonomous.flag"` -- so the
+/// preceding byte separates the two cases. Deliberately asymmetric with the
+/// documentation scan, which stays permissive: be strict about what is
+/// *demanded* and lenient about what *satisfies* it, or a flag documented in
+/// prose reads as undocumented.
+fn sentinel_flags_in_source(document: &str) -> BTreeSet<String> {
+    let mut flags = BTreeSet::new();
+    let bytes = document.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_alphanumeric() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && is_flag_token_byte(bytes[index]) {
+            index += 1;
+        }
+        let candidate = &document[start..index];
+        if !candidate.ends_with(".flag") {
+            continue;
+        }
+        // A path separator or a string delimiter means this is a filename. A
+        // field access is preceded by an operator or an identifier instead.
+        let quoted_or_path = start > 0 && matches!(bytes[start - 1], b'/' | b'"' | b'\'' | b'`');
+        if quoted_or_path {
+            flags.insert(candidate.to_string());
+        }
+    }
+
+    flags
+}
+
 fn sentinel_flags(document: &str) -> BTreeSet<String> {
     let mut flags = BTreeSet::new();
     let bytes = document.as_bytes();
@@ -3283,5 +3328,61 @@ Each summary row records `command`, `cwd`, `duration`, `status`, and
         assert!(!contains_docs_drift_note(
             "this section has nothing to do with the gate keyword at all"
         ));
+    }
+}
+
+#[cfg(test)]
+mod sentinel_flag_scan_tests {
+    use super::{sentinel_flags, sentinel_flags_in_source};
+
+    #[test]
+    fn a_struct_field_is_not_a_sentinel_file() {
+        // The production failure: this line made the check demand that
+        // "o.flag" appear in docs/FLAGS.md.
+        let src = r#"if let Some(override_) = overrides.iter().find(|o| &o.flag == arg) {"#;
+        assert!(
+            sentinel_flags_in_source(src).is_empty(),
+            "{:?}",
+            sentinel_flags_in_source(src)
+        );
+    }
+
+    #[test]
+    fn a_path_is_a_sentinel_file() {
+        for src in [
+            "~/.autospec/explore-stop.flag",
+            r#"let p = format!("{dir}/autonomous.flag");"#,
+            "rm -f \"$HOME/.autospec/init-done.flag\"",
+        ] {
+            assert!(!sentinel_flags_in_source(src).is_empty(), "missed: {src}");
+        }
+    }
+
+    #[test]
+    fn the_documentation_scan_stays_permissive() {
+        // Docs mention flags in prose, not as paths. Tightening both sides
+        // would make a documented flag read as undocumented -- the same bug
+        // with the sign flipped.
+        let doc = "The autonomous.flag sentinel pauses the loop.";
+        assert!(sentinel_flags(doc).contains("autonomous.flag"));
+    }
+
+    #[test]
+    fn every_real_flag_survives_the_stricter_source_scan() {
+        // Each of these is written as a path somewhere in the tree; none may
+        // be dropped by the tightening.
+        for name in [
+            "autonomous.flag",
+            "autonomous-stop.flag",
+            "explore-stop.flag",
+            "init-done.flag",
+            "no-auto-rollover.flag",
+        ] {
+            let src = format!("~/.autospec/{name}");
+            assert!(
+                sentinel_flags_in_source(&src).contains(name),
+                "dropped: {name}"
+            );
+        }
     }
 }
