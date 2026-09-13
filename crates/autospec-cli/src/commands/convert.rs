@@ -1207,6 +1207,9 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         match apply_one(plan, &repo, &base_ref, &base_sha, patch) {
             ApplyResult::Converted => counters.converted += 1,
             ApplyResult::Held => counters.held += 1,
+            // Not converted and not held: the pass could not tell whether this
+            // patch is good, so it says so and leaves the patch alone.
+            ApplyResult::BaseUnverifiable => counters.skipped += 1,
             ApplyResult::Archived => {
                 counters.skipped += 1;
                 archived += 1;
@@ -1243,6 +1246,28 @@ enum ApplyResult {
     /// The patch no longer applies to the base; it was archived, never
     /// discarded, and its issue returns to the eligible pool.
     Archived,
+    /// The base is broken, so the patch could not be verified (issue #4596).
+    /// No HELD line is written: the patch is untouched and is re-offered on the
+    /// next pass, which will verify it against a green base.
+    BaseUnverifiable,
+}
+
+/// Report a broken base once per pass, however many patches hit it.
+///
+/// The failure is a property of the base, not of the patches, so it is one
+/// event. Printing it per patch is what turned a single unformatted file into
+/// hundreds of lines that each read as a different problem.
+fn report_base_broken(base_sha: &str, stage: &str, detail: &str) {
+    static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if REPORTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    eprintln!(
+        "ALARM: the base is broken. `cargo {stage}` fails at {base}, before any patch is \
+         applied. Every patch in this pass is unverifiable until the base is green; none \
+         will be held for it. Fix the base, then re-run.\n{detail}",
+        base = &base_sha[..base_sha.len().min(12)],
+    );
 }
 
 fn apply_one(
@@ -1352,6 +1377,17 @@ fn apply_one(
                         record_held_and_result(plan, base_sha, patch, "PR could not be opened")
                     }
                 }
+                GateResult::BaseUnverifiable { stage, detail } => {
+                    teardown_worktree(&worktree);
+                    report_base_broken(base_sha, &stage, &detail);
+                    eprintln!(
+                        "SKIP #{issue}: the `{stage}` stage fails at the base ({base}), so this \
+                         patch cannot be verified; it is untouched and will be re-offered.",
+                        issue = patch.issue,
+                        base = &base_sha[..base_sha.len().min(8)],
+                    );
+                    ApplyResult::BaseUnverifiable
+                }
                 GateResult::Fail(output) => {
                     // Step 6: record a HELD line with the failing-test set from
                     // the authoritative failures: block, never the progress
@@ -1429,10 +1465,110 @@ enum GateResult {
     Pass,
     /// A stage failed; the stage's output.
     Fail(String),
+    /// A stage failed, and the *same stage fails at the base*. The patch has
+    /// not been shown to be bad — it has not been shown to be anything, because
+    /// the base it was measured against is broken (issue #4596).
+    ///
+    /// This is deliberately a third outcome and not a `Fail`. A held patch is a
+    /// durable claim that the change is defective; recording that for a defect
+    /// the base already had is both wrong and long-lived. A red `fmt` on trunk
+    /// produced one such claim per queued patch, each naming an innocent change.
+    BaseUnverifiable { stage: String, detail: String },
     /// Every stage was green but the evidence contradicts the patch: the
     /// patch adds test functions and the test count is unchanged (issue
     /// #4532). The reason names the contradiction; it is the HELD reason.
     Contradiction(String),
+}
+
+/// Where a failing gate stage's failure came from.
+enum StageOrigin {
+    /// The stage is green at the base, so the failure is the patch's.
+    Patch,
+    /// The stage fails at the base too: the base is broken.
+    Base,
+    /// The base could not be restored or re-run, so the question is open.
+    Undeterminable(String),
+}
+
+/// The stage's name for a human-facing message: `fmt`, `build`, `clippy`,
+/// `test`.
+fn stage_name(stage: &[String]) -> String {
+    stage
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "gate".to_string())
+}
+
+/// Re-run one gate stage with the patch removed, to decide whether the failure
+/// belongs to the change or was inherited from the base.
+///
+/// The worktree is a fresh checkout of the base with the patch applied on top,
+/// so the base is recoverable in place: `checkout -- .` reverts the tracked
+/// files the patch modified and `clean -fd` removes the ones it added.
+/// `target/` is ignored by the repository, so it survives and the base re-run
+/// reuses the compilation cache rather than starting cold.
+///
+/// The worktree is left at the base afterwards. Every caller returns
+/// immediately and tears the worktree down, and no caller reads the patched
+/// tree after a stage has failed.
+fn stage_origin(worktree: &Path, stage: &[String]) -> StageOrigin {
+    if let Err(error) = run_git_in(worktree, &["checkout", "--", "."]) {
+        return StageOrigin::Undeterminable(format!("could not restore the base: {error}"));
+    }
+    if let Err(error) = run_git_in(worktree, &["clean", "-fd"]) {
+        return StageOrigin::Undeterminable(format!("could not clean the base: {error}"));
+    }
+    match run_cargo(worktree, stage) {
+        Some(output) if output.status.code() == Some(0) => StageOrigin::Patch,
+        Some(_) => StageOrigin::Base,
+        None => StageOrigin::Undeterminable(format!("cargo {stage:?} failed to spawn at the base")),
+    }
+}
+
+/// Turn a failing stage into a verdict that says whose failure it is.
+///
+/// Every stage is attributed, not only the test stage. The test stage got a
+/// baseline first because one incident demanded it; the same reasoning applies
+/// identically to the others, and the stage that actually broke the pipeline
+/// in production was `fmt`. Re-running the stage at the base costs time on a
+/// failure and nothing at all on a pass — the existing trade in this module:
+/// being slow is recoverable, being wrong is not.
+///
+/// An undeterminable base is reported as unverifiable rather than as the
+/// patch's failure. The two errors are not symmetric: re-offering a good patch
+/// costs a delay, while holding one writes a durable false claim about someone
+/// else's change.
+fn classify_stage_failure(worktree: &Path, stage: &[String], text: String) -> GateResult {
+    verdict_for(stage_origin(worktree, stage), stage, text)
+}
+
+/// The verdict a stage failure earns, given where the failure came from.
+///
+/// Split from the re-run so the decision itself is testable without a git
+/// worktree and a compiler: this mapping is the whole point of #4596, and it
+/// should not be reachable only through a ten-minute integration run.
+fn verdict_for(origin: StageOrigin, stage: &[String], text: String) -> GateResult {
+    match origin {
+        StageOrigin::Patch => GateResult::Fail(text),
+        StageOrigin::Base => GateResult::BaseUnverifiable {
+            stage: stage_name(stage),
+            detail: first_lines(&text, 12),
+        },
+        StageOrigin::Undeterminable(why) => GateResult::BaseUnverifiable {
+            stage: stage_name(stage),
+            detail: why,
+        },
+    }
+}
+
+/// The first `n` non-empty lines of a stage's output, for a message that has to
+/// stay readable in a log.
+fn first_lines(text: &str, n: usize) -> String {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(n)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The gate's test-stage argv at the given scope: `test --no-fail-fast`
@@ -1496,7 +1632,7 @@ fn run_gate(
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            return GateResult::Fail(text);
+            return classify_stage_failure(worktree, stage, text);
         }
     }
 
@@ -1510,7 +1646,7 @@ fn run_gate(
         String::from_utf8_lossy(&output.stderr)
     );
     if output.status.code() != Some(0) {
-        return GateResult::Fail(text);
+        return classify_stage_failure(worktree, &stage, text);
     }
 
     // Green stages are not yet a pass: the unchanged-count contradiction
@@ -2285,5 +2421,99 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
         assert_eq!(held[&9999].patch_key, "unrecorded-9999");
         assert_eq!(held[&9999].reason, "clippy=2");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- #4596: a failing stage must say whose failure it is ---------------
+
+    fn stage(name: &str) -> Vec<String> {
+        vec![name.to_string(), "--check".to_string()]
+    }
+
+    #[test]
+    fn a_stage_green_at_the_base_makes_the_failure_the_patchs() {
+        let verdict = verdict_for(
+            StageOrigin::Patch,
+            &stage("fmt"),
+            "Diff in src/lib.rs".to_string(),
+        );
+        match verdict {
+            GateResult::Fail(text) => assert!(text.contains("Diff in src/lib.rs")),
+            _ => panic!("a base-green stage failure belongs to the patch"),
+        }
+    }
+
+    #[test]
+    fn a_stage_that_also_fails_at_the_base_never_holds_the_patch() {
+        // The production incident: `fmt` red on trunk, every queued patch held
+        // for it. The patch is not bad -- it is unmeasured.
+        let verdict = verdict_for(
+            StageOrigin::Base,
+            &stage("fmt"),
+            "Diff in crates/core/src/process_termination.rs".to_string(),
+        );
+        match verdict {
+            GateResult::BaseUnverifiable { stage, detail } => {
+                assert_eq!(stage, "fmt");
+                assert!(detail.contains("process_termination.rs"));
+            }
+            _ => panic!("a base failure must not be recorded against the patch"),
+        }
+    }
+
+    #[test]
+    fn an_undeterminable_base_is_unverifiable_rather_than_the_patchs_fault() {
+        // The two errors are not symmetric. Re-offering a good patch costs a
+        // delay; holding one writes a durable false claim about someone else's
+        // change.
+        let verdict = verdict_for(
+            StageOrigin::Undeterminable("could not restore the base".to_string()),
+            &stage("clippy"),
+            "irrelevant".to_string(),
+        );
+        match verdict {
+            GateResult::BaseUnverifiable { stage, detail } => {
+                assert_eq!(stage, "clippy");
+                assert!(detail.contains("could not restore the base"));
+            }
+            _ => panic!("an unanswered question is not a patch defect"),
+        }
+    }
+
+    #[test]
+    fn every_stage_is_attributed_not_only_the_test_stage() {
+        // #4596's root cause: the test stage had a baseline and the other three
+        // did not, so the stage that actually broke the pipeline (`fmt`) was
+        // the one with no attribution at all.
+        for name in ["fmt", "build", "clippy", "test"] {
+            match verdict_for(StageOrigin::Base, &stage(name), "output".to_string()) {
+                GateResult::BaseUnverifiable { stage, .. } => assert_eq!(stage, name),
+                _ => panic!("{name} must attribute a base failure to the base"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_reported_detail_stays_short_enough_to_read_in_a_log() {
+        let noisy = (0..500)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        match verdict_for(StageOrigin::Base, &stage("build"), noisy) {
+            GateResult::BaseUnverifiable { detail, .. } => {
+                assert_eq!(detail.lines().count(), 12);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn blank_lines_do_not_consume_the_detail_budget() {
+        let padded = "\n\n\nreal one\n\n\nreal two\n\n";
+        match verdict_for(StageOrigin::Base, &stage("build"), padded.to_string()) {
+            GateResult::BaseUnverifiable { detail, .. } => {
+                assert_eq!(detail, "real one\nreal two");
+            }
+            _ => unreachable!(),
+        }
     }
 }
