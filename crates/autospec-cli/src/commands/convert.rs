@@ -71,7 +71,7 @@ use autospec_core::unfed_pass::PassCounters;
 use autospec_core::verification::parse_test_run;
 use serde_json::{json, Value};
 
-use super::claim::{branch_liveness, BranchLiveness};
+use super::claim::{branch_liveness, local_branch_checked_out, BranchLiveness};
 use super::CommandFailure;
 
 /// The schema emitted by `autospec convert --json`.
@@ -544,17 +544,154 @@ fn base_changed_files(base_sha: &str, base_ref: &str) -> Option<Vec<String>> {
 /// unmerged with no worktree) does not: redoing it overwrites the stale
 /// branch, so the pass re-offers it. `Unknown` fails closed (disqualify):
 /// offering a patch whose attempt state cannot be verified risks a duplicate.
-fn attempt_flags(repo: Option<&str>, branch: &str) -> (bool, bool) {
+fn attempt_flags(
+    repo: Option<&str>,
+    branch: &str,
+    prefetched: Option<&AttemptIndex>,
+) -> (bool, bool) {
     let Some(repo) = repo else {
         // No repo to ask: the liveness is not checked (a plan-only gap the
         // caller reports), so the patch is not disqualified on this axis.
         return (false, false);
     };
-    match branch_liveness(repo, branch) {
+    let liveness = match prefetched {
+        Some(index) => index.liveness(branch),
+        None => branch_liveness(repo, branch),
+    };
+    match liveness {
         BranchLiveness::Live => (false, true),
         BranchLiveness::Dead => (false, false),
         BranchLiveness::Unknown => (false, true),
     }
+}
+
+/// The remote half of branch liveness for a whole pass, fetched once
+/// (issue #4587).
+///
+/// `branch_liveness` asks the remote per branch. Its order matters and this
+/// index reproduces it exactly:
+///
+/// 1. a local worktree holding the branch makes the attempt live;
+/// 2. otherwise a branch absent from the remote is `NoBranch` — answered
+///    without asking about pull requests at all, which is why a backlog of
+///    mostly-absent branches showed as a long run of `ls-remote` calls;
+/// 3. otherwise an open or merged pull request makes it live;
+/// 4. otherwise the attempt is abandoned, and abandoned is not live.
+///
+/// Steps 2 and 3 are set-membership tests over answers the remote gives in one
+/// call each, and neither changes during a pass. Step 1 stays per-branch
+/// because it is local and cheap — moving it here would trade a correct check
+/// for no saving.
+///
+/// Over a 563-patch backlog this is two round-trips instead of up to three per
+/// candidate; a scheduled pass previously spent its whole period in selection
+/// and never reached a gate.
+#[derive(Debug, Default)]
+struct AttemptIndex {
+    /// Branch names present on the remote, from one prefixed `ls-remote`.
+    remote_branches: std::collections::BTreeSet<String>,
+    /// Branch names carrying an open or merged pull request.
+    live_pr_branches: std::collections::BTreeSet<String>,
+}
+
+impl AttemptIndex {
+    /// The verdict for one branch, in `attempt_liveness`'s order.
+    fn liveness(&self, branch: &str) -> BranchLiveness {
+        if branch.trim().is_empty() {
+            return BranchLiveness::Dead;
+        }
+        // Step 1, kept per-branch and local. A lookup failure here is the one
+        // case this index cannot resolve, so it reports `Unknown` and the
+        // caller's fail-closed arm applies.
+        match local_branch_checked_out(&format!("refs/heads/{branch}")) {
+            Ok(true) => return BranchLiveness::Live,
+            Ok(false) => {}
+            Err(_) => return BranchLiveness::Unknown,
+        }
+        if !self.remote_branches.contains(branch) {
+            return BranchLiveness::Dead;
+        }
+        if self.live_pr_branches.contains(branch) {
+            return BranchLiveness::Live;
+        }
+        BranchLiveness::Dead
+    }
+}
+
+/// Fetch a pass's remote liveness facts in two calls (issue #4587).
+///
+/// `None` when either call fails, so the caller keeps the per-branch path.
+/// Treating a failed batch as "nothing exists" would re-offer every patch and
+/// open duplicate pull requests, which is precisely the outcome the liveness
+/// check exists to prevent.
+fn prefetch_attempt_index(repo: &str, branch_prefix: &str) -> Option<AttemptIndex> {
+    let heads = Command::new("git")
+        .args([
+            "ls-remote",
+            "--heads",
+            "origin",
+            &format!("{branch_prefix}*"),
+        ])
+        .output()
+        .ok()?;
+    if !heads.status.success() {
+        return None;
+    }
+    let mut index = AttemptIndex::default();
+    for line in String::from_utf8_lossy(&heads.stdout).lines() {
+        if let Some((_, reference)) = line.split_once('\t') {
+            if let Some(name) = reference.strip_prefix("refs/heads/") {
+                index.remote_branches.insert(name.to_string());
+            }
+        }
+    }
+
+    let prs = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--limit",
+            "500",
+            "--json",
+            "headRefName,state",
+        ])
+        .output()
+        .ok()?;
+    if !prs.status.success() {
+        return None;
+    }
+    for (head, state) in parse_pull_request_heads(&String::from_utf8_lossy(&prs.stdout)) {
+        if head.starts_with(branch_prefix) && (state == "OPEN" || state == "MERGED") {
+            index.live_pr_branches.insert(head);
+        }
+    }
+    Some(index)
+}
+
+/// `(headRefName, state)` pairs from `gh pr list --json headRefName,state`.
+///
+/// Tolerant of field order, which `gh` does not promise.
+fn parse_pull_request_heads(body: &str) -> Vec<(String, String)> {
+    body.split('{')
+        .skip(1)
+        .filter_map(|chunk| {
+            let head = json_string_field(chunk, "headRefName")?;
+            let state = json_string_field(chunk, "state")?;
+            Some((head, state))
+        })
+        .collect()
+}
+
+/// The value of one string field in a flat JSON object fragment.
+fn json_string_field(chunk: &str, field: &str) -> Option<String> {
+    let rest = chunk.split(&format!("\"{field}\":")).nth(1)?;
+    let rest = rest.trim_start().strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 /// The gate scope tokens for the files a patch touches, derived from the
@@ -653,10 +790,23 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
         );
     }
 
+    // The remote half of liveness, fetched once for the pass (issue #4587).
+    // `None` means a fetch failed and the per-branch path is used, so
+    // correctness never depends on the batch succeeding.
+    let attempt_index = repo
+        .as_deref()
+        .and_then(|repo| prefetch_attempt_index(repo, &opts.branch_prefix));
+    if repo.is_some() && attempt_index.is_none() {
+        eprintln!(
+            "WARN: could not prefetch branch liveness; falling back to one query per candidate"
+        );
+    }
+
     let mut candidates = Vec::new();
     for patch in &examined {
         let branch = format!("{}{}", opts.branch_prefix, patch.issue);
-        let (branch_exists, pull_request_exists) = attempt_flags(repo.as_deref(), &branch);
+        let (branch_exists, pull_request_exists) =
+            attempt_flags(repo.as_deref(), &branch, attempt_index.as_ref());
 
         // HELD is a queue: a recorded hold disqualifies only while its
         // re-gate still holds. A changed patch, or a dependent file that
@@ -1309,6 +1459,65 @@ fn infer_repo() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- batched selection liveness (issue #4587) ---------------------------
+
+    fn index(remote: &[&str], live_prs: &[&str]) -> AttemptIndex {
+        AttemptIndex {
+            remote_branches: remote.iter().map(|s| s.to_string()).collect(),
+            live_pr_branches: live_prs.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_index_reproduces_attempt_liveness_order() {
+        // Absent from the remote is dead WITHOUT consulting pull requests --
+        // the short-circuit that makes a mostly-absent backlog a long run of
+        // ls-remote calls, and the reason batching them is worth anything.
+        assert_eq!(index(&[], &["conv-1"]).liveness("conv-1"), BranchLiveness::Dead);
+        // Present with an open or merged pull request: live.
+        assert_eq!(index(&["conv-2"], &["conv-2"]).liveness("conv-2"), BranchLiveness::Live);
+        // Present with no live pull request is abandoned, and abandoned is not
+        // live: redoing it overwrites the stale branch.
+        assert_eq!(index(&["conv-3"], &[]).liveness("conv-3"), BranchLiveness::Dead);
+        // An empty branch name is not an attempt.
+        assert_eq!(index(&[], &[]).liveness("   "), BranchLiveness::Dead);
+    }
+
+    #[test]
+    fn a_live_pull_request_on_a_similar_branch_does_not_leak() {
+        // Membership is exact: a prefix match is not a branch match, or the
+        // pass would treat conv-12 as keeping conv-1 in play.
+        let i = index(&["conv-1", "conv-12"], &["conv-12"]);
+        assert_eq!(i.liveness("conv-12"), BranchLiveness::Live);
+        assert_eq!(i.liveness("conv-1"), BranchLiveness::Dead);
+    }
+
+    #[test]
+    fn pull_request_heads_parse_regardless_of_field_order() {
+        let body = r#"[{"headRefName":"conv-7","state":"OPEN"},
+                       {"state":"MERGED","headRefName":"conv-8"},
+                       {"state":"CLOSED","headRefName":"conv-9"}]"#;
+        assert_eq!(
+            parse_pull_request_heads(body),
+            vec![
+                ("conv-7".to_string(), "OPEN".to_string()),
+                ("conv-8".to_string(), "MERGED".to_string()),
+                ("conv-9".to_string(), "CLOSED".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_open_and_merged_pull_requests_are_live() {
+        // CLOSED is the abandoned case the pass must re-offer, not skip.
+        let body = r#"[{"headRefName":"conv-9","state":"CLOSED"}]"#;
+        let live: Vec<_> = parse_pull_request_heads(body)
+            .into_iter()
+            .filter(|(_, state)| state == "OPEN" || state == "MERGED")
+            .collect();
+        assert!(live.is_empty(), "CLOSED must not count as live");
+    }
 
     #[test]
     fn the_unfed_line_is_not_the_idle_line() {
