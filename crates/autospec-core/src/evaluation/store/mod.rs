@@ -289,7 +289,9 @@ impl EvaluationStore {
         at: u64,
     ) -> Result<Digest> {
         definition.validate()?;
-        let file = self.layout.evaluator_file(definition.slot.as_str(), definition.version);
+        let file = self
+            .layout
+            .evaluator_file(definition.slot.as_str(), definition.version);
         io::write_immutable_json(&file, definition)?;
         let digest = definition.definition_digest();
         let mut fields = BTreeMap::new();
@@ -307,7 +309,11 @@ impl EvaluationStore {
 
     /// Read one registered evaluator version.
     pub fn evaluator(&self, version_ref: EvaluatorVersionRef) -> Result<EvaluatorDefinition> {
-        io::read_json(&self.layout.evaluator_file(version_ref.slot.as_str(), version_ref.version))
+        io::read_json(
+            &self
+                .layout
+                .evaluator_file(version_ref.slot.as_str(), version_ref.version),
+        )
     }
 
     /// Every registered evaluator definition, sorted by (slot, version).
@@ -359,7 +365,9 @@ impl EvaluationStore {
     ) -> Result<Digest> {
         suite.validate()?;
         suite.verify_artifacts(repo_root.as_ref())?;
-        let file = self.layout.anchor_file(suite.suite_id.as_str(), suite.version);
+        let file = self
+            .layout
+            .anchor_file(suite.suite_id.as_str(), suite.version);
         io::write_immutable_json(&file, suite)?;
         let digest = suite.suite_digest();
         let mut fields = BTreeMap::new();
@@ -418,7 +426,9 @@ impl EvaluationStore {
                         EvaluationErrorKind::Integrity,
                         format!(
                             "anchor file {} does not match its path ({}@{})",
-                            v_entry.path().display(), suite_id, version
+                            v_entry.path().display(),
+                            suite_id,
+                            version
                         ),
                     ));
                 }
@@ -485,7 +495,12 @@ impl EvaluationStore {
         fields.insert("incumbent".into(), trial.incumbent.to_string());
         fields.insert("challenger".into(), trial.challenger.to_string());
         fields.insert("verdict".into(), trial.verdict.as_str().into());
-        self.journal.append(at, "evaluator.challenger.completed", &format!("trial:{}", trial.id), fields)?;
+        self.journal.append(
+            at,
+            "evaluator.challenger.completed",
+            &format!("trial:{}", trial.id),
+            fields,
+        )?;
         Ok(())
     }
 
@@ -502,8 +517,12 @@ impl EvaluationStore {
         let mut fields = BTreeMap::new();
         fields.insert("evaluator".into(), record.evaluator.to_string());
         fields.insert("epoch".into(), record.epoch_id.to_string());
-        self.journal
-            .append(at, "evaluation.completed", &format!("record:{}", record.evaluation_id), fields)?;
+        self.journal.append(
+            at,
+            "evaluation.completed",
+            &format!("record:{}", record.evaluation_id),
+            fields,
+        )?;
         Ok(())
     }
 
@@ -576,10 +595,12 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(value).map_err(|error| {
         EvaluationError::new(
             EvaluationErrorKind::Invariant,
-            format!("failed to serialize document for {}: {error}", path.display()),
+            format!(
+                "failed to serialize document for {}: {error}",
+                path.display()
+            ),
         )
     })?;
     bytes.push(b'\n');
     io::atomic_write(path, &bytes)
 }
-

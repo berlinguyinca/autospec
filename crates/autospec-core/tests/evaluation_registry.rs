@@ -13,9 +13,11 @@ use autospec_core::evaluation::anchor::{
     AccessRole, AnchorCase, AnchorSuite, AnchorVisibility, ProtectedLabel, Provenance, Severity,
 };
 use autospec_core::evaluation::digest::Digest;
-use autospec_core::evaluation::evaluator::{EvaluatorDefinition, EvaluatorKind, Provenance as EvaluatorProvenance};
+use autospec_core::evaluation::evaluator::{
+    EvaluatorDefinition, EvaluatorKind, Provenance as EvaluatorProvenance,
+};
 use autospec_core::evaluation::ids::{
-    AnchorCaseId, AnchorSuiteId, EvaluationId, EpochId, EvaluatorSlot, EvaluatorVersionRef,
+    AnchorCaseId, AnchorSuiteId, EpochId, EvaluationId, EvaluatorSlot, EvaluatorVersionRef,
 };
 use autospec_core::evaluation::policy::PromotionPolicy;
 use autospec_core::evaluation::promotion::PromotionState;
@@ -184,7 +186,10 @@ fn evaluator_versions_cannot_be_rewritten() {
     edited.prompt_digest = Some(Digest::of_bytes(b"edited in place"));
     let err = store.register_evaluator(&edited, 101).unwrap_err();
     assert_eq!(err.kind, EvaluationErrorKind::Immutable);
-    assert!(err.message.contains("evaluators/architecture/v1.json"), "{err}");
+    assert!(
+        err.message.contains("evaluators/architecture/v1.json"),
+        "{err}"
+    );
 
     assert_eq!(store.evaluator(def.version_ref()).unwrap(), def);
     assert_eq!(store.list_evaluators().unwrap().len(), 1);
@@ -196,7 +201,9 @@ fn anchor_registration_verifies_artifacts_and_redacts_for_mutation_role() {
     let suite = build_fixture_suite(root.path());
 
     let mut store = EvaluationStore::init(root.path(), PromotionPolicy::default(), 100).unwrap();
-    let digest = store.register_anchor_suite(&suite, root.path(), 100).unwrap();
+    let digest = store
+        .register_anchor_suite(&suite, root.path(), 100)
+        .unwrap();
     assert_eq!(digest, suite.suite_digest());
 
     // The mutation role must never see protected-holdout labels.
@@ -213,7 +220,10 @@ fn anchor_registration_verifies_artifacts_and_redacts_for_mutation_role() {
     );
     // Quarantine cases are dropped entirely for the mutation role.
     assert!(
-        redacted.cases.iter().all(|c| c.visibility != AnchorVisibility::Quarantine),
+        redacted
+            .cases
+            .iter()
+            .all(|c| c.visibility != AnchorVisibility::Quarantine),
         "quarantine cases must be dropped for the mutation role"
     );
 
@@ -229,7 +239,10 @@ fn anchor_registration_verifies_artifacts_and_redacts_for_mutation_role() {
     let mut v2 = suite.clone();
     v2.version = 2;
     assert_eq!(
-        store.register_anchor_suite(&v2, root.path(), 102).unwrap_err().kind,
+        store
+            .register_anchor_suite(&v2, root.path(), 102)
+            .unwrap_err()
+            .kind,
         EvaluationErrorKind::Integrity
     );
 }
@@ -278,8 +291,13 @@ fn pin_seeds_an_empty_slot_and_rejects_repin_unknown_and_empty_actor() {
     // Pinning an unregistered version fails (the definition must exist).
     let mut unknown = def.clone();
     unknown.version = 2;
-    let err = store.pin(unknown.version_ref(), "operator", 103).unwrap_err();
-    assert!(err.message.contains("evaluators/architecture/v2.json"), "{err}");
+    let err = store
+        .pin(unknown.version_ref(), "operator", 103)
+        .unwrap_err();
+    assert!(
+        err.message.contains("evaluators/architecture/v2.json"),
+        "{err}"
+    );
 
     // A registered version pinned with a blank actor is rejected.
     store.register_evaluator(&unknown, 103).unwrap();

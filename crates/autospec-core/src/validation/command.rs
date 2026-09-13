@@ -1,10 +1,10 @@
 use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
 use std::time::Instant;
 
 use super::results::{output_digest, CheckResult};

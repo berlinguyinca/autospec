@@ -126,11 +126,8 @@ fn nested_scalar(root: &Mapping, parent: &str, child: &str) -> Option<String> {
 /// Fail-closed: the first missing required field (in the shell's validation
 /// order) yields `Err("MISSING_FIELD:<key>")`.
 pub fn parse(yaml: &str) -> Result<IssueSkeleton, String> {
-    let document = Document::from_str(yaml)
-        .map_err(|error| format!("YAML_PARSE_ERROR:{error}"))?;
-    let root = document
-        .as_mapping()
-        .ok_or_else(|| missing("issue_id"))?;
+    let document = Document::from_str(yaml).map_err(|error| format!("YAML_PARSE_ERROR:{error}"))?;
+    let root = document.as_mapping().ok_or_else(|| missing("issue_id"))?;
     let root = &root;
 
     let issue_id = required_scalar(root, "issue_id").ok_or_else(|| missing("issue_id"))?;
@@ -146,35 +143,34 @@ pub fn parse(yaml: &str) -> Result<IssueSkeleton, String> {
 
     let team_personality =
         string_list(root, "team_personality").ok_or_else(|| missing("team_personality"))?;
-    let review_counter_team = string_list(root, "review_counter_team")
-        .ok_or_else(|| missing("review_counter_team"))?;
-    let files_to_read = string_list(root, "files_to_read").ok_or_else(|| missing("files_to_read"))?;
+    let review_counter_team =
+        string_list(root, "review_counter_team").ok_or_else(|| missing("review_counter_team"))?;
+    let files_to_read =
+        string_list(root, "files_to_read").ok_or_else(|| missing("files_to_read"))?;
     let files_touched =
         string_list(root, "files_touched").ok_or_else(|| missing("files_touched"))?;
     let local_llm_notes =
         string_list(root, "local_llm_notes").ok_or_else(|| missing("local_llm_notes"))?;
     let dependencies = string_list(root, "dependencies").ok_or_else(|| missing("dependencies"))?;
-    let implementation_scope = string_list(root, "implementation_scope")
-        .ok_or_else(|| missing("implementation_scope"))?;
+    let implementation_scope =
+        string_list(root, "implementation_scope").ok_or_else(|| missing("implementation_scope"))?;
     let out_of_scope = string_list(root, "out_of_scope").unwrap_or_default();
     let implementation_outline = string_list(root, "implementation_outline_lines")
         .ok_or_else(|| missing("implementation_outline_lines"))?;
     let tests_required =
         string_list(root, "tests_required").ok_or_else(|| missing("tests_required"))?;
-    let acceptance_criteria = string_list(root, "acceptance_criteria")
-        .ok_or_else(|| missing("acceptance_criteria"))?;
+    let acceptance_criteria =
+        string_list(root, "acceptance_criteria").ok_or_else(|| missing("acceptance_criteria"))?;
 
     // Security profile fields are required only when the profile demands them.
     let security = feature_profile.as_deref() == Some("security_database");
     let evidence_consumed = if security {
-        string_list(root, "evidence_consumed")
-            .ok_or_else(|| missing("evidence_consumed"))?
+        string_list(root, "evidence_consumed").ok_or_else(|| missing("evidence_consumed"))?
     } else {
         Vec::new()
     };
     let controls_covered = if security {
-        string_list(root, "controls_covered")
-            .ok_or_else(|| missing("controls_covered"))?
+        string_list(root, "controls_covered").ok_or_else(|| missing("controls_covered"))?
     } else {
         Vec::new()
     };
@@ -313,9 +309,7 @@ impl IssueSkeleton {
             files_read = bullets(&self.files_to_read),
             files_touched = bullets(&self.files_touched),
             notes = bullets(&self.local_llm_notes),
-            deps = self
-                .dependencies
-                .join("\n"),
+            deps = self.dependencies.join("\n"),
             security = security_context,
             middle = middle,
             oos = bullets(&self.out_of_scope),
@@ -448,7 +442,8 @@ verification:
         yaml.push_str("\nimplementation_surface: crates/autospec-core (issue_skeleton module)\n");
         let input = parse(&yaml).expect("input with surface parses");
         let body = input.render();
-        assert!(body.contains("## Implementation surface\n\ncrates/autospec-core (issue_skeleton module)"));
+        assert!(body
+            .contains("## Implementation surface\n\ncrates/autospec-core (issue_skeleton module)"));
         assert!(body.contains("## Implementation scope\n\n- crates/tooling/src/lib.rs\n\n## Implementation surface\n\ncrates/autospec-core (issue_skeleton module)\n\n## Out of scope"));
     }
 }

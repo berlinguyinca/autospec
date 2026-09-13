@@ -26,9 +26,9 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use autospec_core::test_support::write_executable;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
-use autospec_core::test_support::write_executable;
 
 /// Removes its directory on drop so a failing assert cannot leak fixtures.
 struct DirGuard(PathBuf);
@@ -133,7 +133,8 @@ fn refine_contract_bats_suite_runs_without_dispatching_an_llm() {
         .lines()
         .count();
     assert_eq!(
-        dispatched, 0,
+        dispatched,
+        0,
         "validate's refine check dispatched a real LLM process — the generic \
          fixture must stay offline (#2568). Sentinel log:\n{}",
         fs::read_to_string(&invocation_log).unwrap_or_default()
@@ -240,7 +241,10 @@ fn interrupting_validate_kills_every_fixture_process_group() {
     let deadline = Instant::now() + Duration::from_secs(180);
     let grandchild = loop {
         if let Ok(text) = fs::read_to_string(&grandchild_file) {
-            break text.trim().parse::<u32>().expect("grandchild pid is numeric");
+            break text
+                .trim()
+                .parse::<u32>()
+                .expect("grandchild pid is numeric");
         }
         if Instant::now() > deadline {
             let _ = child.kill();
