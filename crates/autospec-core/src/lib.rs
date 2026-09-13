@@ -114,6 +114,8 @@ pub mod merge_gate;
 pub mod name_scope;
 pub mod negative_evidence;
 pub mod not_reproducible;
+pub mod patch_archive;
+pub mod patch_language;
 pub mod planning;
 pub mod platform_gate;
 
@@ -135,6 +137,7 @@ pub mod prompt_blocks;
 pub mod prose_closure;
 pub mod queue_gap;
 pub mod rag;
+pub mod ranking_evidence;
 pub mod reader_fidelity;
 pub mod rebase_review;
 pub mod rebaseline;

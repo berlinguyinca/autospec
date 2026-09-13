@@ -86,6 +86,7 @@ use serde_json::{json, Value};
 
 use super::claim::{branch_liveness, local_branch_checked_out, BranchLiveness};
 use super::CommandFailure;
+mod language;
 
 /// The schema emitted by `autospec convert --json`.
 pub const CONVERT_PLAN_SCHEMA: &str = "autospec.convert-plan.v1";
@@ -269,10 +270,10 @@ fn resolve_llm_root(explicit: Option<&Path>) -> Option<PathBuf> {
 
 /// One agent patch on disk: its node, issue, path, and input key.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PatchLocation {
+pub(crate) struct PatchLocation {
     node: String,
-    issue: u64,
-    path: PathBuf,
+    pub(crate) issue: u64,
+    pub(crate) path: PathBuf,
     patch_key: String,
 }
 
@@ -365,6 +366,49 @@ fn enumerate_patches(root: &Path) -> Result<Vec<PatchLocation>, CommandFailure> 
 /// [`HoldRecord`]. The pass reads it to decide which held patches still
 /// disqualify (their re-gate holds) versus which are re-offered (the base
 /// moved). Appending a HELD line is the pass's "never discard" step.
+/// Print the pass's summary line, having first checked that it can be true.
+///
+/// `PassOutcome` has carried a `reconciles()` predicate, and a doc comment
+/// saying the counters "must reconcile", since it was written. Nothing in the
+/// running pass ever called it: the summary was printed whatever the arithmetic
+/// said (issue #4604). A pass reporting that it acted on more patches than it
+/// examined would emit a line that reads as authoritative and is impossible.
+///
+/// Every operational decision about this fleet is made from that one line, so
+/// the line now states whether it can be trusted. The counters are still
+/// printed -- suppressing them would destroy the evidence needed to find the
+/// accounting defect -- but they are no longer offered as fact.
+fn report_outcome(outcome: &PassOutcome) {
+    let (line, alarm) = outcome_report(outcome);
+    println!("{line}");
+    if let Some(alarm) = alarm {
+        eprintln!("{alarm}");
+    }
+}
+
+/// The summary line, and the alarm that must accompany it when the pass's own
+/// arithmetic is impossible.
+///
+/// Split from the printing so the decision is testable without capturing
+/// stdout -- the check this issue is about should not itself be reachable only
+/// through a full pass.
+fn outcome_report(outcome: &PassOutcome) -> (String, Option<String>) {
+    let line = outcome.line("convert", "autospec convert", "enumerate $LLM");
+    if outcome.reconciles() {
+        (line, None)
+    } else {
+        (
+            line,
+            Some(
+                "ALARM: the pass's own counters do not reconcile -- it reports acting on more \
+                 patches than it examined. The line above is not a result; it is evidence of \
+                 an accounting defect in the pass. Do not act on these numbers."
+                    .to_string(),
+            ),
+        )
+    }
+}
+
 fn load_held(path: &Path) -> Result<BTreeMap<u64, HoldRecord>, CommandFailure> {
     let Ok(text) = fs::read_to_string(path) else {
         return Ok(BTreeMap::new());
@@ -755,7 +799,7 @@ fn gate_packages(files: &[String]) -> Vec<String> {
 /// The file paths a `changes.patch` touches, from its `+++ b/<path>` lines.
 /// Binary additions (`+++ /dev/null` is a deletion; `+++ b/<path>` is the
 /// new path) are read by their `b/` side.
-fn patch_files(patch: &str) -> Vec<String> {
+pub(crate) fn patch_files(patch: &str) -> Vec<String> {
     patch
         .lines()
         .filter_map(|line| {
@@ -843,10 +887,10 @@ fn buffer_from_candidates(candidates: &[PatchCandidate]) -> ConversionBuffer {
     }
 }
 
-struct ConvertPlan {
+pub(crate) struct ConvertPlan {
     opts: Options,
     llm_root: PathBuf,
-    examined: Vec<PatchLocation>,
+    pub(crate) examined: Vec<PatchLocation>,
     candidates: Vec<PatchCandidate>,
     outcome: PassOutcome,
 }
@@ -935,22 +979,16 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
             branch_exists,
             pull_request_exists,
             held_recorded,
+            language: language::candidate_language(patch),
         });
     }
-
-    let outcome = PassOutcome::Examined(PassCounters {
-        examined: candidates.len(),
-        converted: 0,
-        held: 0,
-        skipped: 0,
-    });
 
     Ok(ConvertPlan {
         opts,
         llm_root,
         examined,
+        outcome: language::plan_outcome(&candidates),
         candidates,
-        outcome,
     })
 }
 
@@ -1124,6 +1162,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
                 json!({ "issue": c.issue, "reason": reason.as_str() })
             })
             .collect();
+        let language_held = language::held_json(plan, &selection.language_held);
         let fresh: Vec<Value> = selection
             .fresh
             .iter()
@@ -1137,6 +1176,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             "examined": plan.candidates.len(),
             "fresh": fresh,
             "disqualified": disqualified,
+            "language_held": language_held,
             "buffer": json!({
                 "waiting": buffer.waiting,
                 "queue_entries_blocked": buffer.queue_entries_blocked,
@@ -1161,6 +1201,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             patch_key = c.patch_key
         );
     }
+    language::render_holds(plan, &selection.language_held);
     println!("{}", plan.outcome.line("convert", "autospec convert", "enumerate $LLM"));
     // The buffer, on every run — including an idle one: the line that
     // makes a silent successful run distinguishable from a broken one
@@ -1200,6 +1241,7 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     // buffer entirely — no patch on disk, so no queue entry held.
     let mut archived = 0;
 
+    language::archive_held(plan, &selection.language_held, &mut counters, &mut archived);
     for c in &selection.fresh {
         let patch = match plan.examined.iter().find(|p| p.issue == c.issue) {
             Some(p) => p,
@@ -1219,7 +1261,7 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     }
 
     let outcome = PassOutcome::Examined(counters);
-    println!("{}", outcome.line("convert", "autospec convert", "enumerate $LLM"));
+    report_outcome(&outcome);
 
     // The buffer after the run, not just the run itself (#4558 ask 3):
     // converted patches leave the waiting count (their PR is live) but
@@ -2096,6 +2138,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             branch_exists: branch,
             pull_request_exists: pr,
             held_recorded: held,
+            language: autospec_core::patch_language::PatchLanguage::default(),
         }
     }
 
@@ -2316,4 +2359,55 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
     }
 
 
+
+    // --- #4604: a stated invariant must be consulted, not only tested --------
+
+    #[test]
+    fn a_reconciling_pass_reports_its_line_and_nothing_else() {
+        let outcome = PassOutcome::Examined(PassCounters {
+            examined: 10,
+            converted: 3,
+            held: 2,
+            skipped: 1,
+        });
+        let (line, alarm) = outcome_report(&outcome);
+        assert!(line.contains("examined"), "the line still carries the counts");
+        assert!(alarm.is_none(), "sound arithmetic needs no alarm");
+    }
+
+    #[test]
+    fn a_pass_that_acted_on_more_than_it_examined_is_not_reported_as_fact() {
+        // The impossible case: more converted than examined. Before #4604 this
+        // printed exactly like a real result.
+        let outcome = PassOutcome::Examined(PassCounters {
+            examined: 1,
+            converted: 5,
+            held: 0,
+            skipped: 0,
+        });
+        let (line, alarm) = outcome_report(&outcome);
+        assert!(
+            alarm.is_some(),
+            "impossible counters must not be presented as a result"
+        );
+        assert!(
+            line.contains("examined"),
+            "the counters are still printed -- they are the evidence for the defect"
+        );
+    }
+
+    #[test]
+    fn an_unfed_pass_has_nothing_to_reconcile_and_raises_no_alarm() {
+        let (_line, alarm) = outcome_report(&PassOutcome::Unfed);
+        assert!(alarm.is_none());
+    }
+
+    #[test]
+    fn an_idle_pass_and_an_unfed_pass_still_read_differently() {
+        // The distinction this type exists to preserve: nothing to do is not
+        // the same as never given anything.
+        let (idle, _) = outcome_report(&PassOutcome::Examined(PassCounters::default()));
+        let (unfed, _) = outcome_report(&PassOutcome::Unfed);
+        assert_ne!(idle, unfed);
+    }
 }
