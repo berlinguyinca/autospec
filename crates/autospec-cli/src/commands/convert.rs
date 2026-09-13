@@ -181,6 +181,9 @@ struct Options {
     as_json: bool,
     convert_ledger: Option<PathBuf>,
     issues: Vec<u64>,
+    /// Seconds this pass may run. The pass stops *starting* patches when the
+    /// time left is less than one has been observed to cost (issue #4607).
+    deadline_secs: Option<u64>,
 }
 
 fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
@@ -196,6 +199,7 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
         as_json: false,
         convert_ledger: None,
         issues: Vec::new(),
+            deadline_secs: None,
     };
     let value = |args: &[String], i: &mut usize, flag: &str| -> Result<String, CommandFailure> {
         *i += 1;
@@ -212,6 +216,14 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
             "--base" => opts.base = value(args, &mut i, &arg)?,
             "--held-file" => opts.held_file = Some(PathBuf::from(value(args, &mut i, &arg)?)),
             "--branch-prefix" => opts.branch_prefix = value(args, &mut i, &arg)?,
+            "--deadline-secs" => {
+                let raw = value(args, &mut i, &arg)?;
+                opts.deadline_secs = Some(raw.parse::<u64>().map_err(|_| {
+                    CommandFailure::diagnostic(format!(
+                        "--deadline-secs wants a whole number of seconds, got {raw:?}"
+                    ))
+                })?);
+            }
             "--free-slots" => {
                 let raw = value(args, &mut i, &arg)?;
                 opts.free_slots = Some(
@@ -365,6 +377,34 @@ fn enumerate_patches(root: &Path) -> Result<Vec<PatchLocation>, CommandFailure> 
 /// [`HoldRecord`]. The pass reads it to decide which held patches still
 /// disqualify (their re-gate holds) versus which are re-offered (the base
 /// moved). Appending a HELD line is the pass's "never discard" step.
+/// Whether the pass may start another patch without overrunning its deadline.
+///
+/// The rule is measured, not assumed: the mean cost of what this pass has
+/// already finished predicts the next one. A compiled-in constant would be
+/// wrong either way — the first patch on a cold cache and the tenth on a warm
+/// one differ by an order of magnitude.
+///
+/// With nothing finished yet the answer is always yes. A deadline that could
+/// stop the pass before it attempts anything would turn "finish what you start"
+/// into "start nothing", which is the failure being fixed, not a stricter form
+/// of it.
+///
+/// No deadline means no limit, exactly as before (issue #4607).
+fn may_start_another(
+    spent: std::time::Duration,
+    completed: u32,
+    deadline: Option<std::time::Duration>,
+) -> bool {
+    let Some(deadline) = deadline else {
+        return true;
+    };
+    if completed == 0 {
+        return true;
+    }
+    let per_item = spent / completed;
+    spent + per_item <= deadline
+}
+
 /// Print the pass's summary line, having first checked that it can be true.
 ///
 /// `PassOutcome` has carried a `reconciles()` predicate, and a doc comment
@@ -1242,11 +1282,31 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     // buffer entirely — no patch on disk, so no queue entry held.
     let mut archived = 0;
 
+    // The deadline governs what the pass *starts*, never what it abandons
+    // (issue #4607). Not one pass in this fleet's history had ever ended rc=0:
+    // the batch size and the wall-clock limit were chosen independently, so
+    // every pass was killed mid-gate and every candidate it had not reached was
+    // re-selected and re-gated from scratch next time. Throughput was not low,
+    // it was zero, and no amount of re-running changed that.
+    //
+    // Cost is measured here, not assumed: the first patch on a cold cache and
+    // the tenth on a warm one differ by an order of magnitude, so a compiled-in
+    // constant would be wrong in whichever direction it was set.
+    let started_at = std::time::Instant::now();
+    let deadline = plan.opts.deadline_secs.map(std::time::Duration::from_secs);
+    let mut completed: u32 = 0;
+    let mut deferred: u32 = 0;
+
     for c in &selection.fresh {
+        if !may_start_another(started_at.elapsed(), completed, deadline) {
+            deferred += 1;
+            continue;
+        }
         let patch = match plan.examined.iter().find(|p| p.issue == c.issue) {
             Some(p) => p,
             None => continue,
         };
+        completed += 1;
         match apply_one(plan, &repo, &base_ref, &base_sha, patch) {
             ApplyResult::Converted => counters.converted += 1,
             ApplyResult::Held => counters.held += 1,
@@ -1260,6 +1320,14 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         }
     }
 
+    if deferred > 0 {
+        // A pass that reached 1 of 12 and a pass that reached 12 of 12 must not
+        // produce the same shape of line.
+        println!(
+            "deferred={deferred} (not started: the pass would not have finished them within its \
+             deadline; they stay queued and are offered again next pass)"
+        );
+    }
     let outcome = PassOutcome::Examined(counters);
     report_outcome(&outcome);
     let _ = held_path; // the HELD ledger is written inside apply_one
@@ -2217,6 +2285,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             as_json: false,
             convert_ledger: None,
             issues,
+        deadline_secs: None,
         };
         build_plan(opts, root.to_path_buf()).unwrap()
     }
@@ -2341,6 +2410,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             as_json: false,
             convert_ledger: Some(prose.clone()),
             issues: Vec::new(),
+            deadline_secs: None,
         };
         assert!(convert_ledger(&opts, &prose).is_ok());
 
@@ -2409,5 +2479,65 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
         let (idle, _) = outcome_report(&PassOutcome::Examined(PassCounters::default()));
         let (unfed, _) = outcome_report(&PassOutcome::Unfed);
         assert_ne!(idle, unfed);
+    }
+
+    // --- #4607: a pass sizes its work to its own deadline -------------------
+
+    use std::time::Duration;
+
+    #[test]
+    fn with_no_deadline_the_pass_starts_everything_as_before() {
+        assert!(may_start_another(Duration::from_secs(9_000), 5, None));
+    }
+
+    #[test]
+    fn the_first_patch_is_always_attempted() {
+        // A deadline that stops the pass before it tries anything converts
+        // "finish what you start" into "start nothing".
+        assert!(may_start_another(
+            Duration::from_secs(0),
+            0,
+            Some(Duration::from_secs(1))
+        ));
+    }
+
+    #[test]
+    fn a_patch_that_would_overrun_the_deadline_is_not_started() {
+        // 3 done in 90 min = 30 min each; 100 min spent of a 120 min deadline.
+        // The next one would end at 130. Do not start it.
+        assert!(!may_start_another(
+            Duration::from_secs(100 * 60),
+            3,
+            Some(Duration::from_secs(120 * 60))
+        ));
+    }
+
+    #[test]
+    fn a_patch_that_fits_is_started() {
+        // 3 done in 30 min = 10 min each; 30 spent of 120. The next ends at 40.
+        assert!(may_start_another(
+            Duration::from_secs(30 * 60),
+            3,
+            Some(Duration::from_secs(120 * 60))
+        ));
+    }
+
+    #[test]
+    fn the_observed_cost_governs_not_a_constant() {
+        // Identical elapsed time and deadline; only the measured per-item cost
+        // differs. One slow item must stop the pass where ten fast ones do not.
+        let spent = Duration::from_secs(60 * 60);
+        let deadline = Some(Duration::from_secs(70 * 60));
+        assert!(!may_start_another(spent, 1, deadline), "one 60-min item");
+        assert!(may_start_another(spent, 10, deadline), "ten 6-min items");
+    }
+
+    #[test]
+    fn a_pass_exactly_at_its_deadline_starts_nothing_further() {
+        assert!(!may_start_another(
+            Duration::from_secs(120 * 60),
+            2,
+            Some(Duration::from_secs(120 * 60))
+        ));
     }
 }
