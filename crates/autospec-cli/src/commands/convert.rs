@@ -1621,9 +1621,13 @@ fn open_pr(
         return false;
     }
     let message = format!("auto-implement: convert issue #{}", patch.issue);
-    if run_git_in(worktree, &["commit", "-m", &message]).is_err() {
+    if let Err(error) = run_git_in(worktree, &["commit", "-m", &message]) {
         // An empty commit (no changes) is not an error to hold on: nothing to
-        // open a PR for. Treat it as not-converted.
+        // open a PR for. Treat it as not-converted. The failure is logged
+        // either way: a commit that fails for another reason (a missing git
+        // identity, a lock) must not surface as a bare "PR could not be
+        // opened" with an empty stderr.
+        eprintln!("WARN: git commit for #{issue} failed: {error}", issue = patch.issue);
         return false;
     }
     if let Err(error) = run_git_in(worktree, &["push", "origin", branch]) {

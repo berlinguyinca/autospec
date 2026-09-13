@@ -165,7 +165,14 @@ fn run_convert(
         .args(["convert"])
         .args(args)
         .current_dir(repo)
-        .env("LLM", "/nonexistent-llm-for-this-test");
+        .env("LLM", "/nonexistent-llm-for-this-test")
+        // The pass commits the converted work. The identity must not depend on the
+        // ambient git config: CI runners have none, and a commit that fails for that
+        // reason surfaced as a bare "PR could not be opened" with an empty stderr.
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com");
     if let Some(dir) = path_dir {
         let mut path = dir.to_string_lossy().into_owned();
         path.push(':');
