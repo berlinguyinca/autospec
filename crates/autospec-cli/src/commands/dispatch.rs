@@ -95,12 +95,14 @@ use serde::{Deserialize, Serialize};
 
 use super::CommandFailure;
 
-/// The artifact is authoritative and every hop is live.
-const OK_EXIT: i32 = 0;
-/// A liveness failure: the artifact is not authoritative or a hop is silent.
-const HOLD_EXIT: i32 = 1;
+mod args;
 
-const SUBCOMMANDS: &[(&str, &str)] = &[
+/// The artifact is authoritative and every hop is live.
+pub(super) const OK_EXIT: i32 = 0;
+/// A liveness failure: the artifact is not authoritative or a hop is silent.
+pub(super) const HOLD_EXIT: i32 = 1;
+
+pub(super) const SUBCOMMANDS: &[(&str, &str)] = &[
     (
         "check",
         "Gate on the queue artifact (exit 0 proceed/idle / 1 hold)",
@@ -156,23 +158,23 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         .ok_or_else(|| CommandFailure::diagnostic("usage: autospec dispatch <subcommand> ..."))?;
     match subcommand.as_str() {
         "-h" | "--help" => {
-            print_help();
+            args::print_help();
             Ok(())
         }
-        "check" => check(rest),
-        "reconcile" => reconcile(rest),
-        "queue-gap" => queue_gap(rest),
-        "guard" => guard(rest),
-        "stage" => super::dispatch_spec::stage(rest),
-        "freshness" => super::dispatch_spec::freshness(rest),
-        "preflight" => super::dispatch_spec::preflight(rest),
-        "stamp" => stamp(rest),
-        "beat" => beat(rest),
-        "status" => status(rest),
-        "runs" => runs(rest),
-        "tick" => tick(rest),
-        "mark" => mark(rest),
-        "schedule" => schedule(rest),
+        "check" => checked("check", rest, check),
+        "reconcile" => checked("reconcile", rest, reconcile),
+        "queue-gap" => checked("queue-gap", rest, queue_gap),
+        "guard" => checked("guard", rest, guard),
+        "stage" => checked("stage", rest, super::dispatch_spec::stage),
+        "freshness" => checked("freshness", rest, super::dispatch_spec::freshness),
+        "preflight" => checked("preflight", rest, super::dispatch_spec::preflight),
+        "stamp" => checked("stamp", rest, stamp),
+        "beat" => checked("beat", rest, beat),
+        "status" => checked("status", rest, status),
+        "runs" => checked("runs", rest, runs),
+        "tick" => checked("tick", rest, tick),
+        "mark" => checked("mark", rest, mark),
+        "schedule" => checked("schedule", rest, schedule),
         other => Err(CommandFailure::diagnostic(format!(
             "unknown dispatch subcommand: {other} (expected one of: {})",
             SUBCOMMANDS
@@ -184,78 +186,24 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     }
 }
 
-fn print_help() {
-    println!("USAGE: autospec dispatch <subcommand> [options]");
-    println!();
-    println!("SUBCOMMANDS:");
-    for (name, description) in SUBCOMMANDS {
-        println!("    {name:<7} {description}");
+
+/// Every subcommand goes through here, so none can opt out of the shared
+/// discipline (#4568): `-h`/`--help` is answered before any argument
+/// interpretation and writes nothing, and a flag no dispatch subcommand
+/// accepts is an error naming the flag — never an empty option set, never a
+/// silent mutation.
+fn checked(
+    name: &str,
+    rest: &[String],
+    run: fn(&[String]) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    match args::classify(name, rest)? {
+        args::Invocation::Help => {
+            args::print_help();
+            Ok(())
+        }
+        args::Invocation::Run => run(rest),
     }
-    println!("OPTIONS:");
-    println!("    --queue <PATH>        Queue artifact (default $HOME/.autospec/{QUEUE_ARTIFACT})");
-    println!("    --admitted-file <PATH>  check/reconcile/queue-gap: the tracker's admitted (eligible) set, one issue number per line");
-    println!("    --covered-file <PATH>   queue-gap: issues a branch or PR already covers, one issue number per line (required)");
-    println!("    --require-step <NAME=COMMAND>  queue-gap: a component the step needs; repeatable. An unresolved COMMAND fails the run.");
-    println!("    --state-file <PATH>   Liveness ledger (default $HOME/.autospec/dispatch-liveness.json)");
-    println!(
-        "    --topology <PATH>     Topology JSON (default: built-in filing-to-dispatch chain)"
-    );
-    println!("    --step <NAME>         Hop the beat is for (required for beat)");
-    println!(
-        "    --issue <N>           Issue the guard, stage, freshness, or mark command acts on (required for mark)"
-    );
-    println!("    --issue-json <PATH>   stage: `gh api` issue payload (body, updatedAt, comments)");
-    println!("    --comments-json <PATH> stage: `gh api .../comments` payload merged into the discussion");
-    println!("    --body-file <PATH>    stage: verbatim body when no --issue-json is given");
-    println!("    --source-updated-at <T> stage: live issue updatedAt (epoch or RFC 3339)");
-    println!("    --out <PATH>          stage: staged spec to write (default $HOME/.autospec/dispatch/specs/<N>.md)");
-    println!("    --staged <PATH>       freshness/preflight: staged spec to check (same default)");
-    println!("    --prompt-file <PATH>  preflight: the assembled prompt; the dispatch is refused if it carries no issue text");
-    println!("    --status-file <PATH>  freshness/preflight: append the spec receipt (byte count + sha256) to the run's status.txt");
-    println!(
-        "    --live-updated-at <T> freshness: the live issue updatedAt, when the caller read it"
-    );
-    println!("    --live-json <PATH>    freshness: issue payload to read updatedAt from");
-    println!("    --repo <OWNER/NAME>   stage: read issue + comments live via `gh api` (else $AUTOSPEC_REPO)");
-    println!("                          freshness: repository to query with `gh api`");
-    println!("    --container-runtime <P> stage: runtime path, or 'absent' / 'not probed'");
-    println!("    --database <VALUE>    stage: database availability, or 'absent' / 'not probed'");
-    println!("    --registry <VALUE>    stage: registry reachability (never probed unless given)");
-    println!("    --no-probe            stage: declare every environment fact as not probed");
-    println!("    --out-dir <PATH>      Runner output root (default $HOME/.autospec/dispatch/out)");
-    println!("    --patch-name <NAME>   Patch file under issue-<N> (default changes.patch)");
-    println!("    --dry-run             guard: report the decision without touching the directory");
-    println!(
-        "    --by <NAME>           Producer named in the stamp (default: declared queue producer)"
-    );
-    println!(
-        "    --runs <PATH>         runs: JSON of the batch (array of runs, or {{runs, subfleets}})"
-    );
-    println!(
-        "    --duration-floor <S>  runs: seconds below which a run is LAUNCH-FAIL (default 30)"
-    );
-    println!("    --quote-bytes <N>     runs: transcripts of at most N bytes are quoted verbatim (default 4096)");
-    println!("    --fault-threshold <N> runs: identical failures at/above N in one batch raise a fleet fault (default 3)");
-    println!("    --out <PATH>          runs: where to write the agent-status.tsv record (default stdout)");
-    println!("    --lifecycle <PATH>    Lifecycle ledger (default $HOME/.autospec/dispatch-lifecycle.json)");
-    println!("    --action <A>          mark: produced / converted / hold / release / failed (required)");
-    println!(
-        "    --max-attempts <N>    tick: fresh dispatches without a patch tolerated before an entry is held, not redispatched (default {DEFAULT_MAX_DISPATCH_ATTEMPTS}, #4451)"
-    );
-    println!("    --reason <TEXT>       mark hold: why the entry is blocked (required for hold)");
-    println!("    --at <EPOCH>          Beat timestamp in epoch seconds (default: current time)");
-    println!("    --now <EPOCH>         Evaluate against this instant instead of the clock");
-    println!("    --interval <SECONDS>  Interval for hops that declare none (default {DEFAULT_INTERVAL_SECS})");
-    println!("    --max-intervals <N>   Missed intervals tolerated before a hold (default {DEFAULT_MAX_STALE_INTERVALS})");
-    println!("    --json                Emit JSON");
-    println!("    -h, --help            Print help");
-    println!();
-    println!("EXIT CODES:");
-    println!("    {OK_EXIT}  ok        queue fresh (proceed or genuinely idle) and every hop live");
-    println!("    {HOLD_EXIT}  hold      queue missing/unstamped/stale, clock rewind, silent hop, or topology defect");
-    println!("    {HOLD_EXIT}  stall     tick: queue non-empty but nothing dispatched (every skip named); mark: stamp refused");
-    println!("    {HOLD_EXIT}  gap       queue-gap: eligible work in neither the queue nor a branch/PR, or a required component is absent");
-    println!("    2  diagnostic usage error, unreadable artifact, or unparseable ledger");
 }
 
 /// `check` — refuse to read a stale queue as "no work".
@@ -724,9 +672,26 @@ fn validate_patch_name(name: &str) -> Result<(), CommandFailure> {
 }
 
 /// `stamp` — write the freshness headers into the artifact and beat for the hop.
+///
+/// The stamp asserts the producer ran for *a queue*, so the queue is named
+/// explicitly and must already exist (#4568): stamping a queue that was not
+/// given is never the intended operation, and stamping a non-existent queue
+/// into existence certifies a producer that never ran.
 fn stamp(args: &[String]) -> Result<(), CommandFailure> {
     let pipeline = build_pipeline(args)?;
-    let path = queue_path(args)?;
+    let path = opt_string(args, "--queue")?
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            CommandFailure::diagnostic(
+                "stamp needs --queue <PATH>: a stamp certifies the queue the producer wrote, and a queue that was not named is never the one being certified",
+            )
+        })?;
+    if !path.exists() {
+        return Err(CommandFailure::diagnostic(format!(
+            "refusing to stamp {}: the queue does not exist — stamping a queue into existence is never the intended operation; the producer writes the artifact and then stamps it",
+            path.display()
+        )));
+    }
     let mut queue = read_queue(&path)?.unwrap_or_default();
     let writer = match opt_string(args, "--by")? {
         Some(name) => name,
