@@ -3,6 +3,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::time::Instant;
 
 use super::results::{output_digest, CheckResult};
@@ -139,9 +141,19 @@ impl ToolCommand {
         for key in &self.removed_environment {
             command.env_remove(key);
         }
+        apply_process_group_isolation(&mut command);
         let output = command
             .current_dir(self.working_directory_for(root))
-            .output();
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let output = match output {
+            Ok(child) => {
+                let _group_guard = register_live_group(child.id());
+                child.wait_with_output()
+            }
+            Err(error) => Err(error),
+        };
 
         captured_result(id, required, &self.program, started, output)
     }
@@ -165,6 +177,7 @@ impl ToolCommand {
         for key in &self.removed_environment {
             command.env_remove(key);
         }
+        apply_process_group_isolation(&mut command);
         command
             .current_dir(self.working_directory_for(root))
             .stdin(Stdio::piped())
@@ -173,6 +186,7 @@ impl ToolCommand {
 
         let output = match command.spawn() {
             Ok(mut child) => {
+                let _group_guard = register_live_group(child.id());
                 if let Some(mut stdin) = child.stdin.take() {
                     let _ = stdin.write_all(stdin_bytes);
                 }
@@ -188,6 +202,43 @@ impl ToolCommand {
 fn should_skip_bats_in_fast_mode(program: &Path) -> bool {
     FAST_VALIDATION_MODE.with(Cell::get)
         && program.file_name().and_then(OsStr::to_str) == Some("bats")
+}
+
+/// Puts the child in its own process group so an interrupt to `validate`
+/// never lands on the fixture tree, and registers the group for the
+/// interrupt guard so an interrupted run kills every live fixture group
+/// (#2568). No-op on platforms without process groups.
+fn apply_process_group_isolation(command: &mut Command) {
+    // SAFETY: `pre_exec` runs in the forked child between `fork()` and
+    // `exec()`; `setpgid(0, 0)` is async-signal-safe and pid/pgid 0 target the
+    // current process, so this only places the child in its own process group.
+    // No allocation, no locks, no shared state.
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            // Raw libc on purpose: the pre_exec closure runs in the forked
+            // child before exec, where it must stay allocation-free
+            // (async-signal-safe). pid 0 / pgid 0 mean "this process".
+            if nix::libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        })
+    };
+}
+
+/// Registers the child's process group (pid == pgid after `setpgid(0, 0)`) so
+/// the interrupt guard can terminate it. The returned guard clears the
+/// registration when the wait completes.
+#[cfg(unix)]
+fn register_live_group(child_pid: u32) -> Option<super::interrupt_guard::GroupGuard> {
+    super::interrupt_guard::register_group(child_pid as i32)
+}
+
+#[cfg(not(unix))]
+fn register_live_group(_child_pid: u32) -> Option<()> {
+    None
 }
 
 fn skipped_result(id: String, required: bool) -> CapturedCheckResult {
