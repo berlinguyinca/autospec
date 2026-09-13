@@ -17,8 +17,10 @@
 //! (selection, and the unfed-vs-idle outcome). Its must-survive behaviours
 //! are reused, not re-implemented: the authoritative `failures:` name list and
 //! its declared-count cross-check is [`autospec_core::failure_attribution`];
-//! the refusal of any conflict auto-resolution the pass cannot prove safe is
-//! [`autospec_core::conflict_resolution`]; the HELD-as-queue re-gate
+//! the certification of which conflicts the pass may resolve itself — the
+//! rest are refused — is [`autospec_core::conflict_resolution`], applied by
+//! the strict keep-both merge [`autospec_core::conflict_merge`]; the
+//! HELD-as-queue re-gate
 //! (re-attempt when the base moves, archive the stale) is
 //! [`autospec_core::hold_memo`] and [`autospec_core::stored_output`].
 //!
@@ -74,7 +76,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use autospec_core::conflict_resolution::{classify_file, resolution_for, ResolutionPlan};
 use autospec_core::conversion_gate::{test_count_contradiction, tests_added_by_patch};
 use autospec_core::conversion_pass::{select_fresh, PassOutcome, PatchCandidate};
 use autospec_core::failure_attribution::attribute;
@@ -809,26 +810,6 @@ pub(crate) fn patch_files(patch: &str) -> Vec<String> {
         .collect()
 }
 
-/// The HELD reason for a conflict, naming each conflicted file and whether
-/// its shape is a proven-safe keep-both merge or a refusal (single-value,
-/// generated, or unclassifiable). The pass never writes a resolution it
-/// cannot prove safe; this reason is what a human or a proven-safe resolver
-/// acts on when the base next moves and the patch is re-offered.
-fn conflict_reason(path: &str, content: &str) -> String {
-    let shape = classify_file(path, content);
-    match resolution_for(&shape) {
-        ResolutionPlan::KeepBothInOrder | ResolutionPlan::KeepBothDeduplicated => {
-            format!("{path}: shape {} (resolvable keep-both)", shape.as_str())
-        }
-        ResolutionPlan::Regenerate { .. } => {
-            format!("{path}: shape {} (regenerate from source, not a merge)", shape.as_str())
-        }
-        ResolutionPlan::Refuse { reason } => {
-            format!("{path}: shape {} (refused: {reason})", shape.as_str())
-        }
-    }
-}
-
 /// The conversion buffer (issue #4558 ask 3): the finished patches the
 /// fleet has produced and has not yet turned into PRs, and the queue
 /// entries they hold. A pass that converts 1 of 559 and reports "1
@@ -1280,6 +1261,7 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     Ok(())
 }
 
+mod conflict;
 mod gate;
 
 use gate::{
@@ -1368,7 +1350,25 @@ fn apply_one(
         .map(|o| format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
         .unwrap_or_default();
 
-    let lifecycle = classify_apply(&apply_stdout, apply_rc);
+    let mut lifecycle = classify_apply(&apply_stdout, apply_rc);
+    // A conflict is a hold only when the pass cannot prove the resolution
+    // safe (#4560): every conflicted file the classifier certifies keep-both
+    // is merged by the strict parser and re-offered to the gate below — the
+    // compile and the tests are what make the resolution more than a
+    // hypothesis. One file the pass cannot certify holds the patch.
+    let mut resolutions: Vec<conflict::ResolutionRecord> = Vec::new();
+    if lifecycle == ApplyLifecycle::Conflict {
+        match conflict::resolve_conflicts(&worktree) {
+            Ok(resolved) => {
+                resolutions = resolved;
+                lifecycle = ApplyLifecycle::Applied;
+            }
+            Err(reason) => {
+                teardown_worktree(&worktree);
+                return record_held_and_result(plan, base_sha, patch, &reason);
+            }
+        }
+    }
     let result = match lifecycle {
         ApplyLifecycle::Superseded => {
             // Stale: main moved past it. Archive, never discard.
@@ -1386,10 +1386,11 @@ fn apply_one(
             ApplyResult::Archived
         }
         ApplyLifecycle::Conflict => {
-            // Refuse any auto-resolution the pass cannot prove safe (behavior
-            // 3): a conflict is HELD with the conflicted files' shapes, never
+            // Defensively unreachable: the resolution pass above either
+            // converted the conflict into an applied patch or held it. A
+            // conflict that ever reaches the gate unmerged is held, never
             // merged blind.
-            let reason = conflict_summary(&worktree);
+            let reason = conflict::summary(&worktree);
             teardown_worktree(&worktree);
             record_held_and_result(plan, base_sha, patch, &reason)
         }
@@ -1399,7 +1400,7 @@ fn apply_one(
             match gate {
                 GateResult::Pass => {
                     // Step 5: open a PR per passing patch.
-                    let opened = open_pr(repo, &worktree, &branch, patch, &packages);
+                    let opened = open_pr(repo, &worktree, &branch, patch, &packages, &resolutions);
                     teardown_worktree(&worktree);
                     if opened {
                         ApplyResult::Converted
@@ -1465,31 +1466,6 @@ fn classify_apply(output: &str, rc: Option<i32>) -> ApplyLifecycle {
     // A nonzero apply with no recognized signature: fail closed as a
     // conflict (hold it), never read as applied.
     ApplyLifecycle::Conflict
-}
-
-/// The files a worktree left in a conflicted (unmerged) state, each with its
-/// shape — the refusal reason for the pass's conservative no-auto-resolve
-/// policy.
-fn conflict_summary(worktree: &Path) -> String {
-    let output = run_capture_in(worktree, &["diff", "--name-only", "--diff-filter=U"]);
-    let names: Vec<String> = output
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    if names.is_empty() {
-        return "conflict: could not enumerate conflicted files".to_string();
-    }
-    let mut parts = Vec::new();
-    for name in names {
-        let content = fs::read_to_string(worktree.join(&name)).unwrap_or_default();
-        parts.push(conflict_reason(&name, &content));
-    }
-    format!("conflict (refusing auto-resolution): {}", parts.join("; "))
 }
 
 /// The gate's test-stage argv at the given scope: `test --no-fail-fast`
@@ -1631,21 +1607,43 @@ fn failing_tests_note(output: &str) -> String {
     }
 }
 
-fn open_pr(repo: &str, worktree: &Path, branch: &str, patch: &PatchLocation, scope: &[String]) -> bool {
+fn open_pr(
+    repo: &str,
+    worktree: &Path,
+    branch: &str,
+    patch: &PatchLocation,
+    scope: &[String],
+    resolutions: &[conflict::ResolutionRecord],
+) -> bool {
     if let Err(error) = run_git_in(worktree, &["add", "-A"]) {
         eprintln!("WARN: git add for #{issue} failed: {error}", issue = patch.issue);
         return false;
     }
     let message = format!("auto-implement: convert issue #{}", patch.issue);
-    if run_git_in(worktree, &["commit", "-m", &message]).is_err() {
+    if let Err(error) = run_git_in(worktree, &["commit", "-m", &message]) {
         // An empty commit (no changes) is not an error to hold on: nothing to
-        // open a PR for. Treat it as not-converted.
+        // open a PR for. Treat it as not-converted. The failure is logged
+        // either way: a commit that fails for another reason (a missing git
+        // identity, a lock) must not surface as a bare "PR could not be
+        // opened" with an empty stderr.
+        eprintln!("WARN: git commit for #{issue} failed: {error}", issue = patch.issue);
         return false;
     }
     if let Err(error) = run_git_in(worktree, &["push", "origin", branch]) {
         eprintln!("WARN: push for #{issue} failed: {error}", issue = patch.issue);
         return false;
     }
+    // An auto-resolution a human cannot see is an auto-resolution a human
+    // cannot review: the body names every conflict the pass resolved itself
+    // (issue #4560, guardrail 2).
+    let body = format!(
+        "Converted from the agent patch for issue #{}.\n\nGate scope: {} \
+         (derived from the patch's touched crates).\n\nSource spec: n/a \
+         (patch-to-PR conversion pass).{}",
+        patch.issue,
+        scope.join(" "),
+        conflict::pr_section(resolutions)
+    );
     let pr_title = format!("auto-implement: issue #{}", patch.issue);
     let opened = Command::new("gh")
         .args([
@@ -1658,13 +1656,7 @@ fn open_pr(repo: &str, worktree: &Path, branch: &str, patch: &PatchLocation, sco
             "--title",
             &pr_title,
             "--body",
-            &format!(
-                "Converted from the agent patch for issue #{}.\n\nGate scope: {} \
-                 (derived from the patch's touched crates).\n\nSource spec: n/a \
-                 (patch-to-PR conversion pass).",
-                patch.issue,
-                scope.join(" ")
-            ),
+            &body,
             "--label",
             "auto-implement",
         ])
@@ -1983,13 +1975,13 @@ diff --git a/crates/autospec-cli/src/b.rs b/crates/autospec-cli/src/b.rs
     fn the_conflict_reason_refuses_the_unprovable_shapes() {
         // A rules document (AGENTS.md) is unclassifiable: "keep both" would
         // write two contradictory directives, so it is refused.
-        let agents = conflict_reason("AGENTS.md", "# Title\n");
+        let agents = conflict::conflict_reason("AGENTS.md", "# Title\n");
         assert!(agents.contains("refused"), "{agents}");
         // A single-value golden is regenerated, not merged.
-        let golden = conflict_reason("x.sha256", "abc\n");
+        let golden = conflict::conflict_reason("x.sha256", "abc\n");
         assert!(golden.contains("regenerate"), "{golden}");
         // An append-only changelog is a proven-safe keep-both.
-        let changelog = conflict_reason("CHANGELOG.md", "# 1.0\n");
+        let changelog = conflict::conflict_reason("CHANGELOG.md", "# 1.0\n");
         assert!(changelog.contains("keep-both"), "{changelog}");
     }
 
