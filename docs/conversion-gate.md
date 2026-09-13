@@ -191,3 +191,67 @@ ones, 1 = at least one blocking finding, 2 = usage or environment error.
 Tests: `tests/test-failures-baseline.bats`, with the `main` run that produced
 the two entries kept at
 `tests/fixtures/test-failures-baseline/main-baseline.log`.
+
+## Where the gate's work runs
+
+The gate compiles the workspace and runs a test suite. That is real work, and by
+default it runs on whatever host invoked the pass.
+
+For a scheduled pass that host is a scheduler's submit node, shared with every
+other user of the machine. A pass once spent 96 minutes of `cargo` on a login
+node while holding its own lock, and nothing in its output said where the work
+had landed — the log is identical either way (#4598).
+
+Two things follow.
+
+**The placement is announced.** Every pass states, once, how it is running the
+work:
+
+```
+gate: running the work via `local`
+```
+
+**`AUTOSPEC_GATE_WRAPPER` places the work elsewhere.** Set it to a command
+prefix and each gate stage runs through it:
+
+```sh
+AUTOSPEC_GATE_WRAPPER='srun -c 8 --mem 32G -t 02:30:00'   # a batch scheduler
+AUTOSPEC_GATE_WRAPPER='docker run --rm -v "$PWD:/w" -w /w img'
+AUTOSPEC_GATE_WRAPPER='ssh builder --'
+```
+
+autospec does not know what any of those are, and must keep running on a single
+machine with no scheduler at all. The prefix is a string the operator supplies;
+unset, the behaviour is exactly as it was.
+
+A wrapper that **cannot obtain an execution host** should exit `125` — the
+convention `env` and `timeout` already use for "the wrapper failed, the command
+never ran". The pass then reports the patch as unverifiable rather than failed. A
+full queue is not a defect in anybody's change, and recording it as one writes a
+durable false claim.
+
+## Whose failure is it
+
+Each stage's failure is attributed before it is recorded (#4596). When a stage
+fails, that same stage is re-run with the patch removed:
+
+| at the base | verdict | ledger |
+|---|---|---|
+| the stage is green | the patch is defective | `HELD` |
+| the stage fails too | the patch is **unmeasured** | nothing written |
+| the base could not be run | the patch is **unmeasured** | nothing written |
+
+An unverifiable patch is left untouched and re-offered on the next pass, which
+measures it against a green base. It is deliberately a third outcome and not a
+failure: holding a patch is a durable claim that a change is defective, and
+making that claim when nothing has been learned about the change is both wrong
+and long-lived.
+
+**A broken base is reported once per pass, not once per patch.** It is one event
+— a property of the base — and reporting it per patch is what turned a single
+unformatted file on trunk into one wrong verdict for every queued change.
+
+All four stages are attributed, not only `test`. The test stage got a baseline
+first because one incident demanded it; the same reasoning always applied to the
+others, and the stage that actually broke the pipeline in production was `fmt`,
+which had none.
