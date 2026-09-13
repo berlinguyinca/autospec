@@ -13,11 +13,16 @@
 #   4  state=died    (poller is not alive — no terminal line to trust)
 #
 # "pending" is only ever reported for a poller whose PID is alive. Liveness is
-# read from the poller's own process (kill -0 on the recorded PID), never from
-# the log's last-write time — the #3995 rule applied to the pass itself
-# (#4094 AC3). A sentinel that says pending but whose poller is gone means the
-# poller died without settling (e.g. SIGKILL skips even the exit trap), so the
-# reader reports "died" and exits 4 instead of guessing "running".
+# read from the poller's own process, never from the log's last-write time —
+# the #3995 rule applied to the pass itself (#4094 AC3). The predicate must
+# treat an unreaped zombie as dead: kill -0 succeeds against a zombie, and a
+# SIGKILLed poller lingers as one until its (reparented) parent reaps it, so a
+# kill -0 check would report "pending" for a process that is gone — precisely
+# the failure this reader exists to catch (#4429). On Linux the /proc state is
+# the truth (Z or a missing entry = died); elsewhere it falls back to kill -0.
+# A sentinel that says pending but whose poller is gone means the poller died
+# without settling (e.g. SIGKILL skips even the exit trap), so the reader
+# reports "died" and exits 4 instead of guessing "running".
 #
 # Stdout: the state string (pass|fail|stalled|pending|died)
 
@@ -47,7 +52,18 @@ if [ "$state" = "pending" ]; then
     if [ -f "$PID_FILE" ]; then
         pid="$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null || printf '')"
     fi
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    poll_alive=1
+    if [ -z "$pid" ]; then
+        poll_alive=0
+    elif [ -e "/proc/$pid/stat" ]; then
+        poll_state="$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $1}')"
+        if [ -z "$poll_state" ] || [ "$poll_state" = "Z" ]; then
+            poll_alive=0
+        fi
+    elif ! kill -0 "$pid" 2>/dev/null; then
+        poll_alive=0
+    fi
+    if [ "$poll_alive" -eq 0 ]; then
         state="died"
     fi
 fi

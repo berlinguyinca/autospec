@@ -18,7 +18,9 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   grep -q 'install_agent_env_commands' "$REPO_ROOT/install.sh"
   grep -q 'for command in agent-env autospec-env' "$REPO_ROOT/install.sh"
   grep -qF 'exec "${AUTOSPEC_BIN:-$HOME/.autospec/bin/autospec}" runtime env "$@"' "$REPO_ROOT/install.sh"
-  ! grep -q 'agent-env.sh' "$REPO_ROOT/install.sh"
+  if grep -q 'agent-env.sh' "$REPO_ROOT/install.sh"; then
+      false
+  fi
   grep -q '^install_agent_env_commands$' "$REPO_ROOT/install.sh"
 }
 

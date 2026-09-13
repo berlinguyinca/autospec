@@ -102,7 +102,9 @@ EOF
         local overlap_lines
         overlap_lines="$(echo "$output" | grep 'claim_overlap' || true)"
         # None of the overlap_lines should be for autospec-run when scanning autospec-explore.
-        ! echo "$overlap_lines" | grep -q 'autospec-run'
+        if echo "$overlap_lines" | grep -q 'autospec-run'; then
+            false
+        fi
     fi
 }
 

@@ -50,9 +50,17 @@ setup() {
 @test "detailed cold-tail procedures are out of the body" {
     for f in "$BODY" "$CODEX" "$OPENCODE"; do
         # these markers live only in the moved reference, never in the body
-        ! grep -q 'data-scope invariant lens' "$f"
-        ! grep -q 'Final output when shutdown' "$f"
-        ! grep -q 'verify-voter-vendor.sh' "$f"
-        ! grep -q 'interrogation-ledger.sh' "$f"
+        if grep -q 'data-scope invariant lens' "$f"; then
+            false
+        fi
+        if grep -q 'Final output when shutdown' "$f"; then
+            false
+        fi
+        if grep -q 'verify-voter-vendor.sh' "$f"; then
+            false
+        fi
+        if grep -q 'interrogation-ledger.sh' "$f"; then
+            false
+        fi
     done
 }

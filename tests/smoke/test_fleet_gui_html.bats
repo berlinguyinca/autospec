@@ -36,7 +36,9 @@ setup() {
 }
 
 @test "fleet-gui does not persist the launch token in browser storage" {
-    ! grep -q 'localStorage' "$GUI_HTML"
+    if grep -q 'localStorage' "$GUI_HTML"; then
+        false
+    fi
     grep -q 'history.replaceState' "$GUI_HTML"
 }
 

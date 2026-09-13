@@ -124,8 +124,12 @@ EOF
     [ -f "$AUTOSPEC_CONTINUE_HISTORY" ]
 
     # MUST NOT contain the prompt content.
-    ! grep -q "$PROMPT_MARKER_TEXT" "$AUTOSPEC_CONTINUE_HISTORY"
-    ! grep -q "Next steps" "$AUTOSPEC_CONTINUE_HISTORY"
+    if grep -q "$PROMPT_MARKER_TEXT" "$AUTOSPEC_CONTINUE_HISTORY"; then
+        false
+    fi
+    if grep -q "Next steps" "$AUTOSPEC_CONTINUE_HISTORY"; then
+        false
+    fi
 
     # MUST contain the hash + timestamp schema fields.
     grep -q "source_message_hash" "$AUTOSPEC_CONTINUE_HISTORY"

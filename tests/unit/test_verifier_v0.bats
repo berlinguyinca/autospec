@@ -212,7 +212,9 @@ SH
   [ "$status" -eq 0 ]
   run jq -r '.verdict' "$TEST_TMPDIR/repo/.autospec/reports/verifier-report.json"
   [ "$output" = "pass" ]
-  ! grep -q 'pr comment' "$TEST_TMPDIR/gh.log"
+  if grep -q 'pr comment' "$TEST_TMPDIR/gh.log"; then
+      false
+  fi
   ! grep -Eq 'pr (review|merge)' "$TEST_TMPDIR/gh.log"
 }
 

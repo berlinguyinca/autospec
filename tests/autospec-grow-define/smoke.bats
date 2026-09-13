@@ -34,7 +34,9 @@ teardown() { rm -rf "$TMP"; unset GROWTH_LEDGER GH_LOG GH_COUNTER AUTOSPEC_BIN; 
   bash "$S/grow-define-pipeline.sh" "$TMP/c.jsonl" "$TMP/v.jsonl" "$TMP/cfg.json" > "$TMP/ranked.jsonl"
   # spammy refuted -> not in ranked; 2 survivors
   [ "$(grep -c '"norm_title"' "$TMP/ranked.jsonl")" -eq 2 ]
-  ! grep -q '"norm_title":"spammy"' "$TMP/ranked.jsonl"
+  if grep -q '"norm_title":"spammy"' "$TMP/ranked.jsonl"; then
+      false
+  fi
   # refuted recorded in ledger
   grep -q '"outcome":"refuted"' "$GROWTH_LEDGER"
 

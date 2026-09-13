@@ -41,7 +41,9 @@ RUN_TRIO=(
     # The old wording dispatched the prompt body "verbatim" with no cached
     # prefix. After wiring, the body is the cached-prefix dynamic body, not a
     # verbatim-and-only prompt.
-    ! grep -q 'Use it verbatim as the subagent prompt body' "$f"
+    if grep -q 'Use it verbatim as the subagent prompt body' "$f"; then
+        false
+    fi
   done
 }
 

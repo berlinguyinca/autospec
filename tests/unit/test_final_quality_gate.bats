@@ -52,7 +52,9 @@ setup() {
     grep -Fq "awk -F: '{print \$1}'" "$f"
     grep -Fq "awk -F: '{print \$2}'" "$f"
     grep -Fq "grep -m1 -Eo 'clippy::" "$f"
-    ! grep -q 'command=cargo-clippy crate=${_crate:-unknown} file=unknown line=unknown' "$f"
+    if grep -q 'command=cargo-clippy crate=${_crate:-unknown} file=unknown line=unknown' "$f"; then
+        false
+    fi
   done
 }
 

@@ -369,7 +369,9 @@ _run_cycles() {
   # Operator subset still dispatched to the parent.
   grep -q '^issues=202 kind=absent$' "$RUN_CMD_LOG"
   # Self subset NOT dispatched.
-  ! grep -q 'issues=101' "$RUN_CMD_LOG"
+  if grep -q 'issues=101' "$RUN_CMD_LOG"; then
+      false
+  fi
   # Notification fired.
   grep -q 'sync conflict' "$NOTIFY_LOG"
   # The kind=integration mode file written by ensure must be parked, so no
@@ -420,9 +422,13 @@ _run_cycles() {
   [ "$(printf '%s\n' "$output" | grep -c 'code_health:integration_mode_conflict' || true)" -eq 1 ]
   [[ "$output" == *"integration branch unavailable (rc=6) — parking self batch (issues: 1867)"* ]]
   [[ "$output" == *"integration conflict cooldown"* ]]
-  ! grep -q 'issues=1867' "$RUN_CMD_LOG"
+  if grep -q 'issues=1867' "$RUN_CMD_LOG"; then
+      false
+  fi
   if [ -f "$spend_log" ]; then
-    ! grep -q -- '--issues 1' "$spend_log"
+    if grep -q -- '--issues 1' "$spend_log"; then
+        false
+    fi
   fi
   grep -q '^requested_branch=autospec/autonomous-main$' "$TEST_TMP/.autospec/integration-conflict-cooldown"
   grep -q '^existing_branch=autospec/explore/2026-07-09-auto-vqt89j572511$' "$TEST_TMP/.autospec/integration-conflict-cooldown"

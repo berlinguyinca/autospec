@@ -31,7 +31,9 @@ LINT_BIN="$REPO_ROOT/scripts/lint-issue.sh"
   echo "$output" | grep -q "^## Files touched$"
   echo "$output" | grep -q "^## Local-LLM execution notes$"
   echo "$output" | grep -q "^## Dependencies$"
-  ! echo "$output" | grep -q "^## Evidence consumed$"
+  if echo "$output" | grep -q "^## Evidence consumed$"; then
+      false
+  fi
   echo "$output" | grep -q "^## Implementation scope"
   echo "$output" | grep -q "^## Out of scope"
   echo "$output" | grep -q "^## Implementation outline"

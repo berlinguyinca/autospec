@@ -46,7 +46,9 @@ GENERATOR="$ROOT/scripts/gen-harness-runtime-aliases.sh"
 
 @test "harness detection reads the canonical table without permission flags" {
   grep -F 'harness-runtime-aliases.tsv' "$ROOT/scripts/lib/autospec-harness-detect.sh"
-  ! grep -E -- '--yolo|--dangerously-skip-permissions' "$ROOT/scripts/lib/autospec-harness-detect.sh"
+  if grep -E -- '--yolo|--dangerously-skip-permissions' "$ROOT/scripts/lib/autospec-harness-detect.sh"; then
+      false
+  fi
   run bash -c 'source "$1"; autospec_harness_supported_ids' bash \
     "$ROOT/scripts/lib/autospec-harness-detect.sh"
   [ "$status" -eq 0 ]
