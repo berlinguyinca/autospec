@@ -37,7 +37,8 @@ fn read_fixture(name: &str) -> String {
 /// is byte-for-byte equal to the golden file.
 fn assert_renders_golden(yaml_name: &str, golden_name: &str) {
     let yaml = read_fixture(yaml_name);
-    let skeleton = issue_skeleton::parse(&yaml).unwrap_or_else(|error| panic!("{yaml_name}: {error}"));
+    let skeleton =
+        issue_skeleton::parse(&yaml).unwrap_or_else(|error| panic!("{yaml_name}: {error}"));
     let body = skeleton.render();
     let expected = read_fixture(golden_name);
     assert_eq!(

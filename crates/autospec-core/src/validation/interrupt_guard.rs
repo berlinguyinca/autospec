@@ -118,7 +118,7 @@ pub fn kill_all_live_groups() {}
 /// guarantee", which is also the historical behaviour there.
 #[cfg(unix)]
 pub fn install() -> bool {
-    use nix::sys::signal::{kill, sigaction, SaFlags, SigAction, SigHandler, Signal, SigSet};
+    use nix::sys::signal::{kill, sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
     use nix::unistd::getpid;
 
     extern "C" fn on_interrupt(signum: i32) {

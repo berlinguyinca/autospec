@@ -37,24 +37,26 @@ fn repo_root() -> std::path::PathBuf {
 /// The session-key hex the writer derives from `--session-id` (it hex-encodes
 /// the raw bytes with `od -An -tx1`).
 fn session_key_hex(session_id: &str) -> String {
-    session_id
-        .bytes()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    session_id.bytes().map(|b| format!("{b:02x}")).collect()
 }
 
 #[test]
 fn shell_heartbeat_writer_conforms_to_the_rust_private_directory_contract() {
     let root = temp_dir("hb-write-contract");
     let script = repo_root().join("skills/autospec-run/scripts/heartbeat-write.sh");
-    assert!(script.is_file(), "heartbeat-write.sh not found at {script:?}");
+    assert!(
+        script.is_file(),
+        "heartbeat-write.sh not found at {script:?}"
+    );
 
     // A reference directory created by this process is, by definition, owned by
     // the effective user. Comparing uids against it proves euid-ownership
     // without a libc dependency.
     let reference = root.join("reference");
     std::fs::create_dir(&reference).expect("create reference dir");
-    let reference_uid = std::fs::metadata(&reference).expect("reference metadata").uid();
+    let reference_uid = std::fs::metadata(&reference)
+        .expect("reference metadata")
+        .uid();
 
     let base = root.join("heartbeats");
     let session_id = "s1";
@@ -106,8 +108,7 @@ fn shell_heartbeat_writer_conforms_to_the_rust_private_directory_contract() {
     );
     let mode = meta.permissions().mode() & 0o7777;
     assert_eq!(
-        mode,
-        0o700,
+        mode, 0o700,
         "session-sidecar dir must be mode 0700 (the Rust retirement contract); \
          found {mode:o}"
     );
