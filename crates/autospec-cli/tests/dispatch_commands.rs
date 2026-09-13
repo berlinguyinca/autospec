@@ -247,9 +247,9 @@ fn stamp_writes_the_freshness_headers_and_beats_for_the_producer() {
 }
 
 #[test]
-fn stamp_creates_the_artifact_when_the_producer_had_nothing_to_list() {
+fn stamp_stamps_the_artifact_the_producer_wrote_even_when_it_was_empty() {
     let harness = Harness::new("autospec-dispatch-stamp-empty");
-
+    harness.write_queue(""); // the producer writes the artifact first (#4568)
     let output = harness.dispatch(&["stamp", "--at", &NOW.to_string(), "--by", "refresh-queue"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
 
@@ -660,10 +660,9 @@ fn default_paths_resolve_under_home_autospec() {
     assert!(!managed.exists(), "check must not create state");
 
     let stamp = run_home(&home, &["dispatch", "stamp", "--at", &NOW.to_string()]);
-    assert_eq!(stamp.status.code(), Some(0), "{}", stderr(&stamp));
-    assert!(queue_exists(&managed), "stamp must create {managed:?}");
-    assert!(managed.join("dispatch-liveness.json").exists());
-    assert_0600_or_owner_readable(&managed.join("queue.txt"));
+    assert_eq!(stamp.status.code(), Some(2), "{}", stderr(&stamp));
+    assert!(stderr(&stamp).contains("--queue"), "{}", stderr(&stamp));
+    assert!(!queue_exists(&managed), "a refused stamp creates nothing");
 }
 
 fn run_home(home: &Path, argv: &[&str]) -> Output {

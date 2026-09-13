@@ -26,11 +26,6 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     run_git(&["fetch", "origin"])?;
 
     let selection = plan.selection();
-    let held_path = plan
-        .opts
-        .held_file
-        .clone()
-        .unwrap_or_else(|| plan.llm_root.join("held.txt"));
     let base_sha = run_git_capture(&["rev-parse", "HEAD"])?;
 
     let mut counters = PassCounters {
@@ -93,7 +88,6 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
 
     let outcome = PassOutcome::Examined(counters);
     report_outcome(&outcome);
-    let _ = held_path; // the HELD ledger is written inside apply_one
 
     // The buffer after the run, not just the run itself (#4558 ask 3):
     // converted patches leave the waiting count (their PR is live) but

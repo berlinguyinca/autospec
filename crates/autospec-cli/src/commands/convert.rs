@@ -1058,8 +1058,14 @@ fn convert(args: &[String]) -> Result<(), CommandFailure> {
         return archive_issues(&plan);
     }
     if plan.opts.apply {
+        // The gate's tools are verified before any patch is judged (#4589):
+        // one named FATAL for a broken host, never one HELD record per patch.
+        if let Err(fatal) = gate::gate_tool_precondition() {
+            return Err(CommandFailure::status(fatal, 1));
+        }
         return apply::run_apply(&plan);
     }
+    gate::gate_tool_warning();
     render_plan(&plan)
 }
 
