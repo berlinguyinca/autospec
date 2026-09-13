@@ -87,6 +87,7 @@ use serde_json::{json, Value};
 
 use super::claim::{branch_liveness, local_branch_checked_out, BranchLiveness};
 use super::CommandFailure;
+mod language;
 
 /// The schema emitted by `autospec convert --json`.
 pub const CONVERT_PLAN_SCHEMA: &str = "autospec.convert-plan.v1";
@@ -270,10 +271,10 @@ fn resolve_llm_root(explicit: Option<&Path>) -> Option<PathBuf> {
 
 /// One agent patch on disk: its node, issue, path, and input key.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PatchLocation {
+pub(crate) struct PatchLocation {
     node: String,
-    issue: u64,
-    path: PathBuf,
+    pub(crate) issue: u64,
+    pub(crate) path: PathBuf,
     patch_key: String,
 }
 
@@ -799,7 +800,7 @@ fn gate_packages(files: &[String]) -> Vec<String> {
 /// The file paths a `changes.patch` touches, from its `+++ b/<path>` lines.
 /// Binary additions (`+++ /dev/null` is a deletion; `+++ b/<path>` is the
 /// new path) are read by their `b/` side.
-fn patch_files(patch: &str) -> Vec<String> {
+pub(crate) fn patch_files(patch: &str) -> Vec<String> {
     patch
         .lines()
         .filter_map(|line| {
@@ -867,10 +868,10 @@ fn buffer_from_candidates(candidates: &[PatchCandidate]) -> ConversionBuffer {
     }
 }
 
-struct ConvertPlan {
+pub(crate) struct ConvertPlan {
     opts: Options,
     llm_root: PathBuf,
-    examined: Vec<PatchLocation>,
+    pub(crate) examined: Vec<PatchLocation>,
     candidates: Vec<PatchCandidate>,
     outcome: PassOutcome,
 }
@@ -959,22 +960,16 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
             branch_exists,
             pull_request_exists,
             held_recorded,
+            language: language::candidate_language(patch),
         });
     }
-
-    let outcome = PassOutcome::Examined(PassCounters {
-        examined: candidates.len(),
-        converted: 0,
-        held: 0,
-        skipped: 0,
-    });
 
     Ok(ConvertPlan {
         opts,
         llm_root,
         examined,
+        outcome: language::plan_outcome(&candidates),
         candidates,
-        outcome,
     })
 }
 
@@ -1142,6 +1137,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
                 json!({ "issue": c.issue, "reason": reason.as_str() })
             })
             .collect();
+        let language_held = language::held_json(plan, &selection.language_held);
         let fresh: Vec<Value> = selection
             .fresh
             .iter()
@@ -1155,6 +1151,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             "examined": plan.candidates.len(),
             "fresh": fresh,
             "disqualified": disqualified,
+            "language_held": language_held,
             "buffer": json!({
                 "waiting": buffer.waiting,
                 "queue_entries_blocked": buffer.queue_entries_blocked,
@@ -1179,6 +1176,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             patch_key = c.patch_key
         );
     }
+    language::render_holds(plan, &selection.language_held);
     println!("{}", plan.outcome.line("convert", "autospec convert", "enumerate $LLM"));
     // The buffer, on every run — including an idle one: the line that
     // makes a silent successful run distinguishable from a broken one
@@ -1223,6 +1221,7 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     // buffer entirely — no patch on disk, so no queue entry held.
     let mut archived = 0;
 
+    language::archive_held(plan, &selection.language_held, &mut counters, &mut archived);
     for c in &selection.fresh {
         let patch = match plan.examined.iter().find(|p| p.issue == c.issue) {
             Some(p) => p,
@@ -2131,6 +2130,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             branch_exists: branch,
             pull_request_exists: pr,
             held_recorded: held,
+            language: autospec_core::patch_language::PatchLanguage::default(),
         }
     }
 
