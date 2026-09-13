@@ -242,12 +242,26 @@ mod tests {
 
     #[test]
     fn reservation_holds_loopback_until_the_launch_boundary() {
-        let mut registry = PortRegistry::default();
-        let mut reservation = reserve_loopback_port(&mut registry, "env-a", None, 5).unwrap();
-
-        assert!(!python_bind(reservation.port()));
-        let port = reservation.release_for_launch();
-        assert!(python_bind(port));
+        // The held-port assertion is deterministic while we hold the
+        // listener. The released-port assertion is a machine-global race
+        // (#4526): on a busy host a peer process can take the port between
+        // the release and our bind, and a port the peer holds is not a
+        // reservation defect. The test therefore retries the whole cycle
+        // with a fresh kernel-assigned port, tolerating a peer that snipes
+        // one.
+        for attempt in 0..10 {
+            let mut registry = PortRegistry::default();
+            let mut reservation = reserve_loopback_port(&mut registry, "env-a", None, 5).unwrap();
+            assert!(
+                !python_bind(reservation.port()),
+                "attempt {attempt}: the held port must not be bindable"
+            );
+            let port = reservation.release_for_launch();
+            if python_bind(port) {
+                return;
+            }
+        }
+        panic!("ten released ports in a row were sniped by peers");
     }
 
     fn python_bind(port: u16) -> bool {
