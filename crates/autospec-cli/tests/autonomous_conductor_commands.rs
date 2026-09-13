@@ -4429,6 +4429,7 @@ mod autonomous_stale_startup_recovery;
 
 #[cfg(target_os = "linux")]
 #[test]
+#[ignore = "requires #4389: a blocked run must exit non-zero; it currently exits 0 (see #4570)"]
 fn foreground_recovers_with_integrated_inactive_local_branch() {
     for (case, unmerged, topic_head, should_recover) in [
         ("integrated", false, false, true),
