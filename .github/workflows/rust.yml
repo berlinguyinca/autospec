@@ -137,6 +137,18 @@ jobs:
         # ran, and `Validate repository` / `Build` below had not executed in CI for as long.
         run: cargo test --workspace --no-fail-fast
 
+      - name: Test ambient-sensitive tests in isolation
+        # issue #4557: a test whose verdict depends on which other targets run
+        # beside it (fd pressure, lease acquisition under load) is invisible to
+        # the workspace run and only fails alone — or only in the crowd. Run each
+        # the way its verdict requires: one exact test, one target, no crowd.
+        # The descendant-headroom test is #[ignore]d in the workspace run and
+        # only runs here, where no other test thread touches descriptors.
+        run: |
+          cargo test -p autospec-cli --test autonomous_conductor_commands autonomous_stale_startup_recovery::foreground_scan_recovers_stale_pending_startup_heartbeat_pending_before_acquire -- --exact
+          cargo test -p autospec-cli --test autonomous_conductor_commands foreground_recovers_with_integrated_inactive_local_branch -- --exact
+          cargo test -p autospec-cli --bin autospec commands::autonomous::executor_bridge::tests::descendant_spawn::executor_supervision_descendant_capture_reserves_descriptor_headroom -- --exact --include-ignored
+
       - name: Catalog count parity
         # The catalog size is a literal in three test files across two crates.
         # Bumping some and not others breaks main and then falsely holds every

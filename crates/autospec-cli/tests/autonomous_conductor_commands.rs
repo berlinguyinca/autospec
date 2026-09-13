@@ -4431,82 +4431,63 @@ mod autonomous_stale_startup_recovery;
 #[test]
 #[ignore = "requires #4389: a blocked run must exit non-zero; it currently exits 0 (see #4570)"]
 fn foreground_recovers_with_integrated_inactive_local_branch() {
-    for (case, unmerged, topic_head, should_recover) in [
-        ("integrated", false, false, true),
-        ("unmerged", true, false, false),
-        ("topic-contains-branch", true, true, false),
-    ] {
-        let fixture = ForegroundFixture::new();
-        fixture.initialize_empty_local_remote();
-        git_fixture(
-            &fixture.repo_dir,
-            &["config", "user.name", "Autospec Branch Test"],
-        );
-        git_fixture(
-            &fixture.repo_dir,
-            &["config", "user.email", "autospec-branch-test@localhost"],
-        );
-        fs::write(fixture.repo_dir.join("README.md"), "baseline\n").expect("write baseline");
-        git_fixture(&fixture.repo_dir, &["add", "README.md"]);
-        git_fixture(&fixture.repo_dir, &["commit", "-m", "baseline"]);
-        git_fixture(&fixture.repo_dir, &["push", "-u", "origin", "main"]);
-        let branch = "feat/autonomous-issue-42";
-        git_fixture(&fixture.repo_dir, &["branch", branch]);
-        if unmerged {
-            git_fixture(&fixture.repo_dir, &["checkout", branch]);
-            fs::write(fixture.repo_dir.join("work.txt"), "unmerged\n")
-                .expect("write unmerged work");
-            git_fixture(&fixture.repo_dir, &["add", "work.txt"]);
-            git_fixture(&fixture.repo_dir, &["commit", "-m", "unmerged work"]);
-            if topic_head {
-                git_fixture(&fixture.repo_dir, &["checkout", "-b", "topic"]);
-            } else {
-                git_fixture(&fixture.repo_dir, &["checkout", "main"]);
-            }
-        }
-        let stale = RunStateRecord::new(
-            "test/repo",
-            42,
-            "stale-worker",
-            "claimed",
-            branch,
-            "",
-            "heartbeat-pending:none",
-            Vec::new(),
-            "2000-01-01T00:00:00Z",
-            "2000-01-01T00:00:00Z",
-            1,
-        )
-        .with_claim_id("stale-claim");
-        fixture.transition_claim_ref(&stale);
-        fixture.seed_expired_claim_heartbeat("stale-worker", branch, "stale-claim");
-        seed_foreground_state(&fixture, &selected_foreground_state());
-        fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
-        let heartbeat_path = fixture.heartbeats.join("o4_test_r4_repo/42.json");
-        let heartbeat_before = fs::read_to_string(&heartbeat_path).expect("stale heartbeat");
+    // The "unmerged" and "topic-contains-branch" cases once expected no recovery:
+    // #2864's `branch_blocks_stale_recovery` blocked stale startup recovery on a
+    // local branch not integrated into the resolved base. #4104 removed that gate
+    // (twenty-one abandoned attempts sat unretryable behind bare branches), so
+    // recovery now proceeds over an abandoned bare branch whether or not its work
+    // is merged. The two cases then failed deterministically in healthy
+    // environments and only "passed" in crowded runs where a load-induced lookup
+    // failure happened to block recovery — a verdict about the environment, not
+    // the claim protocol (#4557). Re-specify them against the post-#4104 contract
+    // before re-adding.
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_empty_local_remote();
+    git_fixture(
+        &fixture.repo_dir,
+        &["config", "user.name", "Autospec Branch Test"],
+    );
+    git_fixture(
+        &fixture.repo_dir,
+        &["config", "user.email", "autospec-branch-test@localhost"],
+    );
+    fs::write(fixture.repo_dir.join("README.md"), "baseline\n").expect("write baseline");
+    git_fixture(&fixture.repo_dir, &["add", "README.md"]);
+    git_fixture(&fixture.repo_dir, &["commit", "-m", "baseline"]);
+    git_fixture(&fixture.repo_dir, &["push", "-u", "origin", "main"]);
+    let branch = "feat/autonomous-issue-42";
+    git_fixture(&fixture.repo_dir, &["branch", branch]);
+    let stale = RunStateRecord::new(
+        "test/repo",
+        42,
+        "stale-worker",
+        "claimed",
+        branch,
+        "",
+        "heartbeat-pending:none",
+        Vec::new(),
+        "2000-01-01T00:00:00Z",
+        "2000-01-01T00:00:00Z",
+        1,
+    )
+    .with_claim_id("stale-claim");
+    fixture.transition_claim_ref(&stale);
+    fixture.seed_expired_claim_heartbeat("stale-worker", branch, "stale-claim");
+    seed_foreground_state(&fixture, &selected_foreground_state());
+    fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
 
-        let output = fixture.run_foreground();
+    let output = fixture.run_foreground();
 
-        assert_eq!(
-            output.status.success(),
-            should_recover,
-            "{case}: stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        if should_recover {
-            assert!(fixture
-                .claim_record()
-                .worker_id
-                .starts_with("rust-foreground-conductor-"));
-        } else {
-            assert_eq!(fixture.claim_record(), stale);
-            assert_eq!(
-                fs::read_to_string(&heartbeat_path).expect("preserved heartbeat"),
-                heartbeat_before
-            );
-        }
-    }
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fixture
+        .claim_record()
+        .worker_id
+        .starts_with("rust-foreground-conductor-"));
 }
 
 #[test]
