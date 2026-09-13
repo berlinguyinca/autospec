@@ -509,13 +509,11 @@ fn executor_supervision_descendant_capture_reserves_descriptor_headroom() {
     // were retained, so the fail-closed path itself had no descriptor left. Capture must stop
     // with the reserve still free instead of walking into EMFILE.
     let _environment = test_environment();
-    let mut leader = std::process::Command::new("/bin/sh")
-        .args([
-            "-c",
-            "for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do /bin/sleep 30 & done; wait",
-        ])
-        .spawn()
-        .expect("spawn descendant tree leader");
+    // The leader (and its 12 sleeps) must not outlive the test on a panic
+    // path: the old best-effort `wait` at the end of the body never ran when
+    // an assertion failed first, leaving the leader behind as a defunct
+    // child of the test binary (#4569).
+    let leader = DescendantLeader::spawn();
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut observed = 0usize;
     while Instant::now() < deadline {
@@ -555,5 +553,38 @@ fn executor_supervision_descendant_capture_reserves_descriptor_headroom() {
         .capture_descendants_while_leader_live()
         .expect("recapture the unconstrained tree");
     guard.terminate().expect("terminate the descendant tree");
-    let _ = leader.wait();
+}
+
+/// A descendant-tree leader that owns its own termination (#4569): dropping
+/// it — on a finished test, a failed assertion, or a panic — kills the
+/// leader and waits for it, so it never outlives the test as a defunct
+/// child of the test binary. The sleeps it forked are its children and
+/// self-limit to 30s; the leader is the one that would zombie.
+struct DescendantLeader {
+    child: std::process::Child,
+}
+
+impl DescendantLeader {
+    fn spawn() -> Self {
+        Self {
+            child: std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do /bin/sleep 30 & done; wait",
+                ])
+                .spawn()
+                .expect("spawn descendant tree leader"),
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+}
+
+impl Drop for DescendantLeader {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
