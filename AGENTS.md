@@ -9,6 +9,7 @@
 - **Lock-step rule** (per `CONTRIBUTING.md`): every multi-harness skill keeps `SKILL.md` / `opencode/agent.md` / `codex/prompt.md` bodies identical; only frontmatters differ.
 - **Validation and tests**: run the Rust test suite with `cargo test --workspace --no-fail-fast`. Without `--no-fail-fast` cargo stops at the first failing test binary, so one failure hides every later binary -- that masked six failures on `main`. Also run the shell validation scripts that check lock-step diffs, frontmatter parsing, `bash -n` on install scripts, and file presence. Each PR adds or extends a validation script that passes after the change.
 - **Build gate compiles all targets** (#3702): a gate whose green exit code is read as "this code compiles" must compile everything the patch touched, i.e. `cargo build --workspace --all-targets` (or an equivalent that compiles test targets, such as `cargo test --no-run`). Plain `cargo build` skips test targets, so its `rc=0` is about a different program than the one under review. A patch's own test file failing to compile is a hard failure, distinct from "tests ran and some failed" -- both surface as `test_rc=101`. Record the exact gate command with the result it produced.
+- **Implementation language is a repository fact, not a choice** (#4439/#4447): new logic is written in the repository's implementation language -- `berlinguyinca/autospec` and `InferWeave/*` are Rust, `metabolomics-us/*` is Go (the mapping lives in `autospec_core::implementation_language` and `AGENTS.d/4447-agents-must-write-go-or-rust.md`). Matching local style never overrides it: when the closest analogue is a shell script, write the logic in the named language and name the shell file as a porting candidate. Shell remains admissible only for process supervision and harness entry points (a cron line, the few lines that launch a compiled artifact). A PR that adds shell lines states why in its description; the per-file shell ratchet (#4442) enforces the ceiling and its message names the language the patch should have been in.
 
 ## Runtime resource isolation
 
@@ -326,6 +327,19 @@ declaration authorizes only that exact path; a directory authorizes descendants 
 when declared with a trailing `/`. `## Implementation outline` may also contribute
 safe paths embedded in prose when each path is individually wrapped in backticks;
 this does not relax the standalone-entry grammar for `## Files touched`.
+
+### Implementation language and surface (#4439)
+
+Every issue must name its implementation language -- exactly `Go` or `Rust`,
+resolved from the repository, never a per-issue judgement call -- and its
+**implementation surface**: the crate and module the change belongs in (e.g.
+`crates/autospec-core`, module `shell_ratchet`), or an explicit justification
+for why a script is the right surface. A task that says "add a check" is
+otherwise answered in whatever language the neighbouring file happens to be
+written in, which is how a zero-slack shell corpus grows one patch at a time.
+An issue that reaches an implementation agent without a named language is a
+defect: the agent comments the missing section, restores `auto-implement`,
+and stops -- it does not guess.
 
 ## Subagent vs inline decision matrix
 
