@@ -59,6 +59,19 @@ pub(super) fn held(issue: u64, reason: &str) {
     report_line(&format!("  HELD  #{issue}: {reason}"));
 }
 
+/// An issue starts: before the branch is pushed, so a run killed anywhere in
+/// the attempt shows which issues it reached and where each one stopped
+/// (#4499): a killed run must be diagnosable from its output, not from the
+/// remote state.
+pub(super) fn started(issue: u64) {
+    report_line(&format!("  START  #{issue}"));
+}
+
+/// An issue finishes, with its outcome, at the moment it did.
+pub(super) fn finished(issue: u64, outcome: &str) {
+    report_line(&format!("  DONE   #{issue}: {outcome}"));
+}
+
 /// The gate begins: the patch and the derived scope, before any stage runs.
 ///
 /// A verdict can take 11+ minutes; a log that is silent between "started"
@@ -79,8 +92,6 @@ pub(super) fn gate_stage(issue: u64, stage: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn the_line_formats_name_the_patch_and_their_payload() {
         // The formats are what operators and scripts tail: pin them.
@@ -92,5 +103,9 @@ mod tests {
         assert_eq!(gate, "  GATE  #201: -p autospec-core");
         let stage = format!("  GATE  #{issue}: {stage}", issue = 201, stage = "test");
         assert_eq!(stage, "  GATE  #201: test");
+        let started = format!("  START  #{issue}", issue = 2995);
+        assert_eq!(started, "  START  #2995");
+        let done = format!("  DONE   #{issue}: {outcome}", issue = 2995, outcome = "converted");
+        assert_eq!(done, "  DONE   #2995: converted");
     }
 }
