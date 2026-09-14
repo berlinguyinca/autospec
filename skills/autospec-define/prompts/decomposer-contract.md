@@ -30,7 +30,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > `auto-implement`; it may be filed for visibility but is not queued. The
 > ordinary profile skips this gate.
 >
-> Create labels (idempotent with `--force`): `auto-implement` (#0e8a16), `autospec:blocked-prerequisite` (#d4c5f9), `epic` (#b60205), `autospec:v2-flow` (#0e8a16, description: "Routes to absorbed-discipline Phase 4 implementer"), plus any domain labels the spec calls for. Then create exactly N issues — first an EPIC umbrella (no `auto-implement` label, just `epic` + domain), then N-1 children carrying `auto-implement` and `autospec:v2-flow` unless the portfolio gate marked them blocked. The `autospec:v2-flow` label routes the child to the Phase 4 implementer that absorbs turbo's expand → implement → finalize → peer-review → evaluate discipline; children filed without it fall back to the legacy implementer path. After creating children, edit the umbrella body with a checklist linking them. Return JSON: `{umbrella, children:[…], labels_created:[…]}`. Use `gh` CLI only. Do NOT modify code. Do NOT push branches. Do NOT create PRs.
+> Create labels (idempotent with `--force`): `auto-implement` (#0e8a16), `autospec:blocked-prerequisite` (#d4c5f9), `epic` (#b60205), `autospec:v2-flow` (#0e8a16, description: "Routes to absorbed-discipline Phase 4 implementer"), plus any domain labels the spec calls for. Then create exactly N issues — first an EPIC umbrella (no `auto-implement` label, just `epic` + domain), then N-1 children carrying `auto-implement` and `autospec:v2-flow` unless the portfolio gate marked them blocked. Children filed without `autospec:v2-flow` fall back to the legacy implementer path. After creating children, edit the umbrella body with a checklist linking them. Return JSON: `{umbrella, children:[…], labels_created:[…]}`. Use `gh` CLI only. Do NOT modify code. Do NOT push branches. Do NOT create PRs.
 >
 > Before drafting each candidate child issue, ask yourself three shell-structure questions (internal — do NOT write them into the issue body):
 >
@@ -38,12 +38,12 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > - **Consumes** — What existing files or outputs of earlier issues does this depend on? Each named dependency on an earlier issue translates to a `Depends on issue #N` line in the body.
 > - **Covers** — Which sections of the spec does this issue implement? If multiple unrelated sections, split. If no spec section, reconsider whether the issue belongs.
 >
-> If two adjacent candidate issues have heavy mutual Consumes/Produces overlap, they probably want to be merged. If one issue has more than ~5 named Produces, it probably wants to be split.
+> If two adjacent candidates have heavy mutual Consumes/Produces overlap they probably want to be merged; if one issue has more than ~5 named Produces it probably wants to be split.
 >
 > Each child body must be a **self-contained mini-spec** sized for execution by a 32B-class local LLM, with these sections in order:
 >
 > - **Goal** — 1 sentence outcome.
-> - **Implementation language** — exactly `Go` or `Rust`, resolved from the repository, never a per-issue judgement call (issue #4447). The mapping is settled and stated in `AGENTS.d/`: `metabolomics-us/*` -> Go; `InferWeave/*` and `berlinguyinca/autospec` -> Rust. Every child names it, because an agent that is not told the language defaults to shell and a gate that rejects without redirecting makes backlog, not code. If `{repo}` is not one of those namespaces, **refuse to file the child** — an issue that reaches an agent without a named language is a defect, not something the agent guesses at.
+> - **Implementation language** — exactly `Go` or `Rust`, resolved from the repository, never a per-issue judgement call (#4447). The mapping is settled in `AGENTS.d/`: `metabolomics-us/*` -> Go; `InferWeave/*` and `berlinguyinca/autospec` -> Rust. Every child names it, because an agent not told the language defaults to shell. If `{repo}` is not one of those namespaces, **refuse to file the child** — an issue that reaches an agent without a named language is a defect, not something the agent guesses at.
 > - **Implementation surface** — the crate and module the change belongs in (e.g. `crates/autospec-core`, module `shell_ratchet`), or an explicit justification for why a script is the right surface (issue #4439). A task that says "add a check" is answered in whatever language the neighbouring file is written in; the surface names the answer. The skeleton generator renders it from its `implementation_surface` input field as the `## Implementation surface` section.
 > - **Source spec** — `<spec-path>` + `<spec-github-url>` of the design doc this issue derives from.
 > - **Team personality** — copy the spec's selected team name, roles, and issue-relevant emphasis. If the selected spec lacks this section, infer it from the request, past specs, repository labels, and memory; if confidence is low, stop and ask the operator to choose from the five starter combinations in Phase 2 before filing issues.
@@ -70,11 +70,11 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 >
 > - **Body ≤400 words** including all sections.
 > - **Implementation outline ≤30 lines** (file paths + function signatures).
-> - **Files touched ≤3** per child issue, counted as distinct **logical units** — not raw paths. A multi-harness skill **trio** (`skills/<x>/SKILL.md` + `codex/prompt.md` + `opencode/agent.md`) plus its derived `tests/fixtures/skill-goldens/<x>.*.sha256` is **ONE** logical unit: with `derive-trio.sh` shipped, the edit is "edit `SKILL.md` → derive the mirrors with `derive-trio.sh --in-place skills/<x>` → regenerate goldens with `gen-skill-goldens.sh <x>`" in a **single commit**, so the cap must not split a trio's prose from its golden regen into separate issues. `lint-issue.sh` and `sizing-check.sh` collapse trio members to one unit and exclude the derived goldens — keep a trio edit (and its goldens) inside one child.
+> - **Files touched ≤3** per child issue, counted as distinct **logical units** — not raw paths. A skill trio plus its derived goldens is **ONE** logical unit (see Files touched): edit `SKILL.md` → derive the mirrors (`derive-trio.sh --in-place skills/<x>`) → regenerate the goldens (`gen-skill-goldens.sh <x>`) in a **single commit**, so the cap must not split a trio's prose from its golden regen; keep a trio edit (and its goldens) inside one child.
 > - If a candidate child would exceed any cap, split into a parent + child pair with a `Depends on` edge.
 > - The whole spec + a single child issue body must fit comfortably in a 60–120k context window.
 >
-> Self-check each issue against the caps **before** calling `gh issue create`. If a cap is violated and a split is not feasible, surface the issue inline (print the over-cap body to the operator) instead of filing it.
+> Self-check each issue against the caps **before** calling `gh issue create`; if a cap is violated and a split is not feasible, print the over-cap body to the operator instead of filing it.
 >
 > **Pre-filing lint loop (adaptive, MAX_LINT_RETRIES=5):** For each candidate child body, before calling `gh issue create`, write the body to `/tmp/draft-<slug>.md` and run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/draft-<slug>.md`. If the exit code is non-zero, map each `RULE_ID: <desc>` finding to an actionable directive using the table below, append all directives to the next generation prompt as cumulative context, and regenerate. Repeat up to `MAX_LINT_RETRIES=5` attempts. If attempt 5 still fails, print all 5 drafts plus accumulated findings inline and **skip** that child (do not file); continue to the next child. On pass (exit 0), proceed to the safety loop and only call `gh issue create` after safety passes.
 >
@@ -158,6 +158,10 @@ parts:
 - **The unavailable-fast-path statement** — fall back to the unbatched path;
   never "failed batch = empty result".
 
+### Reaper-task decomposition (health signals that remove things)
+
+A reaper's first use is a deletion; an unproven signal's error is discovered by that deletion (#4555). Its spec names, before the child is queueable: **source of truth** (the authoritative check, if any); **both directions as tests** (each signal's verdict on a known-healthy and a known-dead input); **act or report** (the first release reports and removes nothing); **`unknown`** (a degraded or unmeasurable reading is `unknown`, never `bad`, and never authorises removal). A reaper child that does not answer these is filed `autospec:blocked-prerequisite`, not `auto-implement`.
+
 ### Small-LLM friendliness (applies to every child issue)
 
 Children are written assuming the implementer is a 32B-class local model with **pre-staged context**, not a search-driven cloud agent:
@@ -167,7 +171,7 @@ Children are written assuming the implementer is a 32B-class local model with **
 - Acceptance criteria are checkbox-only so the model can self-verify line-by-line.
 - One **Primary smoke test** runs in the inner loop; the heavier verification list runs once at the end.
 - If the work fans out across many tables/packages, split it. Two 3 KB children chained by `Depends on` beat one 7 KB child a 32B model garbles at 60k tokens of working context.
-- If the child adds a Bats suite under `tests/unit/` or `tests/lint/`, the spec must name its registration in **Files touched**: either the typed catalog owner in `crates/autospec-core/src/validation/catalog.rs` (preferred) or `BATS_REGISTRATION_BASELINE` in `crates/autospec-core/src/validation/external/bats_registration_baseline.rs` (shrink-only; orphaned suites). Registration goes in the **same commit** as the suite, or conversion fails on the unregistered suite (see AGENTS.md → *Bats suite registration*). Suites at the root of `tests/` need no registration.
+- If the child adds a Bats suite under `tests/unit/` or `tests/lint/`, the spec must name its registration in **Files touched**: the typed catalog owner in `crates/autospec-core/src/validation/catalog.rs`, or `BATS_REGISTRATION_BASELINE` in `crates/autospec-core/src/validation/external/bats_registration_baseline.rs`. Registration goes in the **same commit** as the suite, or conversion fails. Suites at the root of `tests/` need no registration.
 
 Capture the umbrella + child issue numbers.
 
