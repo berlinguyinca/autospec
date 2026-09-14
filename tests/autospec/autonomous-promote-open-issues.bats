@@ -123,14 +123,17 @@ teardown() { rm -rf "$TMP"; }
 @test "Rust safety block reports quarantine without shell writeback" {
   mk_safety "SAFETY_BLOCK"; mk_elig "eligible"
   run bash "$SCRIPT" --repo o/r --apply
+  # `run` overwrites $output, so keep the script's JSON before the
+  # grep assertions below replace it with their own (empty) output.
+  json="$output"
   [ "$status" -eq 0 ]
   run grep -q 'add-label auto-implement' "$GH_LOG"
   [ "$status" -eq 1 ]
   grep -q 'autospec issue promote --repo o/r --number 42' "$GH_LOG"
   run grep -q 'add-label security:quarantined' "$GH_LOG"
   [ "$status" -eq 1 ]
-  printf '%s' "$output" | jq -e '.quarantined[] | select(.issue==42 and .reason=="rust-safety-block")' >/dev/null
-  printf '%s' "$output" | jq -e '.promoted | length == 0' >/dev/null
+  printf '%s' "$json" | jq -e '.quarantined[] | select(.issue==42 and .reason=="rust-safety-block")' >/dev/null
+  printf '%s' "$json" | jq -e '.promoted | length == 0' >/dev/null
 }
 
 @test "needs-template + seed state → canary: groom:proposed, no auto-implement" {
@@ -140,6 +143,9 @@ teardown() { rm -rf "$TMP"; }
   mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
+  # `run` overwrites $output, so keep the script's JSON before the
+  # grep assertions below replace it with their own (empty) output.
+  json="$output"
   [ "$status" -eq 0 ]
   grep -q 'add-label groom:proposed' "$GH_LOG"
   run grep -q 'remove-label needs-autospec-template' "$GH_LOG"
@@ -149,33 +155,39 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 1 ]
   run grep -q 'add-label auto-implement' "$GH_LOG"
   [ "$status" -eq 1 ]
-  printf '%s' "$output" | jq -e '.routed[] | select(.action=="groom-canary")' >/dev/null
+  printf '%s' "$json" | jq -e '.routed[] | select(.action=="groom-canary")' >/dev/null
 }
 
 @test "needs-template + template-promote active still remains a human proposal" {
   mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote","template-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
+  # `run` overwrites $output, so keep the script's JSON before the
+  # grep assertions below replace it with their own (empty) output.
+  json="$output"
   [ "$status" -eq 0 ]
   run grep -q 'add-label auto-implement' "$GH_LOG"
   [ "$status" -eq 1 ]
   run grep -q 'remove-label needs-autospec-template' "$GH_LOG"
   [ "$status" -eq 1 ]
   grep -q 'add-label groom:proposed' "$GH_LOG"
-  printf '%s' "$output" | jq -e '.routed[] | select(.action=="groom-canary")' >/dev/null
+  printf '%s' "$json" | jq -e '.routed[] | select(.action=="groom-canary")' >/dev/null
 }
 
 @test "needs-template + fill fails → hold:needs-human (no promote)" {
   mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill fail
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote","template-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
+  # `run` overwrites $output, so keep the script's JSON before the
+  # grep assertions below replace it with their own (empty) output.
+  json="$output"
   [ "$status" -eq 0 ]
   grep -q 'add-label hold:needs-human' "$GH_LOG"
   run grep -q 'add-label auto-implement' "$GH_LOG"
   [ "$status" -eq 1 ]
   run grep -q 'add-label groom:proposed' "$GH_LOG"
   [ "$status" -eq 1 ]
-  printf '%s' "$output" | jq -e '.held[] | select(.reason | test("fill-"))' >/dev/null
+  printf '%s' "$json" | jq -e '.held[] | select(.reason | test("fill-"))' >/dev/null
 }
 
 @test "needs-template + fill ok:true with no body → hold:needs-human (no promote)" {
@@ -185,13 +197,16 @@ teardown() { rm -rf "$TMP"; }
   mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok-no-body
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote","template-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
+  # `run` overwrites $output, so keep the script's JSON before the
+  # grep assertions below replace it with their own (empty) output.
+  json="$output"
   [ "$status" -eq 0 ]
   grep -q 'add-label hold:needs-human' "$GH_LOG"
   run grep -q 'add-label auto-implement' "$GH_LOG"
   [ "$status" -eq 1 ]
   run grep -q 'add-label groom:proposed' "$GH_LOG"
   [ "$status" -eq 1 ]
-  printf '%s' "$output" | jq -e '.held[] | select(.reason | test("fill-empty-body"))' >/dev/null
+  printf '%s' "$json" | jq -e '.held[] | select(.reason | test("fill-empty-body"))' >/dev/null
 }
 
 @test "already groom:proposed candidate is skipped (no re-fill)" {
@@ -199,12 +214,15 @@ teardown() { rm -rf "$TMP"; }
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote"]}'
   mk_view_labels '{"name":"needs-autospec-template"},{"name":"groom:proposed"}'
   run bash "$SCRIPT" --repo o/r --apply
+  # `run` overwrites $output, so keep the script's JSON before the
+  # grep assertions below replace it with their own (empty) output.
+  json="$output"
   [ "$status" -eq 0 ]
   run grep -q 'add-label groom:proposed' "$GH_LOG"   # not re-proposed
   [ "$status" -eq 1 ]
   run grep -q 'add-label auto-implement' "$GH_LOG"
   [ "$status" -eq 1 ]
-  printf '%s' "$output" | jq -e '.skipped[] | select(.reason=="already-groomed")' >/dev/null
+  printf '%s' "$json" | jq -e '.skipped[] | select(.reason=="already-groomed")' >/dev/null
 }
 
 @test "policy off mutates nothing" {
@@ -234,12 +252,15 @@ teardown() { rm -rf "$TMP"; }
 @test "non-passing Rust safety review holds an eligible issue without shell writeback" {
   mk_safety "SAFETY_AMBIGUOUS"; mk_elig "eligible"
   run bash "$SCRIPT" --repo o/r --apply
+  # `run` overwrites $output, so keep the script's JSON before the
+  # grep assertions below replace it with their own (empty) output.
+  json="$output"
   [ "$status" -eq 0 ]
   run grep -q 'add-label auto-implement' "$GH_LOG"
   [ "$status" -eq 1 ]
   run grep -q 'add-label security:quarantined' "$GH_LOG"
   [ "$status" -eq 1 ]
-  printf '%s' "$output" | jq -e '.held[] | select(.issue==42 and .reason=="rust-safety-review")' >/dev/null
+  printf '%s' "$json" | jq -e '.held[] | select(.issue==42 and .reason=="rust-safety-review")' >/dev/null
 }
 
 @test "removed body-write seam cannot interrupt multiple Rust safety decisions" {
@@ -270,13 +291,16 @@ teardown() { rm -rf "$TMP"; }
   mk_safety "SAFETY_BLOCK"; mk_elig "needs-template"; mk_fill ok
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote","template-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
+  # `run` overwrites $output, so keep the script's JSON before the
+  # grep assertions below replace it with their own (empty) output.
+  json="$output"
   [ "$status" -eq 0 ]
   run grep -q 'add-label auto-implement' "$GH_LOG"
   [ "$status" -eq 1 ]
   grep -q 'add-label groom:proposed' "$GH_LOG"
   run grep -q 'autospec issue promote' "$GH_LOG"
   [ "$status" -eq 1 ]
-  printf '%s' "$output" | jq -e '.routed[] | select(.issue==42 and .action=="groom-canary")' >/dev/null
+  printf '%s' "$json" | jq -e '.routed[] | select(.issue==42 and .action=="groom-canary")' >/dev/null
 }
 
 @test "apply performs no broad legacy safety preflight" {
