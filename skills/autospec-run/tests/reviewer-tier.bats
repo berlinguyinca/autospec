@@ -28,8 +28,7 @@ AUTOSPEC_TRIO=(
       || { echo "missing 'TIER_B for ALL issues' in $f"; return 1; }
     # The old per-label split ("TIER_A for regression/priority:high") must be gone
     # from the reviewer Model tier directive.
-    ! grep -q '`TIER_A` for `regression`/`priority:high` issues' "$f" \
-      || { echo "stale per-label TIER_A reviewer split still present in $f"; return 1; }
+    if grep -q '`TIER_A` for `regression`/`priority:high` issues' "$f"; then { echo "stale per-label TIER_A reviewer split still present in $f"; return 1; }; fi
   done
 }
 
@@ -49,8 +48,7 @@ AUTOSPEC_TRIO=(
 
 @test "run trio: second Tier-A regression meta-review dispatch removed" {
   for f in "${RUN_TRIO[@]}"; do
-    ! grep -q 'dispatch a second `TIER_A` subagent' "$f" \
-      || { echo "second TIER_A meta-review dispatch still present in $f"; return 1; }
+    if grep -q 'dispatch a second `TIER_A` subagent' "$f"; then { echo "second TIER_A meta-review dispatch still present in $f"; return 1; }; fi
   done
 }
 
@@ -67,7 +65,6 @@ AUTOSPEC_TRIO=(
 
 @test "autospec umbrella trio: second Tier-A regression meta-review dispatch removed" {
   for f in "${AUTOSPEC_TRIO[@]}"; do
-    ! grep -q 'dispatch a second `TIER_A` subagent' "$f" \
-      || { echo "second TIER_A meta-review dispatch still present in $f"; return 1; }
+    if grep -q 'dispatch a second `TIER_A` subagent' "$f"; then { echo "second TIER_A meta-review dispatch still present in $f"; return 1; }; fi
   done
 }

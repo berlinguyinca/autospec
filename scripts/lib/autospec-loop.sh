@@ -3328,15 +3328,15 @@ EOF_PROV_BATCH
 
         # ── Step 6: Spend-ledger tally (autonomous-spend-ledger.sh) ──────────
         if [ -f "$_spend" ]; then
-            if [ "$_dry" != "1" ]; then
+            # Zero-add on dry cycles is refused: it still rewrites the ledger (lock + atomic write), and the dry contract is no drain AND no spend increment (test_conductor_wiring.bats).
+            if [ "$_dry" != "1" ] && { [ "$_filed_issues" -gt 0 ] || [ "$_work_done" -gt 0 ]; }; then
                 bash "$_spend" add \
                     --tokens 0 \
                     --filed-issues "$_filed_issues" \
                     --budget-issues "$_work_done" \
                     2>/dev/null || true
             fi
-            local _spend_check
-            _spend_check="$(bash "$_spend" check 2>/dev/null || echo "continue")"
+            local _spend_check="$(bash "$_spend" check 2>/dev/null || echo "continue")"
             case "$_spend_check" in
                 park*)
                     printf '[conductor] spend-ledger: %s — arming resume and exiting\n' \

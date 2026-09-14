@@ -16,9 +16,13 @@ setup() {
     if ! command -v gh >/dev/null 2>&1; then
         skip "gh CLI not installed"
     fi
-    if [ ! -x "$AUTOSPEC" ]; then
-        cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
-    fi
+    # Build unconditionally. Gating on `[ ! -x "$AUTOSPEC" ]` asks whether the
+    # binary EXISTS, when the question is whether it matches the source -- the
+    # two coincide only on a clean checkout. This suite was found running an
+    # executable six hours older than the tree it was meant to be testing.
+    # `cargo build` is incremental, so this costs nothing when nothing changed
+    # and is the only correct thing when something did.
+    cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
     if ! gh auth status >/dev/null 2>&1; then
         skip "gh not authenticated (set GH_TOKEN or run gh auth login)"
     fi

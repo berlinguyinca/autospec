@@ -230,6 +230,38 @@ never ran". The pass then reports the patch as unverifiable rather than failed. 
 full queue is not a defect in anybody's change, and recording it as one writes a
 durable false claim.
 
+## The gate's build cache, and its bound
+
+**`AUTOSPEC_CONVERT_TARGET_DIR` shares one build cache across every
+patch's gate.** A fresh worktree per patch isolates *source*; isolating
+*artifacts* is pure waste, because an artifact is a pure function of its
+inputs and cargo already keys them that way. Measured on the fleet: a
+per-patch `target/` rebuilt the whole dependency tree from `unicode_ident`
+for every patch — 4.4 GB per patch, ~176 GB and 10–16 hours for one batch
+of 40 (#4567). By default the pass points every gate at
+`~/.cache/autospec-convert-target`; set the variable to move it — which is
+required when `AUTOSPEC_GATE_WRAPPER` sends the work to another host, where
+this machine's `~/.cache` is not the filesystem being built on.
+
+The pass announces the cache once, warm or cold (`gate: build cache at …
+(warm)`), and every stage reports its own elapsed time
+(`gate: test finished in 1m22s`). The gate is the fleet's rate limiter
+(#4558), so per-patch gate cost is a first-class number in the log, not a
+fact discoverable only by timing it.
+
+**`AUTOSPEC_GATE_TIMEOUT_SECS` bounds one stage** (default 1800; `0`
+removes the bound). A gate that cannot time out cannot be scheduled
+unattended: one pathological patch stalls the whole pass indefinitely, and
+the stall is indistinguishable from a hang until a process tree is
+investigated. A stage that hits the bound is killed and reported with exit
+`124` — the code `timeout` itself uses, sitting next to the `125` the
+wrapper reserves for "never placed". A timed-out stage is **unmeasured, not
+defective**: the kill is the pass's own bound firing, not a verdict about
+the change, so the patch is not held for it. The HELD-free re-offer is the
+same third outcome as a broken base, and the recorded detail names the
+bound and the escape hatch (raise the variable if the suite genuinely
+needs the time).
+
 ## Whose failure is it
 
 Each stage's failure is attributed before it is recorded (#4596). When a stage
@@ -255,3 +287,33 @@ All four stages are attributed, not only `test`. The test stage got a baseline
 first because one incident demanded it; the same reasoning always applied to the
 others, and the stage that actually broke the pipeline in production was `fmt`,
 which had none.
+
+## The push-before-PR window, and the attempt axis (#4499)
+
+The pass pushes a branch and only then opens the PR. An interruption in that
+window — a timeout, a killed session, a rate limit — leaves a branch with no
+PR, and a liveness check that reads the branch alone as "attempted" retires
+the issue forever: the evidence of the attempt is created *before* the thing
+that attempts, so the partial state is indistinguishable from the complete
+state by the check that runs on the branch alone.
+
+The invariant: **a step that marks work as done must not complete before the
+work does.** The liveness check therefore requires the marker that only the
+final step produces — a branch *with* an open or merged PR — and the
+candidate's state is an `Attempt`, not a boolean:
+
+| observed state | attempt | the pass |
+|---|---|---|
+| no branch | `fresh` | offers it |
+| branch, no live PR (or the pass's own worktree, no live PR) | `interrupted` | offers it again, reports it as a distinct category, and its `--apply` redo overwrites the orphan branch with `--force-with-lease` |
+| branch with an open or merged PR | `live` | disqualifies it |
+| the liveness lookup failed | `unknown` | disqualifies it (fail-closed: offering risks a duplicate PR) |
+
+A `--force-with-lease` push is the overwrite with the safety: it refuses if
+the remote branch moved since the pass's fetch — for instance a PR opened on
+it in the window, which is exactly the state that disqualifies a redo.
+
+`--apply` prints `START  #N` when an issue begins and `DONE   #N: <outcome>`
+when it ends, at the moment it ends. A START without a DONE is where the run
+stopped: an interrupted run is diagnosable from its output, not from hunting
+for orphan branches on the remote.

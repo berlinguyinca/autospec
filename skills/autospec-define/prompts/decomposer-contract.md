@@ -144,6 +144,20 @@ mandatory sections were added. The word cap continues to apply to the rest of th
 body unchanged. Split a large screen into a parent + per-component children with
 `Depends on` edges rather than one giant issue.
 
+### Performance-task decomposition (speed changes to existing behaviour)
+
+A performance change's success criterion is observable (faster) and its failure
+criterion is not (it decides differently). The spec pins the verdict in three
+parts:
+
+- **Existing behaviour as an ordered contract** — the predicate's branches in
+  order, including short-circuits; if it cannot be written down, the issue is
+  not ready.
+- **Verdict tests, separate from any timing claim** — the new path decides
+  what the old one did, per contract branch.
+- **The unavailable-fast-path statement** — fall back to the unbatched path;
+  never "failed batch = empty result".
+
 ### Small-LLM friendliness (applies to every child issue)
 
 Children are written assuming the implementer is a 32B-class local model with **pre-staged context**, not a search-driven cloud agent:

@@ -74,10 +74,10 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 
 use autospec_core::conversion_gate::{test_count_contradiction, tests_added_by_patch};
-use autospec_core::conversion_pass::{select_fresh, PassOutcome, PatchCandidate};
+use autospec_core::conversion_pass::{select_fresh, Attempt, PassOutcome, PatchCandidate};
 use autospec_core::failure_attribution::attribute;
 use autospec_core::hold_memo::{re_gate, HoldRecord};
 use autospec_core::prefilter_scope::derive_prefilter_scope;
@@ -85,13 +85,14 @@ use autospec_core::unfed_pass::PassCounters;
 use autospec_core::verification::parse_test_run;
 use serde_json::{json, Value};
 
-use super::claim::{branch_liveness, local_branch_checked_out, BranchLiveness};
+use super::claim::{attempt_liveness, local_branch_checked_out, AttemptLiveness};
 use super::CommandFailure;
 mod git;
 mod language;
 mod progress;
+mod sizing;
 
-use git::{run_capture_in, run_git, run_git_capture, run_git_in, teardown_worktree};
+use git::{run_capture_in, run_git_capture, run_git_in, teardown_worktree};
 
 /// The schema emitted by `autospec convert --json`.
 pub const CONVERT_PLAN_SCHEMA: &str = "autospec.convert-plan.v1";
@@ -103,8 +104,8 @@ const USAGE: &str = "\
 USAGE:
     autospec convert [--llm-root DIR] [--repo OWNER/NAME] [--base BRANCH]
                      [--held-file PATH] [--branch-prefix PREFIX]
-                     [--free-slots N] [--apply] [--archive] [--json]
-                     [--convert-ledger PATH] [ISSUE ...]
+                     [--free-slots N] [--deadline SECS] [--apply] [--archive]
+                     [--json] [--convert-ledger PATH] [ISSUE ...]
 
 PLAN (default): enumerate $LLM/*/out/issue-*/changes.patch, select the patches
 not already attempted (a live branch/PR, or a recorded HELD entry whose
@@ -182,6 +183,12 @@ struct Options {
     held_file: Option<PathBuf>,
     branch_prefix: String,
     free_slots: Option<usize>,
+    /// The pass's own deadline in seconds (#4607): the pass sizes its batch
+    /// to it — it stops *starting* new patches when the remaining time is
+    /// less than what a patch has been observed to cost in this pass, and
+    /// finishes the one in flight. `None` (no deadline given) keeps the old
+    /// behavior: work through the whole batch.
+    deadline: Option<u64>,
     apply: bool,
     archive: bool,
     as_json: bool,
@@ -197,6 +204,7 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
         held_file: None,
         branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
         free_slots: None,
+        deadline: None,
         apply: false,
         archive: false,
         as_json: false,
@@ -228,6 +236,16 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
                     })?,
                 );
             }
+            "--deadline" => {
+                let raw = value(args, &mut i, &arg)?;
+                opts.deadline = Some(
+                    raw.parse::<u64>().map_err(|_| {
+                        CommandFailure::diagnostic(format!(
+                            "--deadline must be a non-negative integer number of seconds, got {raw:?}\n{USAGE}"
+                        ))
+                    })?,
+                );
+            }
             "--apply" => opts.apply = true,
             "--archive" => opts.archive = true,
             "--json" => opts.as_json = true,
@@ -254,6 +272,17 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
             }
         }
         i += 1;
+    }
+    // The deadline can also come from the environment: the scheduler that
+    // runs a scheduled pass is the one that knows the deadline, and the env
+    // is how it hands the pass its own time box without the pass inventing
+    // one (#4607). The flag, when given, is explicit and wins.
+    if opts.deadline.is_none() {
+        if let Ok(raw) = std::env::var("AUTOSPEC_CONVERT_DEADLINE") {
+            if let Ok(secs) = raw.trim().parse::<u64>() {
+                opts.deadline = Some(secs);
+            }
+        }
     }
     Ok(opts)
 }
@@ -631,32 +660,39 @@ fn base_changed_files(base_sha: &str, base_ref: &str) -> Option<Vec<String>> {
     )
 }
 
-/// The two attempt-flags a patch carries, decided from the branch's liveness.
+/// The attempt state a patch carries, decided from the branch's liveness.
 ///
-/// `branch_liveness` is the single definition of a live conversion attempt
+/// `attempt_liveness` is the single definition of a live conversion attempt
 /// (a checked-out worktree, or an open/merged pull request); a live attempt
-/// disqualifies the patch. A dead branch (missing, or abandoned — closed
-/// unmerged with no worktree) does not: redoing it overwrites the stale
-/// branch, so the pass re-offers it. `Unknown` fails closed (disqualify):
-/// offering a patch whose attempt state cannot be verified risks a duplicate.
-fn attempt_flags(
+/// disqualifies the patch. A missing branch is `Fresh` (never attempted). A
+/// branch with no open or merged PR is `Interrupted` — re-offered and
+/// reported, never silently retired: the pass pushes the branch before the
+/// PR, so an interruption in that window is exactly this state (#4499).
+/// `Unknown` stays `Unknown`: the selection folds it fail-closed.
+fn attempt_state(
     repo: Option<&str>,
     branch: &str,
     prefetched: Option<&AttemptIndex>,
-) -> (bool, bool) {
+) -> Attempt {
     let Some(repo) = repo else {
         // No repo to ask: the liveness is not checked (a plan-only gap the
         // caller reports), so the patch is not disqualified on this axis.
-        return (false, false);
+        return Attempt::Fresh;
     };
     let liveness = match prefetched {
         Some(index) => index.liveness(branch),
-        None => branch_liveness(repo, branch),
+        None => attempt_liveness(repo, branch),
     };
     match liveness {
-        BranchLiveness::Live => (false, true),
-        BranchLiveness::Dead => (false, false),
-        BranchLiveness::Unknown => (false, true),
+        Ok(AttemptLiveness::OpenPr | AttemptLiveness::MergedPr) => Attempt::Live,
+        Ok(AttemptLiveness::NoBranch) => Attempt::Fresh,
+        // No PR query in this path: a checked-out branch could carry a PR we
+        // cannot see, and branch+PR is the disqualifying fact. Fail closed.
+        Ok(AttemptLiveness::Worktree) => Attempt::Unknown,
+        // A branch on the remote with no live PR: the interrupted pass,
+        // re-offered, and its redo reclaims the branch (#4499).
+        Ok(AttemptLiveness::Abandoned) => Attempt::Interrupted,
+        Err(_) => Attempt::Unknown,
     }
 }
 
@@ -690,26 +726,35 @@ struct AttemptIndex {
 }
 
 impl AttemptIndex {
-    /// The verdict for one branch, in `attempt_liveness`'s order.
-    fn liveness(&self, branch: &str) -> BranchLiveness {
+    /// The verdict for one branch, in `attempt_liveness`'s order. An
+    /// `Err` is the one case this index cannot resolve: a local worktree
+    /// lookup failure, and the caller's fail-closed arm applies.
+    fn liveness(&self, branch: &str) -> Result<AttemptLiveness, CommandFailure> {
         if branch.trim().is_empty() {
-            return BranchLiveness::Dead;
+            return Ok(AttemptLiveness::NoBranch);
         }
-        // Step 1, kept per-branch and local. A lookup failure here is the one
-        // case this index cannot resolve, so it reports `Unknown` and the
-        // caller's fail-closed arm applies.
+        // Step 1, kept per-branch and local. The disqualifying fact is
+        // branch+PR (#4499), so a checked-out branch with a live PR is live
+        // even though someone has it out; a checkout with no PR is the
+        // pass's own orphan (see `attempt_state`).
         match local_branch_checked_out(&format!("refs/heads/{branch}")) {
-            Ok(true) => return BranchLiveness::Live,
+            Ok(true) => {
+                return if self.live_pr_branches.contains(branch) {
+                    Ok(AttemptLiveness::OpenPr)
+                } else {
+                    Ok(AttemptLiveness::Abandoned)
+                }
+            }
             Ok(false) => {}
-            Err(_) => return BranchLiveness::Unknown,
+            Err(error) => return Err(error),
         }
         if !self.remote_branches.contains(branch) {
-            return BranchLiveness::Dead;
+            return Ok(AttemptLiveness::NoBranch);
         }
         if self.live_pr_branches.contains(branch) {
-            return BranchLiveness::Live;
+            return Ok(AttemptLiveness::OpenPr);
         }
-        BranchLiveness::Dead
+        Ok(AttemptLiveness::Abandoned)
     }
 }
 
@@ -790,20 +835,12 @@ fn json_string_field(chunk: &str, field: &str) -> Option<String> {
 }
 
 /// The gate scope tokens for the files a patch touches, from the shared
-/// definition ([`autospec_core::prefilter_scope::derive_prefilter_scope`])
-/// — never hard-coded here (issue #4532): the crates the patch touches are
-/// gated (`-p <crate>` per crate), and a patch that touches no resolvable
-/// crate — or any unattributable path, like a root `Cargo.toml` (#4554) —
-/// gates `--workspace`. Fail-closed: being slow is recoverable; narrow is
-/// not. The pre-filter and gate share the derivation, so the scopes
-/// cannot drift.
+/// derivation (issue #4532) — never hard-coded here.
 fn gate_packages(files: &[String]) -> Vec<String> {
     derive_prefilter_scope(files).tokens()
 }
 
-/// The file paths a `changes.patch` touches, from its `+++ b/<path>` lines.
-/// Binary additions (`+++ /dev/null` is a deletion; `+++ b/<path>` is the
-/// new path) are read by their `b/` side.
+/// The `b/`-side paths a `changes.patch` touches (`+++ b/<path>` lines).
 pub(crate) fn patch_files(patch: &str) -> Vec<String> {
     patch
         .lines()
@@ -863,11 +900,15 @@ impl ConversionBuffer {
 }
 
 /// The buffer a set of candidates describes: waiting is the patches with
-/// no live PR (fresh, branch-held, held-held), blocked is every patch on
-/// disk — the dispatch guard's condition is presence, not PR liveness.
+/// no live attempt (fresh, interrupted, held — a bare branch does not own
+/// the queue entry), blocked is every patch on disk — the dispatch
+/// guard's condition is presence, not attempt liveness.
 fn buffer_from_candidates(candidates: &[PatchCandidate]) -> ConversionBuffer {
     ConversionBuffer {
-        waiting: candidates.iter().filter(|c| !c.pull_request_exists).count(),
+        waiting: candidates
+            .iter()
+            .filter(|c| c.attempt != Attempt::Live)
+            .count(),
         queue_entries_blocked: candidates.len(),
     }
 }
@@ -883,11 +924,6 @@ pub(crate) struct ConvertPlan {
 impl ConvertPlan {
     fn selection(&self) -> autospec_core::conversion_pass::Selection {
         select_fresh(&self.candidates)
-    }
-
-    /// The buffer this plan's candidates describe (issue #4558 ask 3).
-    fn buffer(&self) -> ConversionBuffer {
-        buffer_from_candidates(&self.candidates)
     }
 }
 
@@ -949,8 +985,7 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
     let mut candidates = Vec::new();
     for patch in &examined {
         let branch = format!("{}{}", opts.branch_prefix, patch.issue);
-        let (branch_exists, pull_request_exists) =
-            attempt_flags(repo.as_deref(), &branch, attempt_index.as_ref());
+        let attempt = attempt_state(repo.as_deref(), &branch, attempt_index.as_ref());
 
         // HELD is a queue: a recorded hold disqualifies only while its
         // re-gate still holds. A changed patch, or a dependent file that
@@ -967,8 +1002,7 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
         candidates.push(PatchCandidate {
             issue: patch.issue,
             patch_key: patch.patch_key.clone(),
-            branch_exists,
-            pull_request_exists,
+            attempt,
             held_recorded,
             language: language::candidate_language(patch),
         });
@@ -1034,7 +1068,7 @@ fn convert(args: &[String]) -> Result<(), CommandFailure> {
         if let Err(fatal) = gate::gate_tool_precondition() {
             return Err(CommandFailure::status(fatal, 1));
         }
-        return run_apply(&plan);
+        return apply::run_apply(&plan);
     }
     gate::gate_tool_warning();
     render_plan(&plan)
@@ -1143,7 +1177,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     let selection = plan.selection();
     let selection_line = selection.line(plan.candidates.len());
 
-    let buffer = plan.buffer();
+    let buffer = buffer_from_candidates(&plan.candidates);
 
     if plan.opts.as_json {
         let disqualified: Vec<Value> = selection
@@ -1154,11 +1188,11 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             })
             .collect();
         let language_held = language::held_json(plan, &selection.language_held);
-        let fresh: Vec<Value> = selection
-            .fresh
-            .iter()
-            .map(|c| json!({ "issue": c.issue, "patch_key": c.patch_key }))
-            .collect();
+        let to_value = |c: &autospec_core::conversion_pass::Candidate| {
+            json!({ "issue": c.issue, "patch_key": c.patch_key })
+        };
+        let fresh: Vec<Value> = selection.fresh.iter().map(to_value).collect();
+        let interrupted: Vec<Value> = selection.interrupted.iter().map(to_value).collect();
         let value = json!({
             "schema": CONVERT_PLAN_SCHEMA,
             "llm_root": plan.llm_root.display().to_string(),
@@ -1166,6 +1200,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             "apply": false,
             "examined": plan.candidates.len(),
             "fresh": fresh,
+            "interrupted": interrupted,
             "disqualified": disqualified,
             "language_held": language_held,
             "buffer": json!({
@@ -1184,6 +1219,15 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     for c in &selection.fresh {
         progress::report_line(&format!(
             "  FRESH #{issue} {patch_key}",
+            issue = c.issue,
+            patch_key = c.patch_key
+        ));
+    }
+    // The orphans an interrupted run left behind, named (#4499): re-offered
+    // above, but visible on their own so the report says what happened.
+    for c in &selection.interrupted {
+        progress::report_line(&format!(
+            "  INTERRUPTED #{issue} {patch_key} (branch without a PR; re-offered)",
             issue = c.issue,
             patch_key = c.patch_key
         ));
@@ -1210,74 +1254,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
 
 /// The real conversion of each selected patch (steps 3-6). Side effects are
 /// confined to the pass's own branches/PRs and the HELD ledger.
-fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
-    if plan.opts.repo.is_none() {
-        return Err(CommandFailure::diagnostic(
-            "autospec convert --apply requires --repo OWNER/NAME (or a gh-inferable repo) to \
-             check PR liveness and open PRs",
-        ));
-    }
-    let repo: String = plan.opts.repo.clone().or_else(infer_repo).unwrap_or_default();
-
-    // Fetch the trunk so the pass branches off current origin/<base>.
-    let base_ref = format!("origin/{}", plan.opts.base);
-    run_git(&["fetch", "origin"])?;
-
-    let selection = plan.selection();
-    let base_sha = run_git_capture(&["rev-parse", "HEAD"])?;
-
-    let mut counters = PassCounters {
-        examined: plan.candidates.len(),
-        converted: 0,
-        held: 0,
-        skipped: selection.disqualified.len(),
-    };
-    // Patches archived this run (superseded by the base): they leave the
-    // buffer entirely — no patch on disk, so no queue entry held.
-    let mut archived = 0;
-
-    language::archive_held(plan, &selection.language_held, &mut counters, &mut archived);
-    for c in &selection.fresh {
-        let patch = match plan.examined.iter().find(|p| p.issue == c.issue) {
-            Some(p) => p,
-            None => continue,
-        };
-        match apply_one(plan, &repo, &base_ref, &base_sha, patch) {
-            ApplyResult::Converted => {
-                counters.converted += 1;
-                progress::converted(patch.issue, &patch.patch_key);
-            }
-            ApplyResult::Held => counters.held += 1,
-            // Not converted and not held: the pass could not tell whether this
-            // patch is good, so it says so and leaves the patch alone.
-            ApplyResult::BaseUnverifiable => counters.skipped += 1,
-            ApplyResult::Archived => {
-                counters.skipped += 1;
-                archived += 1;
-            }
-        }
-    }
-
-    let outcome = PassOutcome::Examined(counters);
-    report_outcome(&outcome);
-
-    // The buffer after the run, not just the run itself (#4558 ask 3):
-    // converted patches leave the waiting count (their PR is live) but
-    // stay on disk and still hold their queue entry; archived patches
-    // leave both. A report of only what converted hides how much is still
-    // waiting.
-    let initial = plan.buffer();
-    let buffer = ConversionBuffer {
-        waiting: initial.waiting.saturating_sub(counters.converted).saturating_sub(archived),
-        queue_entries_blocked: initial.queue_entries_blocked.saturating_sub(archived),
-    };
-    println!("{}", buffer.line(plan.opts.free_slots));
-    if let Some(alarm) = buffer.alarm(plan.opts.free_slots) {
-        println!("{alarm}");
-    }
-    Ok(())
-}
-
+mod apply;
 mod conflict;
 mod gate;
 
@@ -1306,6 +1283,7 @@ fn apply_one(
     base_ref: &str,
     base_sha: &str,
     patch: &PatchLocation,
+    redo_interrupted: bool,
 ) -> ApplyResult {
     let branch = format!("{}{}", plan.opts.branch_prefix, patch.issue);
     let worktree = std::env::temp_dir().join(format!("autospec-conv-{branch}"));
@@ -1420,7 +1398,7 @@ fn apply_one(
             match gate {
                 GateResult::Pass => {
                     // Step 5: open a PR per passing patch.
-                    let opened = open_pr(repo, &worktree, &branch, patch, &packages, &resolutions);
+                    let opened = open_pr(repo, &worktree, &branch, patch, &packages, &resolutions, redo_interrupted);
                     teardown_worktree(&worktree);
                     if opened {
                         ApplyResult::Converted
@@ -1637,6 +1615,7 @@ fn open_pr(
     patch: &PatchLocation,
     scope: &[String],
     resolutions: &[conflict::ResolutionRecord],
+    redo_interrupted: bool,
 ) -> bool {
     if let Err(error) = run_git_in(worktree, &["add", "-A"]) {
         eprintln!("WARN: git add for #{issue} failed: {error}", issue = patch.issue);
@@ -1652,7 +1631,16 @@ fn open_pr(
         eprintln!("WARN: git commit for #{issue} failed: {error}", issue = patch.issue);
         return false;
     }
-    if let Err(error) = run_git_in(worktree, &["push", "origin", branch]) {
+    // Redoing an interrupted attempt (#4499) overwrites the orphan branch
+    // the killed run left on the remote; `--force-with-lease` keeps the
+    // safety: it refuses if the branch moved since the fetch (e.g. a PR
+    // opened on it, which is exactly the state that disqualifies a redo).
+    let push = if redo_interrupted {
+        vec!["push", "--force-with-lease", "origin", branch]
+    } else {
+        vec!["push", "origin", branch]
+    };
+    if let Err(error) = run_git_in(worktree, &push) {
         eprintln!("WARN: push for #{issue} failed: {error}", issue = patch.issue);
         return false;
     }
@@ -1760,35 +1748,29 @@ mod tests {
         }
     }
 
+    fn verdict(i: &AttemptIndex, branch: &str) -> AttemptLiveness {
+        i.liveness(branch).expect("local worktree check")
+    }
+
     #[test]
     fn the_index_reproduces_attempt_liveness_order() {
-        // Absent from the remote is dead WITHOUT consulting pull requests --
-        // the short-circuit that makes a mostly-absent backlog a long run of
-        // ls-remote calls, and the reason batching them is worth anything.
-        assert_eq!(index(&[], &["conv-1"]).liveness("conv-1"), BranchLiveness::Dead);
-        // Present with an open or merged pull request: live.
-        assert_eq!(index(&["conv-2"], &["conv-2"]).liveness("conv-2"), BranchLiveness::Live);
-        // Present with no live pull request is abandoned, and abandoned is not
-        // live: redoing it overwrites the stale branch.
-        assert_eq!(index(&["conv-3"], &[]).liveness("conv-3"), BranchLiveness::Dead);
-        // An empty branch name is not an attempt.
-        assert_eq!(index(&[], &[]).liveness("   "), BranchLiveness::Dead);
+        assert_eq!(verdict(&index(&[], &["conv-1"]), "conv-1"), AttemptLiveness::NoBranch);
+        assert_eq!(verdict(&index(&["conv-2"], &["conv-2"]), "conv-2"), AttemptLiveness::OpenPr);
+        // Present with no live PR: abandoned, i.e. interrupted (#4499).
+        assert_eq!(verdict(&index(&["conv-3"], &[]), "conv-3"), AttemptLiveness::Abandoned);
+        assert_eq!(verdict(&index(&[], &[]), "   "), AttemptLiveness::NoBranch);
     }
 
     #[test]
     fn a_live_pull_request_on_a_similar_branch_does_not_leak() {
-        // Membership is exact: a prefix match is not a branch match, or the
-        // pass would treat conv-12 as keeping conv-1 in play.
         let i = index(&["conv-1", "conv-12"], &["conv-12"]);
-        assert_eq!(i.liveness("conv-12"), BranchLiveness::Live);
-        assert_eq!(i.liveness("conv-1"), BranchLiveness::Dead);
+        assert_eq!(verdict(&i, "conv-12"), AttemptLiveness::OpenPr);
+        assert_eq!(verdict(&i, "conv-1"), AttemptLiveness::Abandoned);
     }
 
     #[test]
     fn pull_request_heads_parse_regardless_of_field_order() {
-        let body = r#"[{"headRefName":"conv-7","state":"OPEN"},
-                       {"state":"MERGED","headRefName":"conv-8"},
-                       {"state":"CLOSED","headRefName":"conv-9"}]"#;
+        let body = r#"[{"headRefName":"conv-7","state":"OPEN"},{"state":"MERGED","headRefName":"conv-8"},{"state":"CLOSED","headRefName":"conv-9"}]"#;
         assert_eq!(
             parse_pull_request_heads(body),
             vec![
@@ -1801,7 +1783,6 @@ mod tests {
 
     #[test]
     fn only_open_and_merged_pull_requests_are_live() {
-        // CLOSED is the abandoned case the pass must re-offer, not skip.
         let body = r#"[{"headRefName":"conv-9","state":"CLOSED"}]"#;
         let live: Vec<_> = parse_pull_request_heads(body)
             .into_iter()
@@ -1822,6 +1803,7 @@ mod tests {
             converted: 0,
             held: 0,
             skipped: 0,
+            deferred: 0,
         })
         .line("convert", "autospec convert", "enumerate $LLM");
         assert_ne!(unfed.message, idle);
@@ -1838,33 +1820,9 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_scope_is_derived_from_the_touched_crate() {
-        assert_eq!(
-            gate_packages(&["crates/autospec-core/src/a.rs".to_string()]),
-            vec!["-p".to_string(), "autospec-core".to_string()]
-        );
-        assert_eq!(
-            gate_packages(&["crates/autospec-cli/src/a.rs".to_string()]),
-            vec!["-p".to_string(), "autospec-cli".to_string()]
-        );
-        assert_eq!(
-            gate_packages(&[
-                "crates/autospec-core/src/a.rs".to_string(),
-                "crates/autospec-cli/src/b.rs".to_string(),
-            ]),
-            // The crate set is sorted (the shared `CheckScope` contract).
-            vec![
-                "-p".to_string(),
-                "autospec-cli".to_string(),
-                "-p".to_string(),
-                "autospec-core".to_string(),
-            ]
-        );
-        // No resolvable crate: the workspace (fail-closed default).
-        assert_eq!(gate_packages(&["scripts/x.sh".to_string()]), vec!["--workspace".to_string()]);
-        // A crate patch with an unattributable file beside it (a README)
-        // gates the workspace: the unattributable path may break a crate
-        // the scope never names — it widens, never is dropped (#4554).
+    fn the_gate_scope_widens_on_unattributable_paths() {
+        // The derivation is the shared core's contract; the gate's own
+        // decisions are the widening (#4554) and no hard-coded crates (#4532).
         assert_eq!(
             gate_packages(&[
                 "crates/autospec-core/src/a.rs".to_string(),
@@ -1872,9 +1830,6 @@ mod tests {
             ]),
             vec!["--workspace".to_string()]
         );
-        // No crate is hard-coded: a patch touching a crate this function
-        // has never named gates that crate. The pre-#4532 code could only
-        // produce autospec-core / autospec-cli / --workspace.
         assert_eq!(
             gate_packages(&["crates/autospec-foo/src/a.rs".to_string()]),
             vec!["-p".to_string(), "autospec-foo".to_string()]
@@ -2091,11 +2046,19 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
     // --- the conversion buffer and its alarm (issue #4558 ask 3) ----------
 
     fn candidate(issue: u64, branch: bool, pr: bool, held: bool) -> PatchCandidate {
+        // The old test's branch/pr booleans, on the attempt axis: a branch
+        // alone is now `Interrupted` (re-offered), branch+PR is `Live`.
+        let attempt = if pr {
+            Attempt::Live
+        } else if branch {
+            Attempt::Interrupted
+        } else {
+            Attempt::Fresh
+        };
         PatchCandidate {
             issue,
             patch_key: format!("patch-{issue}"),
-            branch_exists: branch,
-            pull_request_exists: pr,
+            attempt,
             held_recorded: held,
             language: autospec_core::patch_language::PatchLanguage::default(),
         }
@@ -2105,14 +2068,14 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
     fn the_buffer_counts_waiting_and_blocked() {
         let candidates = vec![
             candidate(1, false, false, false), // fresh: waiting, blocked
-            candidate(2, true, false, false),  // branch: waiting, blocked
+            candidate(2, true, false, false),  // bare branch: waiting, blocked
             candidate(3, false, true, false),  // live PR: not waiting, still blocked
             candidate(4, false, false, true),  // held: waiting, blocked
         ];
         let buffer = buffer_from_candidates(&candidates);
-        // Waiting = the patches with no live PR; blocked = every patch on
-        // disk — the dispatch guard's condition is presence, not PR
-        // liveness.
+        // Waiting = the patches with no live attempt (a bare branch is not
+        // one: the entry is still open to re-offer); blocked = every patch
+        // on disk.
         assert_eq!(buffer.waiting, 3);
         assert_eq!(buffer.queue_entries_blocked, 4);
     }
@@ -2171,6 +2134,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             held_file: None,
             branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
             free_slots: None,
+            deadline: None,
             apply: false,
             archive: true,
             as_json: false,
@@ -2295,6 +2259,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             held_file: Some(out.clone()),
             branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
             free_slots: None,
+            deadline: None,
             apply: false,
             archive: false,
             as_json: false,
@@ -2328,10 +2293,15 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             converted: 3,
             held: 2,
             skipped: 1,
+            deferred: 4,
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(line.contains("examined"), "the line still carries the counts");
+        // The deferral is part of the accounting the line reports: 3+2+1+4
+        // accounts for all 10, so no alarm — and the line names the four
+        // that were never started (#4607).
         assert!(alarm.is_none(), "sound arithmetic needs no alarm");
+        assert!(line.contains("deferred=4"), "the line must carry the deferral");
     }
 
     #[test]
@@ -2343,6 +2313,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             converted: 5,
             held: 0,
             skipped: 0,
+            deferred: 0,
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(

@@ -178,38 +178,32 @@ EOF
     wait_gh_called || { echo "poller never fetched"; return 1; }
     "$REAL_SLEEP" 0.3
 
-    # SKIPPED pending #4429. Making this test's preconditions observable (they
-    # were bare mid-body `!` assertions, which cannot fail under set -e)
-    # revealed that the second one is FALSE: after kill -9, `kill -0 "$pid"`
-    # still succeeds, because a SIGKILLed child that has not been reaped is a
-    # zombie and `kill -0` succeeds against a zombie. The test's stated
-    # precondition is not what it measures -- and if ci-wait-poll.sh decides
-    # died-vs-pending with the same predicate, the implementation shares the
-    # defect this test was written to prevent.
-    #
-    # Skipped rather than left failing so the ratchet is green and the defect
-    # is named. Do not delete: #4429 is the fix.
-    skip "preconditions are unobservable and one is false; see #4429"
-
-    # SIGKILL cannot be trapped: no terminal line, no died settle by the trap.
+        # SIGKILL cannot be trapped: no terminal line, no died settle by the trap.
     kill -9 "$(cat "$HOME/.autospec/ci-state/$PR.pid")" 2>/dev/null || :
     # (best-effort: the poller may already have exited; the assertions below verify the dead state)
     "$REAL_SLEEP" 0.3
 
-    local log pid
+    local log pid poll_state
     log="$HOME/.autospec/ci-state/$PR.log"
     pid="$(cat "$HOME/.autospec/ci-state/$PR.pid")"
     # The reader is handed a log with no terminal line…
     [ -f "$log" ]
-    # `run !`, not a bare `!`: under `set -e` a mid-body negation is ignored
-    # (POSIX: -e is ignored when the command is the `!` reserved word), so a
-    # bare `! grep` here asserts nothing at all. Both of these were silent
-    # no-ops -- the preconditions this test documents were never checked.
-    run ! grep -q 'ci-wait: terminal:' "$log"
-    [ "$status" -eq 0 ]
-    # …and no live process…
-    run ! kill -0 "$pid" 2>/dev/null
-    [ "$status" -eq 0 ]
+    # …and no live process… A SIGKILLed poller can linger as an unreaped
+    # zombie, and kill -0 succeeds against a zombie, so the precondition is
+    # judged by /proc state on Linux (Z or a missing entry = gone) with a
+    # kill -0 fallback elsewhere — exactly the predicate the reader uses
+    # (#4429). An `if`, not `run !` + a $status check: run ! already IS the
+    # assertion via its own exit code, and $status still holds the raw exit
+    # (1 when the pattern is absent), so the status check asserts the opposite.
+    if grep -q 'ci-wait: terminal:' "$log"; then false; fi
+    if [ -e "/proc/$pid/stat" ]; then
+        poll_state="$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $1}')"
+        if [ -n "$poll_state" ] && [ "$poll_state" != "Z" ]; then
+            false
+        fi
+    elif kill -0 "$pid" 2>/dev/null; then
+        false
+    fi
     # …so it must report died (exit 4), not pending/running (exit 2).
     run bash "$REPO_ROOT/scripts/ci-wait-poll.sh" "$PR"
     [ "$status" -eq 4 ]

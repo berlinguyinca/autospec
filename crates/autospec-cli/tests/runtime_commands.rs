@@ -1342,8 +1342,8 @@ fn legacy_agent_env_authority_is_absent() {
         let source = String::from_utf8_lossy(&source);
         for (line_number, line) in source.lines().enumerate() {
             let trimmed = line.trim_start();
-            let is_negative_test_assertion =
-                path.starts_with("tests/") && trimmed.starts_with("! grep");
+            let is_negative_test_assertion = path.starts_with("tests/")
+                && (trimmed.starts_with("! grep") || trimmed.ends_with("; then false; fi"));
             let is_approved_history_reference = match path {
                 "docs/superpowers/specs/2026-07-14-rust-control-plane-completion-design.md" => {
                     line.starts_with("Implement a typed `.autospec/runtime.yml` model with ")

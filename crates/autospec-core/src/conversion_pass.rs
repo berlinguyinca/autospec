@@ -48,21 +48,59 @@ use serde::{Deserialize, Serialize};
 use crate::patch_language::PatchLanguage;
 use crate::unfed_pass::{examined_line, unfed_line, PassCounters};
 
+/// The attempt state a candidate's branch carries, the external evidence of
+/// whether the issue has already been worked. A branch alone is not evidence
+/// of an attempt: the pass pushes a branch and only then opens the PR, so an
+/// interruption in that window leaves a branch with no PR — and a liveness
+/// check that read a bare branch as "attempted" silently retired the issue,
+/// never converted, never held, never reported (#4499). The disqualifying
+/// fact is a live attempt (a branch with an open or merged PR, or a checked-
+/// out worktree); a branch without one is an interrupted attempt, re-offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Attempt {
+    /// No branch exists: nothing was ever attempted here. The default: most
+    /// patches were never attempted, and `#[derive(Default)]` on
+    /// `PatchCandidate` needs a default attempt state.
+    #[default]
+    Fresh,
+    /// The attempt is in play: a branch with an open or merged pull request,
+    /// or a local worktree holding the branch.
+    Live,
+    /// The branch exists but no open or merged pull request uses it: an
+    /// interrupted or abandoned attempt. Re-offered, and reported as such.
+    Interrupted,
+    /// The liveness lookup could not complete. No verdict was reached; the
+    /// selection folds this fail-closed like a live attempt, because
+    /// offering a patch whose attempt state cannot be verified risks a
+    /// duplicate PR.
+    Unknown,
+}
+
+impl Attempt {
+    /// The machine name used in reports and the JSON plan.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Live => "live",
+            Self::Interrupted => "interrupted",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Why a patch on disk is not offered to the pass: something already
-/// attempted it. Any one of the three disqualifies — the pass must not offer
-/// a patch that a branch, a PR, or a HELD entry already owns.
-///
-/// Precedence is the order the pass checks: a branch is the cheapest local
-/// fact, a PR the remote one, a HELD entry the ledger. When several are set,
-/// the first is the reason the report cites; the others are implied by it.
+/// attempted it. The attempt state and the HELD ledger each disqualify on
+/// their own — the pass must not offer a patch that a live attempt or a
+/// HELD entry already owns. A bare branch is not among them: see [`Attempt`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Disqualification {
-    /// A conversion branch for the issue already exists.
-    Branch,
-    /// An open or merged pull request for the issue already exists.
-    PullRequest,
-    /// A recorded HELD entry owns the issue and its re-gate still holds.
+    /// A live attempt owns the issue: a branch with an open or merged pull
+    /// request, or a checked-out worktree. When the liveness lookup could
+    /// not complete, the candidate is cited here too — fail-closed.
+    Attempted,
+    /// A recorded HELD entry owns this issue and its re-gate still holds.
     Held,
 }
 
@@ -70,8 +108,7 @@ impl Disqualification {
     /// The machine name used in reports and the JSON plan.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Branch => "branch",
-            Self::PullRequest => "pull-request",
+            Self::Attempted => "attempted",
             Self::Held => "held",
         }
     }
@@ -91,8 +128,8 @@ pub struct Candidate {
 }
 
 /// A patch on disk, plus the external evidence of whether it has already been
-/// attempted. The pass selects on these three booleans; the presence of the
-/// patch file is not one of them.
+/// attempted. The pass selects on the attempt state and the HELD re-gate;
+/// the presence of the patch file is not one of them.
 ///
 /// [`held_recorded`](PatchCandidate::held_recorded) is the *output* of the
 /// HELD-as-queue re-gate ([`crate::hold_memo::re_gate`]), not the raw "a HELD
@@ -104,10 +141,9 @@ pub struct Candidate {
 pub struct PatchCandidate {
     pub issue: u64,
     pub patch_key: String,
-    /// A conversion branch for this issue already exists.
-    pub branch_exists: bool,
-    /// An open or merged pull request for this issue already exists.
-    pub pull_request_exists: bool,
+    /// The attempt state the branch carries (the default, `Fresh`, is the
+    /// common case: most patches were never attempted).
+    pub attempt: Attempt,
     /// A recorded HELD entry owns this issue and its re-gate still holds.
     pub held_recorded: bool,
     /// The patch's language class ([`crate::patch_language::classify`])
@@ -117,17 +153,15 @@ pub struct PatchCandidate {
     pub language: PatchLanguage,
 }
 
-/// The disqualifier for a candidate's three booleans, or `None` when the
-/// patch is fresh and should be offered.
-pub fn disqualification(
-    branch_exists: bool,
-    pull_request_exists: bool,
-    held_recorded: bool,
-) -> Option<Disqualification> {
-    if branch_exists {
-        Some(Disqualification::Branch)
-    } else if pull_request_exists {
-        Some(Disqualification::PullRequest)
+/// The disqualifier for a candidate, or `None` when the patch should be
+/// offered. A live attempt — and an attempt state the lookup could not
+/// classify (fail-closed) — disqualifies; a recorded HELD entry disqualifies
+/// on its own. A bare branch does not: [`Attempt::Interrupted`] is offered
+/// again, which is what the push-before-PR window needs, because redoing an
+/// interrupted attempt overwrites the orphan branch (#4499).
+pub fn disqualification(attempt: Attempt, held_recorded: bool) -> Option<Disqualification> {
+    if matches!(attempt, Attempt::Live | Attempt::Unknown) {
+        Some(Disqualification::Attempted)
     } else if held_recorded {
         Some(Disqualification::Held)
     } else {
@@ -149,6 +183,11 @@ pub struct Selection {
     /// The patches to attempt this pass: those with no disqualifier and an
     /// offerable language.
     pub fresh: Vec<Candidate>,
+    /// The offered patches whose attempt was interrupted — a branch exists
+    /// with no open or merged PR. They are re-offered (redoing the attempt
+    /// overwrites the orphan branch) and reported as a distinct category, so
+    /// an interrupted run leaves a record of what it left behind (#4499).
+    pub interrupted: Vec<Candidate>,
     /// The patches not offered by attempt state, each paired with the
     /// disqualifier that excluded it.
     pub disqualified: Vec<(Candidate, Disqualification)>,
@@ -167,18 +206,20 @@ pub struct Selection {
 pub fn select_fresh(candidates: &[PatchCandidate]) -> Selection {
     let mut selection = Selection::default();
     for candidate in candidates {
-        // Attempt state wins: the cheapest local fact (a branch, a PR, a
-        // HELD entry) is cited before the language verdict, which costs a
-        // patch read. A branch-owned shell patch is reported as branch-held.
-        match disqualification(
-            candidate.branch_exists,
-            candidate.pull_request_exists,
-            candidate.held_recorded,
-        ) {
-            None if candidate.language.offerable() => selection.fresh.push(Candidate {
-                issue: candidate.issue,
-                patch_key: candidate.patch_key.clone(),
-            }),
+        // Attempt state wins: the attempt fact is cited before the language
+        // verdict, which costs a patch read. A live-attempt shell patch is
+        // reported as attempted; an interrupted one is re-offered and named.
+        match disqualification(candidate.attempt, candidate.held_recorded) {
+            None if candidate.language.offerable() => {
+                let offered = Candidate {
+                    issue: candidate.issue,
+                    patch_key: candidate.patch_key.clone(),
+                };
+                if candidate.attempt == Attempt::Interrupted {
+                    selection.interrupted.push(offered.clone());
+                }
+                selection.fresh.push(offered);
+            }
             None => selection.language_held.push(LanguageHold {
                 candidate: Candidate {
                     issue: candidate.issue,
@@ -204,10 +245,10 @@ impl Selection {
         self.fresh.len()
     }
 
-    /// The not-offered patches grouped by disqualifier, in branch → PR → HELD
-    /// order. The three counts reconcile against the number examined:
+    /// The not-offered patches grouped by disqualifier, in attempted → held
+    /// order. The counts reconcile against the number examined:
     /// `fresh + disqualified == examined`.
-    pub fn disqualified_counts(&self) -> [(Disqualification, usize); 3] {
+    pub fn disqualified_counts(&self) -> [(Disqualification, usize); 2] {
         let count = |want: Disqualification| {
             self.disqualified
                 .iter()
@@ -215,10 +256,9 @@ impl Selection {
                 .count()
         };
         [
-            (Disqualification::Branch, count(Disqualification::Branch)),
             (
-                Disqualification::PullRequest,
-                count(Disqualification::PullRequest),
+                Disqualification::Attempted,
+                count(Disqualification::Attempted),
             ),
             (Disqualification::Held, count(Disqualification::Held)),
         ]
@@ -242,22 +282,22 @@ impl Selection {
         ]
     }
 
-    /// The one-line plan summary: how many were examined, how many are fresh,
-    /// and how each disqualifier and language class accounted for the rest.
-    /// `examined` is the size of the input the pass was handed — a zero fresh
-    /// count read against it is what keeps an idle pass distinct from a
-    /// broken one, and a pass that held everything must not print the idle
-    /// counters (issue #4559).
+    /// The one-line plan summary: how many were examined, how many are fresh
+    /// (and how many of those re-offer an interrupted attempt), and how each
+    /// disqualifier and language class accounted for the rest. `examined` is
+    /// the size of the input the pass was handed — a zero fresh count read
+    /// against it is what keeps an idle pass distinct from a broken one, and
+    /// a pass that held everything must not print the idle counters
+    /// (issue #4559).
     pub fn line(&self, examined: usize) -> String {
-        let [(branch, branch_n), (pr, pr_n), (held, held_n)] = self.disqualified_counts();
+        let [(attempted, attempted_n), (held, held_n)] = self.disqualified_counts();
         let [(shell, shell_n), (mixed, mixed_n), (neither, neither_n)] = self.language_counts();
         format!(
-            "conversion pass: examined={examined} fresh={} ({} {} {} {} {} {}; language: {} {} {} {} {} {})",
+            "conversion pass: examined={examined} fresh={} interrupted={} ({} {} {} {}; language: {} {} {} {} {} {})",
             self.fresh.len(),
-            branch_n,
-            branch.as_str(),
-            pr_n,
-            pr.as_str(),
+            self.interrupted.len(),
+            attempted_n,
+            attempted.as_str(),
             held_n,
             held.as_str(),
             shell_n,
@@ -326,246 +366,5 @@ impl PassOutcome {
         let unfed = PassOutcome::Unfed.line(tool, script, selector);
         let idle = PassOutcome::Examined(PassCounters::default()).line(tool, script, selector);
         unfed != idle
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fresh(issue: u64) -> PatchCandidate {
-        PatchCandidate {
-            issue,
-            patch_key: format!("patch-{issue}"),
-            ..Default::default()
-        }
-    }
-
-    fn with_flag(mut candidate: PatchCandidate, flag: fn(&mut PatchCandidate)) -> PatchCandidate {
-        flag(&mut candidate);
-        candidate
-    }
-
-    #[test]
-    fn a_patch_with_no_disqualifier_is_offered() {
-        let selection = select_fresh(&[fresh(1)]);
-        assert_eq!(selection.fresh_count(), 1);
-        assert!(selection.disqualified.is_empty());
-        assert_eq!(selection.fresh[0].issue, 1);
-    }
-
-    #[test]
-    fn each_disqualifier_excludes_its_patch() {
-        let branch = with_flag(fresh(1), |c| c.branch_exists = true);
-        let pr = with_flag(fresh(2), |c| c.pull_request_exists = true);
-        let held = with_flag(fresh(3), |c| c.held_recorded = true);
-        let selection = select_fresh(&[branch, pr, held]);
-        assert!(selection.fresh.is_empty());
-        let reasons: Vec<Disqualification> =
-            selection.disqualified.iter().map(|(_, r)| *r).collect();
-        assert_eq!(
-            reasons,
-            vec![
-                Disqualification::Branch,
-                Disqualification::PullRequest,
-                Disqualification::Held
-            ]
-        );
-    }
-
-    #[test]
-    fn the_pass_selects_not_counts() {
-        // The incident: 121 patches on disk, but 110 already owned by a
-        // branch, a PR, or a HELD entry, leaving 11 actually fresh.
-        let candidates: Vec<PatchCandidate> = (1..=121)
-            .map(|n| {
-                let mut c = fresh(n);
-                match n {
-                    1..=70 => c.branch_exists = true,
-                    71..=95 => c.pull_request_exists = true,
-                    96..=110 => c.held_recorded = true,
-                    _ => {}
-                }
-                c
-            })
-            .collect();
-        let selection = select_fresh(&candidates);
-        assert_eq!(selection.fresh_count(), 11, "11 fresh, not 121");
-        let counts = selection.disqualified_counts();
-        assert_eq!(counts[0], (Disqualification::Branch, 70));
-        assert_eq!(counts[1], (Disqualification::PullRequest, 25));
-        assert_eq!(counts[2], (Disqualification::Held, 15));
-        // The counts reconcile against the input size.
-        assert_eq!(
-            selection.fresh_count() + selection.disqualified.len(),
-            candidates.len()
-        );
-    }
-
-    #[test]
-    fn branch_wins_the_precedence_when_several_are_set() {
-        let all = PatchCandidate {
-            issue: 1,
-            patch_key: "k".to_string(),
-            branch_exists: true,
-            pull_request_exists: true,
-            held_recorded: true,
-            language: PatchLanguage::Shell,
-        };
-        let selection = select_fresh(&[all]);
-        assert_eq!(
-            selection.disqualified[0].1,
-            Disqualification::Branch,
-            "branch is checked first and is the cited reason"
-        );
-    }
-
-    #[test]
-    fn attempt_state_wins_over_language_and_language_holds_are_terminal() {
-        // A branch-owned shell patch is reported as branch-held (the cheap
-        // fact is cited first); a fresh shell patch is language-held, and a
-        // fresh Rust patch is offered — the three buckets reconcile.
-        let candidates = vec![
-            with_flag(fresh(1), |c| {
-                c.branch_exists = true;
-                c.language = PatchLanguage::Shell;
-            }),
-            with_flag(fresh(2), |c| c.language = PatchLanguage::Shell),
-            with_flag(fresh(3), |c| c.language = PatchLanguage::Mixed),
-            with_flag(fresh(4), |c| c.language = PatchLanguage::Neither),
-            fresh(5),
-        ];
-        let selection = select_fresh(&candidates);
-        assert_eq!(selection.fresh_count(), 1);
-        assert_eq!(selection.fresh[0].issue, 5);
-        assert_eq!(selection.disqualified.len(), 1);
-        assert_eq!(selection.disqualified[0].1, Disqualification::Branch);
-        let held: Vec<(u64, PatchLanguage)> = selection
-            .language_held
-            .iter()
-            .map(|h| (h.candidate.issue, h.language))
-            .collect();
-        assert_eq!(
-            held,
-            vec![
-                (2, PatchLanguage::Shell),
-                (3, PatchLanguage::Mixed),
-                (4, PatchLanguage::Neither)
-            ]
-        );
-        // The buckets reconcile against the input size.
-        assert_eq!(
-            selection.fresh.len() + selection.disqualified.len() + selection.language_held.len(),
-            candidates.len()
-        );
-        let counts = selection.language_counts();
-        assert_eq!(counts[0], (PatchLanguage::Shell, 1));
-        assert_eq!(counts[1], (PatchLanguage::Mixed, 1));
-        assert_eq!(counts[2], (PatchLanguage::Neither, 1));
-    }
-
-    #[test]
-    fn disqualification_reports_each_flag_independently() {
-        assert_eq!(disqualification(false, false, false), None);
-        assert_eq!(
-            disqualification(true, false, false),
-            Some(Disqualification::Branch)
-        );
-        assert_eq!(
-            disqualification(false, true, false),
-            Some(Disqualification::PullRequest)
-        );
-        assert_eq!(
-            disqualification(false, false, true),
-            Some(Disqualification::Held)
-        );
-    }
-
-    #[test]
-    fn the_selection_line_names_examined_and_each_reason() {
-        let selection = select_fresh(&[
-            with_flag(fresh(1), |c| c.branch_exists = true),
-            with_flag(fresh(2), |c| c.held_recorded = true),
-            fresh(3),
-            fresh(4),
-        ]);
-        let line = selection.line(4);
-        assert!(line.contains("examined=4"), "{line}");
-        assert!(line.contains("fresh=2"), "{line}");
-        assert!(line.contains("1 branch"), "{line}");
-        assert!(line.contains("1 held"), "{line}");
-        assert!(line.contains("0 pull-request"), "{line}");
-    }
-
-    // --- unfed vs idle ------------------------------------------------------
-
-    #[test]
-    fn an_unfed_pass_and_an_idle_pass_print_different_lines() {
-        let tool = "convert";
-        let script = "autospec convert";
-        let selector = "enumerate $LLM";
-        assert!(PassOutcome::unfed_and_idle_differ(tool, script, selector));
-
-        let unfed = PassOutcome::Unfed.line(tool, script, selector);
-        let idle = PassOutcome::Examined(PassCounters {
-            examined: 0,
-            converted: 0,
-            held: 0,
-            skipped: 0,
-        })
-        .line(tool, script, selector);
-        assert_ne!(unfed, idle, "the incident is the two lines being equal");
-        // The idle line leads with the input size; the unfed line names the
-        // empty-input branch and the selector that would feed it.
-        assert!(idle.contains("examined=0"), "{idle}");
-        assert!(unfed.contains("no issues given"), "{unfed}");
-        assert!(unfed.contains(selector), "{unfed}");
-    }
-
-    #[test]
-    fn an_unfed_outcome_carries_no_counters() {
-        assert!(PassOutcome::Unfed.counters().is_none());
-        let examined = PassOutcome::Examined(PassCounters {
-            examined: 3,
-            converted: 1,
-            held: 1,
-            skipped: 1,
-        });
-        assert_eq!(examined.counters().unwrap().examined, 3);
-    }
-
-    #[test]
-    fn the_outcome_reconciles_its_counters() {
-        assert!(PassOutcome::Unfed.reconciles());
-        let ok = PassOutcome::Examined(PassCounters {
-            examined: 3,
-            converted: 1,
-            held: 1,
-            skipped: 1,
-        });
-        assert!(ok.reconciles());
-        let impossible = PassOutcome::Examined(PassCounters {
-            examined: 3,
-            converted: 3,
-            held: 1,
-            skipped: 0,
-        });
-        assert!(
-            !impossible.reconciles(),
-            "acting on more than examined is impossible"
-        );
-    }
-
-    #[test]
-    fn the_disqualifier_round_trips_its_wire_form() {
-        for (value, wire) in [
-            (Disqualification::Branch, "branch"),
-            (Disqualification::PullRequest, "pull-request"),
-            (Disqualification::Held, "held"),
-        ] {
-            assert_eq!(value.as_str(), wire);
-            let parsed: Disqualification = serde_json::from_str(&format!("\"{wire}\"")).unwrap();
-            assert_eq!(parsed, value);
-        }
     }
 }

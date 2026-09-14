@@ -190,7 +190,7 @@ teardown() {
     echo "$output" | jq -e . >/dev/null
     [ "$(echo "$output" | jq -r '.dry')" = "true" ]
     [ "$(echo "$output" | jq -r '.filed')" = "0" ]
-    ! grep -q 'issue edit' "$GH_LOG"
+    if grep -q 'issue edit' "$GH_LOG"; then false; fi
     ! grep -q 'autospec issue promote' "$GH_LOG"
 }
 
@@ -212,8 +212,8 @@ teardown() {
     grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'ctx:'
     grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'reasoning:'
     grep -q 'autospec issue promote --repo owner/repo --number 101 --remove-label needs-autospec-template --json' "$GH_LOG"
-    ! grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'auto-implement'
-    ! grep -Fq -- '--body-file' "$GH_LOG"
+    if grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'auto-implement'; then false; fi
+    if grep -Fq -- '--body-file' "$GH_LOG"; then false; fi
     ! grep -q 'autospec queue review-safety' "$GH_LOG"
 }
 
@@ -226,8 +226,8 @@ teardown() {
     echo "$output" | jq -e '.routed[] | select(.issue == 101 and .action == "groom-canary")' >/dev/null
     grep -q 'issue edit 101 .*--add-label groom:proposed' "$GH_LOG"
     grep -q 'issue comment 101 .*--body-file' "$GH_LOG"
-    ! grep -q 'issue edit 101 .*--body-file' "$GH_LOG"
-    ! grep -q 'autospec issue promote' "$GH_LOG"
+    if grep -q 'issue edit 101 .*--body-file' "$GH_LOG"; then false; fi
+    if grep -q 'autospec issue promote' "$GH_LOG"; then false; fi
     ! grep -q 'remove-label needs-autospec-template' "$GH_LOG"
 }
 
@@ -249,7 +249,7 @@ EOF
     # Nothing promoted; nothing mutated.
     [ "$(echo "$output" | jq -r '.filed')" = "0" ]
     [ "$(echo "$output" | jq -r '.promoted | length')" = "0" ]
-    ! grep -q 'issue edit' "$GH_LOG"
+    if grep -q 'issue edit' "$GH_LOG"; then false; fi
 
     # Each exclusion recorded with a meaningful reason.
     [ "$(echo "$output" | jq -r '.skipped[] | select(.issue == 201) | .reason')" != "" ]
