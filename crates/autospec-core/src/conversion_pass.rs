@@ -146,6 +146,9 @@ pub struct PatchCandidate {
     pub attempt: Attempt,
     /// A recorded HELD entry owns this issue and its re-gate still holds.
     pub held_recorded: bool,
+    /// The patch's changes are already in the base: the work is delivered,
+    /// the patch is residue (#4501). Never offered, never gated.
+    pub delivered: bool,
     /// The patch's language class ([`crate::patch_language::classify`])
     /// from its file list. Only [`PatchLanguage::RustGo`] is offerable: the
     /// Rust gate cannot fail on a shell-only or a neither patch, so a green
@@ -195,6 +198,11 @@ pub struct Selection {
     /// or neither — the gate cannot evaluate them, so they are held
     /// unevaluated, never gated, never branched.
     pub language_held: Vec<LanguageHold>,
+    /// The patches whose changes are already in the base (issue #4501): the
+    /// work is delivered, the patch is residue. Never offered, never gated —
+    /// reported as their own category so a pending backlog and a delivered
+    /// one read differently.
+    pub delivered: Vec<Candidate>,
 }
 
 /// The "11, not 121" selection (step 2 of the pass).
@@ -206,6 +214,16 @@ pub struct Selection {
 pub fn select_fresh(candidates: &[PatchCandidate]) -> Selection {
     let mut selection = Selection::default();
     for candidate in candidates {
+        // Delivered wins over everything: the changes are in the base, so
+        // neither the attempt state nor a stale hold has anything left to
+        // say about the patch (#4501). It is reported, not offered.
+        if candidate.delivered {
+            selection.delivered.push(Candidate {
+                issue: candidate.issue,
+                patch_key: candidate.patch_key.clone(),
+            });
+            continue;
+        }
         // Attempt state wins: the attempt fact is cited before the language
         // verdict, which costs a patch read. A live-attempt shell patch is
         // reported as attempted; an interrupted one is re-offered and named.
@@ -243,6 +261,11 @@ impl Selection {
     /// The number of patches this pass will attempt.
     pub fn fresh_count(&self) -> usize {
         self.fresh.len()
+    }
+
+    /// The patches whose changes are already in the base (#4501).
+    pub fn delivered_count(&self) -> usize {
+        self.delivered.len()
     }
 
     /// The not-offered patches grouped by disqualifier, in attempted → held
@@ -293,9 +316,11 @@ impl Selection {
         let [(attempted, attempted_n), (held, held_n)] = self.disqualified_counts();
         let [(shell, shell_n), (mixed, mixed_n), (neither, neither_n)] = self.language_counts();
         format!(
-            "conversion pass: examined={examined} fresh={} interrupted={} ({} {} {} {}; language: {} {} {} {} {} {})",
+            "conversion pass: examined={examined} fresh={} interrupted={} delivered={} \
+             ({} {} {} {}; language: {} {} {} {} {} {})",
             self.fresh.len(),
             self.interrupted.len(),
+            self.delivered.len(),
             attempted_n,
             attempted.as_str(),
             held_n,

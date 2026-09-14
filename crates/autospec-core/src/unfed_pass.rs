@@ -58,6 +58,10 @@ pub struct PassCounters {
     /// did 12 of 12 must not print the same line; `deferred` is what keeps
     /// them apart.
     pub deferred: usize,
+    /// Candidates whose patch yields no change against the base: the work
+    /// is already delivered (#4501). A pending backlog and a delivered one
+    /// must not print the same line.
+    pub delivered: usize,
 }
 
 impl PassCounters {
@@ -69,7 +73,7 @@ impl PassCounters {
     /// in `stored_output`). Deferral is accounted work too: the pass decided
     /// about those candidates, it decided not to start them.
     pub fn reconciles(&self) -> bool {
-        self.converted + self.held + self.skipped + self.deferred <= self.examined
+        self.converted + self.held + self.skipped + self.deferred + self.delivered <= self.examined
     }
 }
 
@@ -95,8 +99,13 @@ pub fn unfed_line(tool: &str, script: &str, selector: &str) -> String {
 /// the line that prints it is a different line (invariant 1).
 pub fn examined_line(tool: &str, counters: &PassCounters) -> String {
     format!(
-        "######## {tool}: examined={} converted={} held={} skipped={} deferred={} ########",
-        counters.examined, counters.converted, counters.held, counters.skipped, counters.deferred
+        "######## {tool}: examined={} converted={} held={} skipped={} deferred={} delivered={} ########",
+        counters.examined,
+        counters.converted,
+        counters.held,
+        counters.skipped,
+        counters.deferred,
+        counters.delivered
     )
 }
 

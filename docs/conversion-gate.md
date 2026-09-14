@@ -317,3 +317,33 @@ it in the window, which is exactly the state that disqualifies a redo.
 when it ends, at the moment it ends. A START without a DONE is where the run
 stopped: an interrupted run is diagnosable from its output, not from hunting
 for orphan branches on the remote.
+
+## The already-delivered residue (#4501)
+
+A merge must close the issue it delivers, by a mechanism the tracker
+enforces, not by a convention in a title. The incident: the pass's PRs
+named the issue in the **title** (`auto-implement: issue #3246`), and the
+tracker closes on a closing keyword in the **body** (`Closes #3246.`).
+Eighteen merged PRs left their issues open; every pass since then re-fetched
+the patch, applied it, ran a full gate, and reached "no change" — spending
+the gate's entire cost on work that had already landed.
+
+The invariant: **a patch that yields an empty diff against the base is
+residue, not a candidate.** The detection is the cheapest test that cannot
+false-positive on the residue: `git apply --reverse --check` in a worktree
+at the base succeeds exactly when the tree already carries the patch's
+changes — read-only, one shared worktree per pass, and a check that fails
+reads as *not delivered* (the candidate goes to the gate, which measures it
+the usual way).
+
+Consequences, enforced in `conversion_pass` + `convert`:
+
+- The selection line counts `delivered=N` alongside `fresh`/`interrupted`;
+  a delivered patch is never offered and never gated.
+- Plan mode names each one on a `  DELIVERED #N (patch is empty against the
+  base)` line and in the `--json` `delivered` array.
+- `--apply` archives a delivered patch to its `out/issue-N/superseded/`
+  directory (archival, never deletion) and releases its queue entry, so the
+  next pass stops enumerating it.
+- Every PR the pass opens carries `Closes #<issue>.` in the body, so the
+  residue stops accumulating.
