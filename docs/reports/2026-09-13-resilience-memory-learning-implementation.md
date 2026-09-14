@@ -113,6 +113,9 @@
 - `cargo test -p autospec-cli --test cli_commands cli_commands_help_lists_required_commands` — passes after adding `resilience` to the help snapshot.
 - CLI smoke: `autospec resilience doctor`, `checkpoint-verdict`, `transition-check`,
   `lesson-verdict`, `events` all produce correct output.
+- PR #4672 CI: `file-size-ratchet` passes (after splitting `work_protocol.rs` to stay
+  under the 600-line cap); `main-builds`, `freebsd-test`, `macos-test`, `audit`,
+  GitGuardian, security/stack-guard/ux-ui/python workstreams all pass.
 
 ## End-to-end scenario
 
@@ -150,6 +153,24 @@ independently of this work:
 - `executor_bridge` `codex_sandbox` interrupted-cleanup test and `pull_mutation`
   claim-takeover test (flaky, fail on clean main too).
 - `convert_preflight` `a_missing_tool_in_plan_mode_warns_without_refusing`.
+
+### PR #4672 build-test failures (all three reproduced on clean `origin/main`)
+
+The full-catalog build-test reports `total=164 passed=161 failed=3`. All three
+fail identically on clean `origin/main` and none reference this work:
+- `check_dogfood_detectors` — `qa-brute-force-sweep.sh` reports 54 findings vs 32
+  expected (allowlist drift across many pre-existing files: `claim.rs`, `cleanup.rs`,
+  `convert.rs`, `construction_sites.rs`, `dispatch_pipeline.rs`, `ci_conclusions.rs`,
+  `prose_closure.rs`, `wire_fixture.rs`, etc.). Zero `resilience/` files are flagged.
+- `check_install_tests` — `tests/install/*.sh` hang on network (local repro: exit 124).
+- `check_autonomous_phase2_suite` — `tests/autonomous/test_accessibility_workstream.bats`
+  `not ok 5` fails on missing `.github/workflows/accessibility-workstream.yml`, which does
+  not exist on `main`.
+
+### TeamCity gates
+- `file-size-ratchet`: **passes** after the split commit.
+- `architecture-fitness`: **pre-existing failure on `main`** — `rust_core_cli_direction`
+  reports observed=73 on clean `origin/main`; identical on this branch.
 
 On the preserved dirty branch (not caused by this work):
 - `validation_parity::direct_plans_match_the_frozen_catalog` — the branch added a
