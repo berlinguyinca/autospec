@@ -6595,6 +6595,18 @@ fn unmeasured_tool(id: &str, required: bool, program: &str) -> CheckResult {
 }
 
 fn failure(id: &str, required: bool, message: &str) -> CheckResult {
+    // `.with_failure` is the point of this helper, and it was missing.
+    //
+    // The message was passed as `stderr_bytes` and folded into the digest, so
+    // the result carried the reason's LENGTH and its HASH but not the reason.
+    // Every one of this function's callers therefore reported
+    // "failed (no reason captured)" while proving, in its own byte count, that
+    // a reason had existed -- the symptom that made several required checks on
+    // main undiagnosable at once.
+    //
+    // #3734 fixed exactly this for native checks. It survived here because the
+    // external checks route through their own constructors, and nothing
+    // compared them.
     CheckResult::completed(
         id,
         required,
@@ -6605,6 +6617,7 @@ fn failure(id: &str, required: bool, message: &str) -> CheckResult {
         message.len(),
         output_digest(&[], message.as_bytes()),
     )
+    .with_failure(message)
 }
 
 fn relative_path(root: &Path, path: &Path) -> String {
@@ -6923,6 +6936,24 @@ mod tests;
 
 #[cfg(test)]
 mod captured_failure_tests {
+    use super::failure;
+
+    #[test]
+    fn the_shared_failure_constructor_attaches_its_message() {
+        // Used by 84 call sites. It recorded message.len() as stderr_bytes and
+        // digested the text, but never attached it -- so every external check
+        // built this way reported "no reason captured" while its own byte count
+        // proved the reason existed.
+        let out = failure("check_example", true, "skills/x.md: missing TOKEN");
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("skills/x.md: missing TOKEN"),
+            "the reason must survive construction"
+        );
+        assert_eq!(out.stderr_bytes, "skills/x.md: missing TOKEN".len());
+        assert!(out.is_failure());
+    }
+
     use super::{captured_command_failure, captured_failure};
     use crate::validation::results::CheckResult;
 
