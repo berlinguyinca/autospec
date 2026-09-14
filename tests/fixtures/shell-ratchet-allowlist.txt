@@ -1,3 +1,21 @@
+# Deliberate raises (issue #4429): observable assertions and zombie-aware
+# liveness predicates are inherently longer than the silent no-op `! cmd`
+# forms they replace. Each raise below is the fix itself, not rewrite
+# padding: the 116 mid-body negations were collapsed to the one-line
+# `if cmd; then false; fi` form (net-zero lines), and only these five
+# files carry genuine added logic.
+#   ci-wait-poll.sh              +16  kill -0 -> /proc state liveness check
+#   lint-bats-negations.sh       +30  quote-state tracking + find-predicate
+#                                  exclusion (the ratchet's own false
+#                                  positives)
+#   test_run_drain_watchdog.bats +13  two zombie-aware /proc predicates
+#                                  incl. the awk group scan, + the awk exit
+#                                  logic fix
+#   test_verify_deterministic_fallback.bats +3  one zombie-aware /proc
+#                                  predicate
+#   test_github_publishing.bats  +7   rewrite + the over-broad
+#                                  'issue create' assertion narrowed to the
+#                                  specific title + ledger number
 bootstrap.sh 146
 crates/autospec-cli/tests/support/foreground_accountability_gh.sh 44
 crates/autospec-cli/tests/support/sleeping_autonomous_gh.sh 75
@@ -206,7 +224,7 @@ scripts/check-executor-test-cleanup.sh 18
 scripts/check-negative-path-pairs.sh 168
 scripts/ci-status-compare.sh 99
 scripts/ci-wait-cleanup.sh 31
-scripts/ci-wait-poll.sh 56
+scripts/ci-wait-poll.sh 72
 scripts/ci-wait.sh 158
 scripts/claim-guard.sh 656
 scripts/classify-language.sh 488
@@ -284,7 +302,7 @@ scripts/lib/model-supply-probe.sh 271
 scripts/lib/opencode-containment-adapter.sh 49
 scripts/lib/opencode-containment-bwrap.sh 66
 scripts/lib/opencode-usage-probe.sh 51
-scripts/lint-bats-negations.sh 151
+scripts/lint-bats-negations.sh 181
 scripts/lint-cfg-test-branches.sh 369
 scripts/lint-cfg-test-statics.sh 197
 scripts/lint-deferral-refs.sh 154
@@ -821,7 +839,7 @@ tests/autonomous/test_repo_dir_default.bats 102
 tests/autonomous/test_resilience.bats 481
 tests/autonomous/test_review_escape_learning.bats 292
 tests/autonomous/test_run_drain_claim_ttl.bats 5
-tests/autonomous/test_run_drain_watchdog.bats 291
+tests/autonomous/test_run_drain_watchdog.bats 304
 tests/autonomous/test_run_events.bats 48
 tests/autonomous/test_runtime_refresh.bats 90
 tests/autonomous/test_runtime_start_preflight.bats 207
@@ -839,7 +857,7 @@ tests/autonomous/test_usage_observe.bats 182
 tests/autonomous/test_ux_ui_workstream.bats 92
 tests/autonomous/test_value_prioritization.bats 85
 tests/autonomous/test_verify_bridge.bats 304
-tests/autonomous/test_verify_deterministic_fallback.bats 56
+tests/autonomous/test_verify_deterministic_fallback.bats 59
 tests/autonomous/test_waterfall.bats 351
 tests/autonomous/test_waterfall_growth.bats 45
 tests/autonomy-v15-release-freeze.bats 18
@@ -1346,7 +1364,7 @@ tests/unit/test_digital_twin.bats 177
 tests/unit/test_doc_drift_fleet_scope.bats 163
 tests/unit/test_doc_drift_mismatch_action.bats 175
 tests/unit/test_final_quality_gate.bats 59
-tests/unit/test_github_publishing.bats 500
+tests/unit/test_github_publishing.bats 507
 tests/unit/test_harness_detection_block.bats 124
 tests/unit/test_install_implementer_precommit.bats 171
 tests/unit/test_install_listener.bats 86

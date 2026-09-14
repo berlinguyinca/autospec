@@ -120,7 +120,7 @@ _run_block() {
     local rs="$REPO_ROOT/scripts"
     run bash -c "export HOME='${h}'; export AUTOSPEC_SCRIPTS_DIR='${rs}'; export AUTOSPEC_NO_SELF_UPDATE=1; PATH='${sd}:${PATH}'; ${BLOCK}"
     [ "$status" -eq 0 ]
-    ! echo "$output" | grep -q "UNEXPECTED"
+    if echo "$output" | grep -q "UNEXPECTED"; then false; fi
     ! echo "$output" | grep -q "WARN:"
 }
 

@@ -351,7 +351,7 @@ isolate_heartbeat_pass() {
     [[ "$output" == *"claimed_released=0"* ]]
     [ -f "$(HB_DIR_FOR)/1859.json" ]
     grep -q 'in-progress-by-bot' "$LABELS"
-    ! grep -q -- '--add-label auto-implement' "$CALLS"
+    if grep -q -- '--add-label auto-implement' "$CALLS"; then false; fi
     grep -q -- 'pr list' "$CALLS"
 }
 
@@ -365,7 +365,7 @@ isolate_heartbeat_pass() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"claimed_released=0"* ]]
     grep -q 'in-progress-by-bot' "$LABELS"
-    ! grep -q -- '--add-label auto-implement' "$CALLS"
+    if grep -q -- '--add-label auto-implement' "$CALLS"; then false; fi
     grep -q -- 'pr list' "$CALLS"
 }
 

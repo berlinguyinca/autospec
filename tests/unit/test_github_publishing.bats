@@ -457,7 +457,7 @@ JSON
   [ "$status" -eq 0 ]
   grep -q 'issue list --search autospec-local-issue-id: 001-test-add-baseline-testing-evidence' "$TEST_TMPDIR/gh.log"
   grep -q 'issue edit 77' "$TEST_TMPDIR/gh.log"
-  ! grep -q 'issue create' "$TEST_TMPDIR/gh.log"
+  if grep -q 'issue create' "$TEST_TMPDIR/gh.log"; then false; fi
   run jq -r '.issues[] | select(.local_issue_id=="001-test-add-baseline-testing-evidence") | .github_issue_number' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
   [ "$output" = "77" ]
 }
@@ -470,7 +470,14 @@ JSON
   GH_STUB_LOG="$TEST_TMPDIR/gh.log" PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PUBLISH" --repo-root "$TEST_TMPDIR/repo" --repo example/repo --confirm
 
   [ "$status" -eq 0 ]
-  ! grep -q 'issue create' "$TEST_TMPDIR/gh.log"
+  # The exact-title match (issue 1) must be linked to #88, not recreated.
+  # Issue 2 has no matching remote title, so its create call is expected —
+  # assert on the specific title, not on any create at all.
+  if grep -q 'issue create --title test: add baseline testing evidence' "$TEST_TMPDIR/gh.log"; then
+      false
+  fi
+  run jq -r '.issues[] | select(.local_issue_id=="001-test-add-baseline-testing-evidence") | .github_issue_number' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
+  [ "$output" = "88" ]
   run jq -r '.warnings[]?' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.json"
   [[ "$output" == *"exact title fallback"* ]]
   grep -q 'exact title fallback' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.md"
@@ -500,7 +507,7 @@ JSON
 
   [ "$status" -eq 0 ]
   grep -q 'issue view 44' "$TEST_TMPDIR/gh.log"
-  ! grep -q 'issue reopen 44' "$TEST_TMPDIR/gh.log"
+  if grep -q 'issue reopen 44' "$TEST_TMPDIR/gh.log"; then false; fi
   grep -q 'closed; skipped' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.md"
 
   : > "$TEST_TMPDIR/gh.log"

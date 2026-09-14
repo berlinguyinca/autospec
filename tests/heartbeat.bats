@@ -230,7 +230,7 @@ teardown() {
         run bash "$HB_READ" --issue "$issue" --repo testorg/testrepo
         [ "$status" -ne 0 ]
         echo "$output" | grep -q -- '--issue must be a canonical positive integer'
-        ! echo "$output" | grep -q 'outside-secret'
+        if echo "$output" | grep -q 'outside-secret'; then false; fi
     done
 }
 

@@ -269,7 +269,7 @@ teardown() {
       "$SCRIPT" --role "$role" --static-body "$bodyf"
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q "only supported for --role implementer"
-    ! printf '%s\n' "$output" | grep -q "STATIC_BODY_SENTINEL"
+    if printf '%s\n' "$output" | grep -q "STATIC_BODY_SENTINEL"; then false; fi
   done
 }
 

@@ -70,7 +70,7 @@ EOF
 
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"outcome":"ownership_lost"'
-  ! grep -q '^issue$' "$tmp/gh.log"
-  ! grep -q 'PATCH' "$tmp/gh.log"
+  if grep -q '^issue$' "$tmp/gh.log"; then false; fi
+  if grep -q 'PATCH' "$tmp/gh.log"; then false; fi
   rm -rf "$tmp"
 }

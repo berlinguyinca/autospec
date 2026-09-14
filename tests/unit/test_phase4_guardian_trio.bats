@@ -202,7 +202,7 @@ run_pr_size_slice() {
         for size_case in 401 9 4; do
             run_pr_size_slice pre-push "$size_case" "$skill"
             [ "$status" -ne 0 ]
-            ! grep -q . "$TEST_TMPDIR/mutations"
+            if grep -q . "$TEST_TMPDIR/mutations"; then false; fi
         done
     done
 }
@@ -223,10 +223,10 @@ run_pr_size_slice() {
     grep -qxF merge "$TEST_TMPDIR/mutations" || { echo "$output"; return 1; }
 
     MATCH_MODE=missing run_pr_size_slice final-merge pass "$skill"
-    ! grep -q . "$TEST_TMPDIR/mutations"
+    if grep -q . "$TEST_TMPDIR/mutations"; then false; fi
 
     MATCH_MODE=wrong run_pr_size_slice final-merge pass "$skill"
-    ! grep -q . "$TEST_TMPDIR/mutations"
+    if grep -q . "$TEST_TMPDIR/mutations"; then false; fi
     done
 }
 
@@ -236,12 +236,12 @@ run_pr_size_slice() {
     REMOTE_HEAD_OID=remote-head LOCAL_HEAD_OID=stale-head \
         run_pr_size_slice final-merge pass "$skill"
     [ "$status" -ne 0 ]
-    ! grep -q . "$TEST_TMPDIR/mutations"
+    if grep -q . "$TEST_TMPDIR/mutations"; then false; fi
 
     REMOTE_HEAD_OID=remote-head LOCAL_HEAD_OID=remote-head FETCHED_HEAD_OID=stale-head \
         run_pr_size_slice final-merge pass "$skill"
     [ "$status" -ne 0 ]
-    ! grep -q . "$TEST_TMPDIR/mutations"
+    if grep -q . "$TEST_TMPDIR/mutations"; then false; fi
     done
 }
 

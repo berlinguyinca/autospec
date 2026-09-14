@@ -123,7 +123,7 @@ safety_lint() {
     run safety_lint --config "$FIX/invalid-policy.yml" --title "Delete production data" "$FIX/malicious-production-delete.md"
     [ "$status" -eq 2 ]
     echo "$output" | grep -q "could not parse issue safety policy"
-    ! echo "$output" | grep -Eq "SAFETY_(PASS|AMBIGUOUS|BLOCK)"
+    if echo "$output" | grep -Eq "SAFETY_(PASS|AMBIGUOUS|BLOCK)"; then false; fi
     ! echo "$output" | grep -q "production-data-destruction"
 }
 

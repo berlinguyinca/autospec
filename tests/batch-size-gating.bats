@@ -60,8 +60,8 @@ setup() {
     [ -f "$p" ]
     # D2: default must be 1, never the legacy 3.
     grep -q 'AUTOSPEC_BATCH_SIZE:-1' "$p"
-    ! grep -qF 'AUTOSPEC_BATCH_SIZE:-3' "$p"
-    ! grep -qE 'AUTOSPEC_BATCH_SIZE` issues \(default:? 3\)' "$p"
+    if grep -qF 'AUTOSPEC_BATCH_SIZE:-3' "$p"; then false; fi
+    if grep -qE 'AUTOSPEC_BATCH_SIZE` issues \(default:? 3\)' "$p"; then false; fi
   done
 }
 

@@ -58,7 +58,10 @@ EOF
   [ "${status:-0}" -eq 124 ]
   grep -q "stalled after 1s with no output" "$TEST_TMP/drain.out"
   if [ -f "$HOME/omx.pid" ]; then
-    ! kill -0 "$(cat "$HOME/omx.pid")" 2>/dev/null
+    # kill -0 succeeds against an unreaped zombie (#4429): the pid is gone
+    # when it has no /proc entry or its state is Z; a live state fails.
+    omx_state="$(sed 's/^.*) //' "/proc/$(cat "$HOME/omx.pid")/stat" 2>/dev/null | awk '{print $1}')"
+    [ "$omx_state" = "Z" ] || [ -z "$omx_state" ]
   fi
 }
 
@@ -321,14 +324,24 @@ EOF
   grep -q "stalled after 1s with no output" "$TEST_TMP/drain-kill.out"
   [ -f "$HOME/omx.pid" ]
   [ -f "$HOME/term-resistant.pid" ]
-  ! kill -0 "$(cat "$HOME/term-resistant.pid")" 2>/dev/null
-  ! kill -0 -- "-$(cat "$HOME/omx.pid")" 2>/dev/null
+  # kill -0 succeeds against an unreaped zombie (#4429): gone means no /proc
+  # entry or state Z.
+  tr_state="$(sed 's/^.*) //' "/proc/$(cat "$HOME/term-resistant.pid")/stat" 2>/dev/null | awk '{print $1}')"
+  [ "$tr_state" = "Z" ] || [ -z "$tr_state" ]
+  # No live member may remain in the omx process group: kill -0 on a group
+  # succeeds while even one unreaped zombie member lingers, so count
+  # non-zombie members from /proc (final statement — the verdict).
+  awk -v pg="$(cat "$HOME/omx.pid")" '
+      { s = $0; sub(/^.*) /, "", s); split(s, a, " ");
+        if (a[3] == pg && a[1] != "Z") live = 1 }
+      END { exit live ? 1 : 0 }
+  ' /proc/[0-9]*/stat 2>/dev/null
 }
 
 @test "run-drain: delegates tree teardown to the shared process-tree reaper" {
   DRAIN="$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh"
   grep -q 'lib/autospec-process-tree.sh' "$DRAIN"
   grep -q 'autospec_kill_tree "\$child_pid" separate-recursive' "$DRAIN"
-  ! grep -q 'pgrep -P' "$DRAIN"
+  if grep -q 'pgrep -P' "$DRAIN"; then false; fi
   ! grep -q '^kill_tree()' "$DRAIN"
 }

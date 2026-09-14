@@ -60,7 +60,10 @@ EOF
       kill -0 "$desc_pid" 2>/dev/null || break
       sleep 0.5
   done
-  ! kill -0 "$desc_pid" 2>/dev/null
+  # kill -0 succeeds against an unreaped zombie (#4429): gone means no /proc
+  # entry or state Z.
+  desc_state="$(sed 's/^.*) //' "/proc/$desc_pid/stat" 2>/dev/null | awk '{print $1}')"
+  [ "$desc_state" = "Z" ] || [ -z "$desc_state" ]
 
   rm -rf "$TMP"
 }

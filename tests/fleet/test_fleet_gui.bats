@@ -1102,8 +1102,8 @@ EOF
         kill -0 "$GUI_PID" 2>/dev/null || break
     done
 
-    # Assert: process must have exited on its own.
-    ! kill -0 "$GUI_PID" 2>/dev/null
+    # Assert: exited on its own (reap a Z-state child first — kill -0 lies about zombies, #4429).
+    sed 's/^.*) //' "/proc/$GUI_PID/stat" 2>/dev/null | awk '{print $1}' | grep -q Z && wait "$GUI_PID" 2>/dev/null; if kill -0 "$GUI_PID" 2>/dev/null; then false; fi
 
     # Clear GUI_PID — teardown kill is harmless but not needed.
     GUI_PID=""
