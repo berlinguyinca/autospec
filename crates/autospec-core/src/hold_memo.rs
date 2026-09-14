@@ -73,10 +73,42 @@ use std::collections::BTreeSet;
 /// A recorded hold: not just that it happened, but *what it depended on*
 /// (invariant 1). A reason naming files is already most of the way there;
 /// this records the base sha alongside so the pair becomes a cache key.
+/// What a hold record actually records.
+///
+/// The distinction is load-bearing, not cosmetic. A gate that RAN and rejected
+/// a patch has reached a conclusion about that patch, and the conclusion stands
+/// until the patch or its dependencies move. A gate that COULD NOT RUN has
+/// reached no conclusion at all — it is a fact about the host, not the patch —
+/// and a record of it must never keep the patch away from a working gate.
+///
+/// Observed 2026-09-14: the gate's cargo cache filled a quota-limited `$HOME`,
+/// so `cargo` died ~2s in with `Disk quota exceeded (os error 122)` and emitted
+/// no `test result:` line. Twelve patches were held as "baseline test count
+/// undeterminable". Fixing the disk was not enough: every one of them came back
+/// `skipped` on the next pass, because [`re_gate`] saw an unchanged patch on an
+/// unchanged base and reported `StillHeld`. The broken gate's own output was
+/// what kept the patches away from the fixed gate, and the records had to be
+/// deleted by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldKind {
+    /// The gate ran and rejected the patch. The conclusion is about the patch.
+    #[default]
+    Verdict,
+    /// The gate could not run: no verdict was reached about the patch. Always
+    /// re-gated, never "still held".
+    Infrastructure,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HoldRecord {
     /// The issue the hold is about.
     pub issue: u64,
+    /// Whether this records a verdict about the patch, or a gate that could
+    /// not run. Absent in records written before this field existed, which
+    /// deserialize as [`HoldKind::Verdict`] — the previous behaviour exactly.
+    #[serde(default)]
+    pub kind: HoldKind,
     /// The patch input key (content hash or mtime) the hold was derived
     /// against.
     pub patch_key: String,
@@ -93,6 +125,27 @@ pub struct HoldRecord {
 }
 
 impl HoldRecord {
+    /// Construct a hold for a gate that COULD NOT RUN.
+    ///
+    /// The reason should carry the underlying failure verbatim — the errno, the
+    /// tool's own stderr — because that is the single most actionable fact and
+    /// it is exactly what gets discarded when an infrastructure fault is
+    /// re-described in domain terms ("baseline test count undeterminable" named
+    /// a concept; `Disk quota exceeded (os error 122)` named the fix).
+    ///
+    /// `depends_on` is deliberately empty: this hold depends on nothing about
+    /// the patch, and [`re_gate`] always re-gates it.
+    pub fn infrastructure(
+        issue: u64,
+        patch_key: impl Into<String>,
+        base_sha: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Option<Self> {
+        let mut rec = Self::new(issue, patch_key, base_sha, Vec::new(), reason)?;
+        rec.kind = HoldKind::Infrastructure;
+        Some(rec)
+    }
+
     /// Construct a hold record.
     ///
     /// `None` when the patch key or the base sha is empty or whitespace: a
@@ -118,6 +171,7 @@ impl HoldRecord {
             .filter(|p| !p.is_empty())
             .collect();
         Some(Self {
+            kind: HoldKind::Verdict,
             issue,
             patch_key,
             base_sha,
@@ -159,6 +213,16 @@ impl ReGateDecision {
     pub fn line(&self) -> String {
         match self {
             Self::StillHeld { since_sha } => format!("still held (unchanged since {since_sha})"),
+            Self::ReGate {
+                patch_changed: false,
+                files_changed,
+            } if files_changed.is_empty() => {
+                // The infrastructure case: nothing about the patch changed, and
+                // it is re-gated anyway because the previous hold was never a
+                // verdict. Say so, or the line reads as an unexplained repeat.
+                "re-gate: the previous hold recorded a gate that could not run, not a verdict"
+                    .to_string()
+            }
             Self::ReGate {
                 patch_changed,
                 files_changed,
@@ -204,6 +268,17 @@ pub fn re_gate(
     current_patch_key: &str,
     changed_files: &[String],
 ) -> ReGateDecision {
+    // A gate that could not run reached no conclusion about this patch, so
+    // there is nothing for "still held" to stand on. Re-gate unconditionally:
+    // otherwise the record survives the fault that produced it and keeps the
+    // patch away from a gate that now works, which is what stranded twelve
+    // patches until the records were deleted by hand.
+    if record.kind == HoldKind::Infrastructure {
+        return ReGateDecision::ReGate {
+            patch_changed: record.patch_key != current_patch_key,
+            files_changed: Vec::new(),
+        };
+    }
     let patch_changed = record.patch_key != current_patch_key;
     let changed: BTreeSet<&str> = changed_files.iter().map(String::as_str).collect();
     let files_changed: Vec<String> = if record.depends_on.is_empty() {
@@ -382,5 +457,74 @@ pub fn format_duration(secs: u64) -> String {
         (h, 0, 0) => format!("{h}h"),
         (h, m, 0) => format!("{h}h{m}m"),
         (h, m, s) => format!("{h}h{m}m{s}s"),
+    }
+}
+
+#[cfg(test)]
+mod infrastructure_hold_tests {
+    use super::{re_gate, HoldKind, HoldRecord};
+
+    /// The failure this exists to prevent: the gate could not run, the patch
+    /// did not change, the base did not change — and under the old rule the
+    /// record reported "still held", so the patch was skipped by the very gate
+    /// that had since been fixed. Twelve patches were stranded that way and had
+    /// to be deleted from the ledger by hand.
+    #[test]
+    fn an_infrastructure_hold_is_never_still_held() {
+        let rec = HoldRecord::infrastructure(
+            4582,
+            "key-1",
+            "abc1234",
+            "the test stage produced no result line",
+        )
+        .expect("constructed");
+        let d = re_gate(&rec, "key-1", &[]);
+        assert!(
+            !d.is_still_held(),
+            "a gate that could not run reached no verdict, so nothing can still hold: {d:?}"
+        );
+        assert!(
+            d.line().contains("could not run"),
+            "the line must say why it is re-gated without the patch changing: {}",
+            d.line()
+        );
+    }
+
+    /// A real verdict keeps the existing behaviour exactly: unchanged patch on
+    /// an unchanged base still holds, so this change cannot cause the pass to
+    /// re-run work it already concluded.
+    #[test]
+    fn a_verdict_hold_still_holds_when_nothing_moved() {
+        let rec = HoldRecord::new(
+            4015,
+            "key-1",
+            "abc1234",
+            Vec::new(),
+            "conflict: shape unknown",
+        )
+        .expect("constructed");
+        assert_eq!(rec.kind, HoldKind::Verdict);
+        assert!(re_gate(&rec, "key-1", &[]).is_still_held());
+    }
+
+    /// Records written before the field existed must keep their old meaning,
+    /// or this change silently re-gates the entire existing ledger.
+    #[test]
+    fn a_record_without_a_kind_deserialises_as_a_verdict() {
+        let old = r#"{"issue":4015,"patch_key":"k","base_sha":"abc1234","depends_on":[],"reason":"conflict"}"#;
+        let rec: HoldRecord = serde_json::from_str(old).expect("old records must still parse");
+        assert_eq!(rec.kind, HoldKind::Verdict);
+        assert!(re_gate(&rec, "k", &[]).is_still_held());
+    }
+
+    /// The kind survives a write/read round trip, or the distinction is lost
+    /// the moment the ledger is persisted.
+    #[test]
+    fn the_kind_round_trips_through_the_ledger() {
+        let rec = HoldRecord::infrastructure(1, "k", "s", "disk full").expect("constructed");
+        let back: HoldRecord =
+            serde_json::from_str(&serde_json::to_string(&rec).expect("ser")).expect("de");
+        assert_eq!(back.kind, HoldKind::Infrastructure);
+        assert!(!re_gate(&back, "k", &[]).is_still_held());
     }
 }
