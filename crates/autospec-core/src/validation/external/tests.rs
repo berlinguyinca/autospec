@@ -267,3 +267,126 @@ fn block_expansion_success_carries_no_failure() {
     assert!(result.failure.is_none());
     assert!(!result.is_failure());
 }
+
+#[cfg(test)]
+mod captured_failure_tests {
+    use super::*;
+    use crate::validation::results::CheckResult;
+
+    fn base() -> CheckResult {
+        CheckResult::completed("check_example", true, 1, 5, 1, 0, 0, "digest")
+    }
+
+    #[test]
+    fn the_shared_failure_constructor_attaches_its_message() {
+        // Used by 84 call sites. It recorded message.len() as stderr_bytes and
+        // digested the text, but never attached it -- so every external check
+        // built this way reported "no reason captured" while its own byte count
+        // proved the reason existed.
+        let out = failure("check_example", true, "skills/x.md: missing TOKEN");
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("skills/x.md: missing TOKEN"),
+            "the reason must survive construction"
+        );
+        assert_eq!(out.stderr_bytes, "skills/x.md: missing TOKEN".len());
+        assert!(out.is_failure());
+    }
+
+    #[test]
+    fn a_message_is_kept_not_merely_counted() {
+        // The old helper added message.len() to stderr_bytes and dropped the
+        // text, so the byte count proved a reason had existed while the reason
+        // itself was gone.
+        let out =
+            captured_check_failure(base(), b"", Some("bundler: the prefix is still injected"));
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("bundler: the prefix is still injected")
+        );
+        assert!(out.stderr_bytes > 0, "the count is still recorded");
+    }
+
+    #[test]
+    fn a_failing_command_reports_the_output_it_produced() {
+        let out = captured_check_failure(base(), b"not ok 3 the thing diverged\n", None);
+        let reason = out.failure.expect("a failing command must carry a reason");
+        assert!(reason.contains("not ok 3 the thing diverged"), "{reason}");
+    }
+
+    #[test]
+    fn a_huge_output_is_bounded_and_says_so() {
+        // check_block_expansion produced 2.8 MB. Printing it is useless and
+        // dropping it is worse; the edges name the cause and the count tells
+        // the reader what was elided.
+        let noisy = vec![b'x'; 3_000_000];
+        let out = captured_check_failure(base(), &noisy, None);
+        let reason = out.failure.expect("bounded, not dropped");
+        assert!(
+            reason.contains("3000000 bytes"),
+            "{}",
+            &reason[..80.min(reason.len())]
+        );
+        assert!(reason.len() < 4_000, "reason is {} bytes", reason.len());
+    }
+
+    #[test]
+    fn a_silent_failure_says_it_was_silent() {
+        // Distinguishable from "the runner discarded it", which is the whole
+        // point: these need different fixes.
+        let out = captured_check_failure(base(), b"   \n  ", None);
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("the command failed and produced no output")
+        );
+    }
+
+    #[test]
+    fn a_childs_stderr_report_survives_the_runner() {
+        // The observed shape (#4632): 0 bytes of stdout, 106 of stderr. The
+        // command layer already bound that stderr into result.failure; the
+        // runner must carry it through, not overwrite it with "produced no
+        // output" -- a claim the stderr byte count refutes.
+        let mut result = CheckResult::completed("check_example", true, 1, 5, 1, 0, 106, "digest");
+        result.failure = Some("bundler: AUTOSPEC_REPO_ROOT is not a repository".to_string());
+        let out = captured_check_failure(result, b"", None);
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("bundler: AUTOSPEC_REPO_ROOT is not a repository")
+        );
+    }
+
+    #[test]
+    fn a_mismatched_member_carries_its_expanded_output_not_only_its_size() {
+        // check_block_expansion produced 2.8 MB of expander output and reported
+        // nothing of it. The mismatch names the member; the bounded edges of
+        // what that member expanded to are the evidence a reader can act on.
+        let root = std::env::temp_dir().join(format!(
+            "autospec-block-expansion-mismatch-{}",
+            std::process::id()
+        ));
+        let scripts = root.join("scripts");
+        let skill = root.join("skills/demo");
+        let goldens = root.join("tests/fixtures/skill-goldens");
+        fs::create_dir_all(&skill).expect("create skill fixture");
+        fs::create_dir_all(&scripts).expect("create scripts fixture");
+        fs::create_dir_all(&goldens).expect("create golden fixture");
+        fs::write(
+            scripts.join("expand-skill-blocks.sh"),
+            "#!/bin/sh\ncat \"$1\"\n",
+        )
+        .expect("write expander fixture");
+        fs::write(skill.join("SKILL.md"), "# demo skill\nbody line\n")
+            .expect("write skill fixture");
+        fs::write(goldens.join("demo.SKILL.md.sha256"), "deadbeef\n")
+            .expect("write a wrong golden");
+
+        let result = run_block_expansion("check", true, &root);
+        assert!(result.is_failure());
+        let reason = result.failure.expect("the mismatch must carry a reason");
+        assert!(reason.contains("sha256 mismatch"), "{reason}");
+        assert!(reason.contains("# demo skill"), "{reason}");
+        assert!(reason.contains("bytes"), "{reason}");
+        fs::remove_dir_all(root).expect("remove block expansion fixture");
+    }
+}
