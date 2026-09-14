@@ -6,7 +6,7 @@ use autospec_core::conversion_pass::PassOutcome;
 use autospec_core::unfed_pass::PassCounters;
 
 use super::git::{run_git, run_git_capture};
-use super::{ApplyResult, ConvertPlan, ConversionBuffer, apply_one, infer_repo, report_outcome};
+use super::{ApplyResult, ConvertPlan, ConversionBuffer, apply_one, gate_source, infer_repo, report_outcome};
 use super::language;
 use super::progress;
 use super::sizing;
@@ -20,6 +20,8 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         ));
     }
     let repo: String = plan.opts.repo.clone().or_else(infer_repo).unwrap_or_default();
+
+    let gate_set = gate_source::resolve_gate(plan.opts.gate_registry.as_deref(), &repo)?;
 
     // Fetch the trunk so the pass branches off current origin/<base>.
     let base_ref = format!("origin/{}", plan.opts.base);
@@ -69,7 +71,7 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             None => continue,
         };
         let item_started = std::time::Instant::now();
-        match apply_one(plan, &repo, &base_ref, &base_sha, patch) {
+        match apply_one(plan, &repo, &base_ref, &base_sha, patch, &gate_set) {
             ApplyResult::Converted => {
                 counters.converted += 1;
                 progress::converted(patch.issue, &patch.patch_key);

@@ -194,7 +194,8 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
                 opts.deadline = Some(
                     raw.parse::<u64>().map_err(|_| {
                         CommandFailure::diagnostic(format!(
-                            "--deadline must be a non-negative integer number of seconds, got {raw:?}\n{USAGE}"
+                            "--deadline must be a non-negative integer number of seconds, got {raw:?}\n{}",
+                            usage::USAGE
                         ))
                     })?,
                 );
@@ -1209,80 +1210,6 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     gate_source::finish_with_coverage(coverage.as_ref())
 }
 
-/// The real conversion of each selected patch (steps 3-6). Side effects are
-/// confined to the pass's own branches/PRs and the HELD ledger.
-fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
-    if plan.opts.repo.is_none() {
-        return Err(CommandFailure::diagnostic(
-            "autospec convert --apply requires --repo OWNER/NAME (or a gh-inferable repo) to \
-             check PR liveness and open PRs",
-        ));
-    }
-    let repo: String = plan.opts.repo.clone().or_else(infer_repo).unwrap_or_default();
-
-    let gate_set = gate_source::resolve_gate(plan.opts.gate_registry.as_deref(), &repo)?;
-
-    // Fetch the trunk so the pass branches off current origin/<base>.
-    let base_ref = format!("origin/{}", plan.opts.base);
-    run_git(&["fetch", "origin"])?;
-
-    let selection = plan.selection();
-    let base_sha = run_git_capture(&["rev-parse", "HEAD"])?;
-
-    let mut counters = PassCounters {
-        examined: plan.candidates.len(),
-        converted: 0,
-        held: 0,
-        skipped: selection.disqualified.len(),
-    };
-    // Patches archived this run (superseded by the base): they leave the
-    // buffer entirely — no patch on disk, so no queue entry held.
-    let mut archived = 0;
-
-    language::archive_held(plan, &selection.language_held, &mut counters, &mut archived);
-    for c in &selection.fresh {
-        let patch = match plan.examined.iter().find(|p| p.issue == c.issue) {
-            Some(p) => p,
-            None => continue,
-        };
-        match apply_one(plan, &repo, &base_ref, &base_sha, patch, &gate_set) {
-            ApplyResult::Converted => {
-                counters.converted += 1;
-                progress::converted(patch.issue, &patch.patch_key);
-            }
-            ApplyResult::Held => counters.held += 1,
-            // Not converted and not held: the pass could not tell whether this
-            // patch is good, so it says so and leaves the patch alone.
-            ApplyResult::BaseUnverifiable => counters.skipped += 1,
-            ApplyResult::Archived => {
-                counters.skipped += 1;
-                archived += 1;
-            }
-        }
-    }
-
-    let outcome = PassOutcome::Examined(counters);
-    report_outcome(&outcome);
-
-    // The buffer after the run, not just the run itself (#4558 ask 3):
-    // converted patches leave the waiting count (their PR is live) but
-    // stay on disk and still hold their queue entry; archived patches
-    // leave both. A report of only what converted hides how much is still
-    // waiting.
-    let initial = plan.buffer();
-    let buffer = ConversionBuffer {
-        waiting: initial.waiting.saturating_sub(counters.converted).saturating_sub(archived),
-        queue_entries_blocked: initial.queue_entries_blocked.saturating_sub(archived),
-    };
-    println!("{}", buffer.line(plan.opts.free_slots));
-    if let Some(alarm) = buffer.alarm(plan.opts.free_slots) {
-        println!("{alarm}");
-    }
-    // A run reaching only part of its pipeline glob is not a success (#4556):
-    // the counters above are true; the exit says it was not whole.
-    let coverage = gate_source::plan_coverage(&plan.llm_root, plan.opts.shared_llm_root);
-    gate_source::finish_with_coverage(coverage.as_ref())
-}
 
 mod apply;
 mod conflict;

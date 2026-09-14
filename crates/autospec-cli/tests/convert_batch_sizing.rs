@@ -129,10 +129,24 @@ fn build_fixture(work: &Path, slow_issue: u64) -> (PathBuf, u64) {
     let origin = work.join("origin.git");
     let llm_root = work.join("llm");
     let lib_blob = init_fixture_repo(&repo, &origin);
+    record_gate(&repo);
     write_patch(&llm_root, slow_issue, &slow_patch(&lib_blob));
     write_patch(&llm_root, slow_issue + 1, &second_patch(&lib_blob));
     let _ = install_fake_gh(work);
     (repo, slow_issue)
+}
+
+/// Record the gate the pass will run: without a recorded gate the pass
+/// refuses to judge at all (#4556), so a fixture that exercises the gate
+/// records it the way a real checkout carries its registry file.
+fn record_gate(repo: &Path) {
+    let data = repo.join("data");
+    fs::create_dir_all(&data).expect("data dir");
+    fs::write(
+        data.join("convert-gate-registry.json"),
+        r#"{"schema":1,"repos":{"test/fake":{"base_ref":"main","stages":[["fmt","--check"],["build","@scope"],["clippy","--all-targets","@scope"],["test","--no-fail-fast","@scope"]]}}}"#,
+    )
+    .expect("registry");
 }
 
 /// Run the apply pass with the given extra args and env, capturing stdout.
