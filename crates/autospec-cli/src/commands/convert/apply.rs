@@ -39,12 +39,26 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         held: 0,
         skipped: selection.disqualified.len(),
         deferred: 0,
+        delivered: 0,
     };
     // Patches archived this run (superseded by the base): they leave the
     // buffer entirely — no patch on disk, so no queue entry held.
     let mut archived = 0;
 
     language::archive_held(plan, &selection.language_held, &mut counters, &mut archived);
+
+    // The delivered residue (#4501): reported and archived, never gated —
+    // archiving releases the queue entry the patch held hostage.
+    for c in &selection.delivered {
+        let Some(patch) = plan.examined.iter().find(|p| p.issue == c.issue) else {
+            continue;
+        };
+        progress::delivered(c.issue);
+        if super::delivered::archive_patch(&patch.path) {
+            archived += 1;
+        }
+        counters.delivered += 1;
+    }
     // The pass sizes its batch to its own deadline (#4607): it stops
     // *starting* new patches when the remaining time is less than what a
     // patch has been observed to cost in this pass, and finishes the one in
@@ -106,6 +120,10 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
                 counters.skipped += 1;
                 archived += 1;
                 progress::finished(patch.issue, "archived");
+            }
+            ApplyResult::Delivered => {
+                counters.delivered += 1;
+                progress::finished(patch.issue, "delivered");
             }
         }
         last_cost = Some(item_started.elapsed());

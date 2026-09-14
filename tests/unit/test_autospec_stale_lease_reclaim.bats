@@ -4,7 +4,12 @@
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    AUTOSPEC="$REPO_ROOT/target/debug/autospec"
+    # Honour CARGO_TARGET_DIR. `cargo build` writes into it, so hardcoding
+    # $REPO_ROOT/target builds one binary and executes another -- observed
+    # running a 2.5h-old executable while the fresh one sat in the real
+    # target dir. Building unconditionally (#4652) does not help if the
+    # build output and the run path disagree.
+    AUTOSPEC="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/debug/autospec"
     TEST_TMP="$(mktemp -d)"
     LABELS="$TEST_TMP/labels.txt"
     COMMENTS="$TEST_TMP/comments.json"

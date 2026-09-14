@@ -71,7 +71,7 @@
 //! (archival, never deletion), removes the issue's HELD record, and
 //! releases the queue entry the dispatch guard holds.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -94,7 +94,7 @@ mod language;
 mod progress;
 mod sizing;
 
-use git::{run_capture_in, run_git_capture, run_git_in, teardown_worktree};
+use git::{run_capture_in, run_git, run_git_capture, run_git_in, teardown_worktree};
 
 /// The schema emitted by `autospec convert --json`.
 pub const CONVERT_PLAN_SCHEMA: &str = "autospec.convert-plan.v1";
@@ -658,26 +658,18 @@ fn attempt_state(
 }
 
 /// The remote half of branch liveness for a whole pass, fetched once
-/// (issue #4587).
+/// (issue #4587). Its order matters and the index reproduces
+/// `attempt_liveness` exactly:
 ///
-/// `branch_liveness` asks the remote per branch. Its order matters and this
-/// index reproduces it exactly:
-///
-/// 1. a local worktree holding the branch makes the attempt live;
-/// 2. otherwise a branch absent from the remote is `NoBranch` — answered
-///    without asking about pull requests at all, which is why a backlog of
-///    mostly-absent branches showed as a long run of `ls-remote` calls;
+/// 1. a local worktree holding the branch is checked first;
+/// 2. otherwise a branch absent from the remote is `NoBranch` (asked about
+///    pull requests never);
 /// 3. otherwise an open or merged pull request makes it live;
 /// 4. otherwise the attempt is abandoned, and abandoned is not live.
 ///
 /// Steps 2 and 3 are set-membership tests over answers the remote gives in one
-/// call each, and neither changes during a pass. Step 1 stays per-branch
-/// because it is local and cheap — moving it here would trade a correct check
-/// for no saving.
-///
-/// Over a 563-patch backlog this is two round-trips instead of up to three per
-/// candidate; a scheduled pass previously spent its whole period in selection
-/// and never reached a gate.
+/// call each; over a 563-patch backlog this is two round-trips instead of up
+/// to three per candidate.
 #[derive(Debug, Default)]
 struct AttemptIndex {
     /// Branch names present on the remote, from one prefixed `ls-remote`.
@@ -812,18 +804,14 @@ pub(crate) fn patch_files(patch: &str) -> Vec<String> {
         .collect()
 }
 
-/// The conversion buffer (issue #4558 ask 3): the finished patches the
-/// fleet has produced and has not yet turned into PRs, and the queue
-/// entries they hold. A pass that converts 1 of 559 and reports "1
-/// converted" is technically accurate and operationally useless — the
-/// numbers that matter are these two.
+/// The conversion buffer (issue #4558 ask 3): the finished patches not yet
+/// turned into PRs, and the queue entries they hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ConversionBuffer {
-    /// Finished patches on disk with no live PR: awaiting conversion.
+    /// Finished patches on disk with no live attempt: awaiting conversion.
     waiting: usize,
-    /// Queue entries the dispatch guard holds: one per patch on disk. The
-    /// guard's condition is the patch's presence, so every enumerated
-    /// patch blocks its queue entry, live PR or not.
+    /// Queue entries blocked: one per patch on disk (presence is the
+    /// dispatch guard's condition, live attempt or not).
     queue_entries_blocked: usize,
 }
 
@@ -860,10 +848,8 @@ impl ConversionBuffer {
     }
 }
 
-/// The buffer a set of candidates describes: waiting is the patches with
-/// no live attempt (fresh, interrupted, held — a bare branch does not own
-/// the queue entry), blocked is every patch on disk — the dispatch
-/// guard's condition is presence, not attempt liveness.
+/// The buffer a set of candidates describes: waiting = no live attempt
+/// (a bare branch does not own the entry), blocked = every patch on disk.
 fn buffer_from_candidates(candidates: &[PatchCandidate]) -> ConversionBuffer {
     ConversionBuffer {
         waiting: candidates
@@ -931,6 +917,14 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
         );
     }
 
+    // The already-delivered residue (#4501): reported, never offered or gated.
+    let _ = run_git(&["fetch", "origin"]);
+    let patches: Vec<_> = examined.iter().map(|p| (p.issue, p.path.clone())).collect();
+    let delivered_issues: BTreeSet<u64> = repo
+        .as_ref()
+        .map(|_| delivered::detect_delivered(&base_ref, &patches))
+        .unwrap_or_default();
+
     // The remote half of liveness, fetched once for the pass (issue #4587).
     // `None` means a fetch failed and the per-branch path is used, so
     // correctness never depends on the batch succeeding.
@@ -965,6 +959,7 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
             patch_key: patch.patch_key.clone(),
             attempt,
             held_recorded,
+            delivered: delivered_issues.contains(&patch.issue),
             language: language::candidate_language(patch),
         });
     }
@@ -1163,6 +1158,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         };
         let fresh: Vec<Value> = selection.fresh.iter().map(to_value).collect();
         let interrupted: Vec<Value> = selection.interrupted.iter().map(to_value).collect();
+        let delivered: Vec<Value> = selection.delivered.iter().map(to_value).collect();
         let value = json!({
             "schema": CONVERT_PLAN_SCHEMA,
             "llm_root": plan.llm_root.display().to_string(),
@@ -1171,6 +1167,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             "examined": plan.candidates.len(),
             "fresh": fresh,
             "interrupted": interrupted,
+            "delivered": delivered,
             "disqualified": disqualified,
             "language_held": language_held,
             "buffer": json!({
@@ -1205,6 +1202,11 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             patch_key = c.patch_key
         ));
     }
+    // The delivered residue, named (#4501): the work is in the base; the
+    // patch is what the backlog must stop counting as pending.
+    for c in &selection.delivered {
+        progress::delivered(c.issue);
+    }
     for (c, reason) in &selection.disqualified {
         progress::report_line(&format!(
             "  SKIP  #{issue} ({reason}) {patch_key}",
@@ -1215,9 +1217,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     }
     language::render_holds(plan, &selection.language_held);
     println!("{}", plan.outcome.line("convert", "autospec convert", "enumerate $LLM"));
-    // The buffer, on every run — including an idle one: the line that
-    // makes a silent successful run distinguishable from a broken one
-    // (#4558).
+    // The buffer, on every run including an idle one (#4558).
     println!("{}", buffer.line(plan.opts.free_slots));
     if let Some(alarm) = buffer.alarm(plan.opts.free_slots) {
         println!("{alarm}");
@@ -1227,6 +1227,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
 
 mod apply;
 mod conflict;
+mod delivered;
 mod gate;
 
 use gate::{
@@ -1246,6 +1247,8 @@ enum ApplyResult {
     /// No HELD line is written: the patch is untouched and is re-offered on the
     /// next pass, which will verify it against a green base.
     BaseUnverifiable,
+    /// The patch's changes are already in the base: delivered (#4501).
+    Delivered,
 }
 
 fn apply_one(
@@ -1339,18 +1342,16 @@ fn apply_one(
     let result = match lifecycle {
         ApplyLifecycle::Superseded => {
             // Stale: main moved past it. Archive, never discard.
-            let _ = fs::create_dir_all(patch.path.parent().unwrap_or(Path::new(".")).join("superseded"));
-            let archive = autospec_core::stored_output::superseded_archive_path(
-                patch.path.parent().unwrap_or(Path::new(".")),
-                patch.path.file_name().unwrap_or_default().to_str().unwrap_or_default(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
-            );
-            let _ = fs::rename(&patch.path, &archive);
+            delivered::archive_patch(&patch.path);
             teardown_worktree(&worktree);
             ApplyResult::Archived
+        }
+        ApplyLifecycle::AlreadyDelivered => {
+            // The changes are in the base: delivered, never gate it (#4501).
+            delivered::archive_patch(&patch.path);
+            progress::delivered(patch.issue);
+            teardown_worktree(&worktree);
+            ApplyResult::Delivered
         }
         ApplyLifecycle::Conflict => {
             // Defensively unreachable: the resolution pass above either
@@ -1424,14 +1425,16 @@ enum ApplyLifecycle {
     Applied,
     Conflict,
     Superseded,
+    /// The patch's changes are already in the base: delivered (#4501).
+    AlreadyDelivered,
 }
 
 fn classify_apply(output: &str, rc: Option<i32>) -> ApplyLifecycle {
     let lower = output.to_ascii_lowercase();
-    if lower.contains("patch does not apply")
-        || lower.contains("already applied")
-        || lower.contains("no diff")
-    {
+    if lower.contains("already applied") {
+        return ApplyLifecycle::AlreadyDelivered;
+    }
+    if lower.contains("patch does not apply") || lower.contains("no diff") {
         return ApplyLifecycle::Superseded;
     }
     if rc == Some(0) {
@@ -1626,14 +1629,7 @@ fn open_pr(
     // An auto-resolution a human cannot see is an auto-resolution a human
     // cannot review: the body names every conflict the pass resolved itself
     // (issue #4560, guardrail 2).
-    let body = format!(
-        "Converted from the agent patch for issue #{}.\n\nGate scope: {} \
-         (derived from the patch's touched crates).\n\nSource spec: n/a \
-         (patch-to-PR conversion pass).{}",
-        patch.issue,
-        scope.join(" "),
-        conflict::pr_section(resolutions)
-    );
+    let body = delivered::pr_body(patch.issue, scope, resolutions);
     let pr_title = format!("auto-implement: issue #{}", patch.issue);
     let opened = Command::new("gh")
         .args([
@@ -1779,6 +1775,7 @@ mod tests {
         assert!(unfed.message.contains("no issues given"), "{}", unfed.message);
         let idle = PassOutcome::Examined(PassCounters {
             examined: 0,
+            delivered: 0,
             converted: 0,
             held: 0,
             skipped: 0,
@@ -2049,6 +2046,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             patch_key: format!("patch-{issue}"),
             attempt,
             held_recorded: held,
+            delivered: false,
             language: autospec_core::patch_language::PatchLanguage::default(),
         }
     }
@@ -2287,6 +2285,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             held: 2,
             skipped: 1,
             deferred: 4,
+    delivered: 0,
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(line.contains("examined"), "the line still carries the counts");
@@ -2307,6 +2306,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             held: 0,
             skipped: 0,
             deferred: 0,
+    delivered: 0,
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(

@@ -56,11 +56,82 @@ impl Default for QueueConfig {
     }
 }
 
-/// Counters from one [`run_queue`] pass.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Counters and diagnostics from one [`run_queue`] pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueueOutcome {
     pub completed: u64,
     pub skipped: u64,
+    /// What the pass wanted to tell an operator. See [`QueueNotice`].
+    ///
+    /// `Copy` was dropped from this type to carry them. Nothing copied it.
+    pub notices: Vec<QueueNotice>,
+}
+
+/// A diagnostic the queue produced while running.
+///
+/// These two cases were `eprintln!` calls. A library that writes to the
+/// process's stderr decides for its caller where operational detail goes, and
+/// cannot be asserted on without capturing a global.
+///
+/// `tracing` was the other candidate and was rejected deliberately: nothing in
+/// this binary installs a subscriber, so every one of these messages would be
+/// dropped leaving no sign it had existed. That is the defect recorded in
+/// #4629 -- a silent fallback turning a missing input into an expensive wrong
+/// answer -- and swapping one disappearing output for another would not have
+/// fixed it, only moved it somewhere harder to notice.
+///
+/// Returning them keeps the text, makes it testable without globals, and
+/// leaves the choice of where it goes to the caller, which is the only layer
+/// that knows whether anyone is reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueNotice {
+    /// The job's repository is not in the allowlist, so its session stays
+    /// unenriched. Not an error: the allowlist is doing its job.
+    RepoNotAllowed {
+        job_id: String,
+        repo: Option<String>,
+        session_id: String,
+    },
+    /// An enricher attempt failed. `retryable` distinguishes a job that will be
+    /// picked up again from one that has exhausted `max_attempts`.
+    AttemptFailed {
+        job_id: String,
+        attempt: u64,
+        max_attempts: u64,
+        status: &'static str,
+        retryable: bool,
+        error: String,
+    },
+}
+
+impl std::fmt::Display for QueueNotice {
+    /// Reproduces the text the `eprintln!` calls emitted, so an operator
+    /// reading a log sees no change.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RepoNotAllowed {
+                job_id,
+                repo,
+                session_id,
+            } => write!(
+                f,
+                "insights.enrich: job {job_id} skipped: repo {repo:?} is not in the allowlist; \
+                 session {session_id} stays unenriched"
+            ),
+            Self::AttemptFailed {
+                job_id,
+                attempt,
+                max_attempts,
+                status,
+                retryable,
+                error,
+            } => write!(
+                f,
+                "insights.enrich: job {job_id} attempt {attempt}/{max_attempts} {status} ({}): {error}",
+                if *retryable { "retryable" } else { "giving up" }
+            ),
+        }
+    }
 }
 
 fn map_error(operation: &str, error: sqlx::Error) -> AutospecError {
@@ -252,11 +323,11 @@ pub async fn run_queue(
             return Ok(outcome);
         };
         if !repo_allowed(job.repo.as_deref(), &cfg.allowed_repos) {
-            eprintln!(
-                "insights.enrich: job {} skipped: repo {:?} is not in the allowlist; \
-                 session {} stays unenriched",
-                job.id, job.repo, job.session_id
-            );
+            outcome.notices.push(QueueNotice::RepoNotAllowed {
+                job_id: job.id.clone(),
+                repo: job.repo.clone(),
+                session_id: job.session_id.clone(),
+            });
             update_job(pool, &job.id, JobStatus::Skipped, job.cursor, job.attempts).await?;
             outcome.skipped += 1;
             continue;
@@ -289,18 +360,14 @@ pub async fn run_queue(
                         JobStatus::Pending
                     };
                     update_job(pool, &job.id, status, cursor, attempts).await?;
-                    eprintln!(
-                        "insights.enrich: job {} attempt {}/{} {} ({}): {error}",
-                        job.id,
-                        attempts,
-                        cfg.max_attempts,
-                        status.as_str(),
-                        if status == JobStatus::Pending {
-                            "retryable"
-                        } else {
-                            "giving up"
-                        }
-                    );
+                    outcome.notices.push(QueueNotice::AttemptFailed {
+                        job_id: job.id.clone(),
+                        attempt: attempts,
+                        max_attempts: cfg.max_attempts,
+                        status: status.as_str(),
+                        retryable: status == JobStatus::Pending,
+                        error: error.to_string(),
+                    });
                     failed = true;
                 }
             }
@@ -504,13 +571,26 @@ mod tests {
             ..Default::default()
         };
         let outcome = run_queue(&pool, &enricher, &cfg).await.unwrap();
-        assert_eq!(
-            outcome,
-            QueueOutcome {
-                completed: 0,
-                skipped: 1
+        assert_eq!(outcome.completed, 0);
+        assert_eq!(outcome.skipped, 1);
+        // The reason the session was skipped must reach the caller. It used to
+        // go to stderr, where no test could see it and no subscriber was
+        // listening.
+        match outcome.notices.as_slice() {
+            [QueueNotice::RepoNotAllowed {
+                job_id,
+                repo,
+                session_id,
+            }] => {
+                assert_eq!(job_id, &id);
+                assert_eq!(repo.as_deref(), Some("sensitive/core"));
+                assert!(
+                    !session_id.is_empty(),
+                    "the notice must name the session that stays unenriched"
+                );
             }
-        );
+            other => panic!("expected exactly one RepoNotAllowed notice, got {other:?}"),
+        }
         assert!(
             enricher.batches.lock().unwrap().is_empty(),
             "a denied session must never be dispatched"

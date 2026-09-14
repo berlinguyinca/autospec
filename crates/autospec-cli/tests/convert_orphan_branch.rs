@@ -274,3 +274,109 @@ fn an_apply_pass_redoes_the_orphan_and_names_start_and_done() {
     );
     let _ = fs::remove_dir_all(&work);
 }
+
+/// #4501: a patch whose changes are already in the base is residue.
+///
+/// The incident: a PR that merged the work left the issue open (the number
+/// was in the title, not a closing keyword in the body). Every pass then
+/// re-fetched the patch, applied it, and spent a full gate on "no change."
+/// The pass must detect the residue with a read-only reverse-apply check,
+/// report it as `delivered` (never offered, never gated), and — in apply
+/// mode — archive it so the backlog stops counting it as pending.
+#[test]
+fn a_patch_already_in_the_base_is_delivered_not_fresh() {
+    let work = std::env::temp_dir().join(format!("autospec-conv-delivered-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
+    let repo = work.join("repo");
+    let origin = work.join("origin.git");
+    let llm_root = work.join("llm");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&llm_root).unwrap();
+
+    // The base: one function.
+    fs::create_dir_all(repo.join("src")).unwrap();
+    // Record the gate the pass will run (#4556); the delivered path archives
+    // without gating, but the pass resolves the gate source first.
+    let data = repo.join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(
+        data.join("convert-gate-registry.json"),
+        r#"{"schema":1,"repos":{"test/fake":{"base_ref":"main","stages":[["fmt","--check"],["build","@scope"],["clippy","--all-targets","@scope"],["test","--no-fail-fast","@scope"]]}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn one() -> u32 {\n    1\n}\n\n#[test]\nfn the_base_tests() {\n    assert_eq!(one(), 1);\n}\n",
+    )
+    .unwrap();
+    run_git(&repo, &["init", "-q", "-b", "main"]);
+    let status = Command::new("git")
+        .args(["init", "-q", "--bare", origin.to_str().unwrap()])
+        .current_dir(&repo)
+        .status()
+        .expect("git runs");
+    assert!(status.success());
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "base"]);
+    run_git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    run_git(&repo, &["push", "-q", "origin", "main"]);
+
+    // The work is delivered: main now carries the function the patch adds.
+    let lib = repo.join("src/lib.rs");
+    let base = fs::read_to_string(&lib).unwrap();
+    fs::write(&lib, format!("{base}pub fn two() -> u32 {{\n    2\n}}\n")).unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "the delivered work"]);
+    run_git(&repo, &["push", "-q", "origin", "main"]);
+
+    // The patch: the base-to-delivered diff, still sitting on disk.
+    let patch = run_git_output(&repo, &["diff", "main~1", "main", "--", "src/lib.rs"]);
+    let issue_dir = llm_root.join("node-a").join("out").join("issue-777");
+    fs::create_dir_all(&issue_dir).unwrap();
+    fs::write(issue_dir.join("changes.patch"), &patch).unwrap();
+    let patch_path = issue_dir.join("changes.patch");
+    let bin_dir = install_fake_gh(&work);
+
+    // Plan: reported as delivered, never offered, never archived.
+    let (code, out, err) = run_pass(&repo, &llm_root, &work, false);
+    assert_eq!(code, 0, "plan exits clean: {out} {err}");
+    assert!(
+        out.contains("DELIVERED #777"),
+        "named on its own line: {out}"
+    );
+    assert!(
+        out.contains("delivered=1"),
+        "counted on the selection line: {out}"
+    );
+    assert!(out.contains("fresh=0"), "residue is never offered: {out}");
+    assert!(patch_path.exists(), "the plan archives nothing");
+
+    // Apply: archived (the queue entry is released) and reported.
+    let (code, out, err) = run_pass(&repo, &llm_root, &work, true);
+    assert_eq!(code, 0, "apply exits clean: {out} {err}");
+    assert!(
+        out.contains("DELIVERED #777"),
+        "named on its own line: {out}"
+    );
+    assert!(out.contains("delivered=1"), "counted in the outcome: {out}");
+    assert!(
+        !patch_path.exists(),
+        "the residue leaves disk, so the next pass stops enumerating it"
+    );
+    let archived = fs::read_dir(issue_dir.join("superseded"))
+        .expect("the superseded directory exists")
+        .filter_map(|e| e.ok())
+        .count();
+    assert_eq!(archived, 1, "the patch is archived, never discarded");
+
+    let _ = fs::remove_dir_all(&work);
+    let _ = bin_dir;
+}
