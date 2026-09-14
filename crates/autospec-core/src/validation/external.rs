@@ -1565,6 +1565,15 @@ fn block_expansion_result(
             + failure_message.as_ref().map_or(0, |message| message.len()),
         output_digest(&digest_input, &[]),
     )
+    // Third instance of one defect in this file: the message was counted into
+    // stderr_bytes above and folded into the digest, then dropped. The result
+    // carried the reason's length and its hash but not the reason, so
+    // check_block_expansion reported "no reason captured" over 2.8 MB of child
+    // output it had actually collected.
+    //
+    // The existing test asserted the DIGEST preserved child evidence -- the
+    // hash, which is precisely the artefact that made the loss invisible.
+    .with_failure_opt(failure_message)
 }
 
 fn run_autospec_explore_implementer_base(id: &str, required: bool, root: &Path) -> CheckResult {

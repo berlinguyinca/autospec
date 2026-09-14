@@ -89,6 +89,22 @@ impl CheckResult {
         self
     }
 
+    /// Attach an optional reason, keeping `None` as "this check did not fail".
+    ///
+    /// Constructors that derive `exit_code` from `Option<String>` -- failing
+    /// exactly when a message exists -- were counting that message into
+    /// `stderr_bytes` and folding it into the digest, then dropping it. Three
+    /// separate sites in `external.rs` had that shape, each reporting
+    /// "no reason captured" while carrying the reason's length and hash.
+    /// This is the one-call form those sites need, so the attach step is not
+    /// something each new constructor has to remember independently.
+    pub fn with_failure_opt(self, message: Option<impl Into<String>>) -> Self {
+        match message {
+            Some(message) => self.with_failure(message),
+            None => self,
+        }
+    }
+
     pub fn is_success(&self) -> bool {
         self.unmeasured.is_none() && self.exit_code == Some(0)
     }
