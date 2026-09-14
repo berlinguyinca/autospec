@@ -93,6 +93,7 @@ mod gate_source;
 mod language;
 mod progress;
 mod sizing;
+mod stale;
 
 use git::{run_capture_in, run_git, run_git_capture, run_git_in, teardown_worktree};
 
@@ -604,7 +605,7 @@ fn convert_ledger(opts: &Options, prose_path: &Path) -> Result<(), CommandFailur
 /// (unknown base sha, not a git repo, no network): the caller then
 /// over-re-gates, the safe direction (a needless re-derivation, never a
 /// stale "still held").
-fn base_changed_files(base_sha: &str, base_ref: &str) -> Option<Vec<String>> {
+pub(super) fn base_changed_files(base_sha: &str, base_ref: &str) -> Option<Vec<String>> {
     let output = Command::new("git")
         .args(["diff", "--name-only", base_sha, base_ref])
         .output()
@@ -630,7 +631,7 @@ fn base_changed_files(base_sha: &str, base_ref: &str) -> Option<Vec<String>> {
 /// reported, never silently retired: the pass pushes the branch before the
 /// PR, so an interruption in that window is exactly this state (#4499).
 /// `Unknown` stays `Unknown`: the selection folds it fail-closed.
-fn attempt_state(
+pub(super) fn attempt_state(
     repo: Option<&str>,
     branch: &str,
     prefetched: Option<&AttemptIndex>,
@@ -717,7 +718,7 @@ impl AttemptIndex {
 /// Treating a failed batch as "nothing exists" would re-offer every patch and
 /// open duplicate pull requests, which is precisely the outcome the liveness
 /// check exists to prevent.
-fn prefetch_attempt_index(repo: &str, branch_prefix: &str) -> Option<AttemptIndex> {
+pub(super) fn prefetch_attempt_index(repo: &str, branch_prefix: &str) -> Option<AttemptIndex> {
     let heads = Command::new("git")
         .args([
             "ls-remote",
@@ -865,6 +866,13 @@ pub(crate) struct ConvertPlan {
     llm_root: PathBuf,
     pub(crate) examined: Vec<PatchLocation>,
     candidates: Vec<PatchCandidate>,
+    /// The base the classification was derived against (#4512): the tip of
+    /// `origin/<base>` at fetch time. `None` when the ref could not be
+    /// resolved — reported, and treated as "possibly stale" on revalidation.
+    pub(crate) classified_base: Option<String>,
+    /// The HELD ledger the plan read; revalidation re-gates against the
+    /// current base with the same records (#4512).
+    pub(crate) held: std::collections::BTreeMap<u64, HoldRecord>,
     outcome: PassOutcome,
 }
 
@@ -917,57 +925,23 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
         );
     }
 
-    // The already-delivered residue (#4501): reported, never offered or gated.
+    // Fetch the trunk so the classification is against the current base —
+    // and record that base: the classification is a fact about it (#4512).
     let _ = run_git(&["fetch", "origin"]);
-    let patches: Vec<_> = examined.iter().map(|p| (p.issue, p.path.clone())).collect();
-    let delivered_issues: BTreeSet<u64> = repo
-        .as_ref()
-        .map(|_| delivered::detect_delivered(&base_ref, &patches))
-        .unwrap_or_default();
+    let classified_base = stale::classify_base(&base_ref);
 
-    // The remote half of liveness, fetched once for the pass (issue #4587).
-    // `None` means a fetch failed and the per-branch path is used, so
-    // correctness never depends on the batch succeeding.
-    let attempt_index = repo
-        .as_deref()
-        .and_then(|repo| prefetch_attempt_index(repo, &opts.branch_prefix));
-    if repo.is_some() && attempt_index.is_none() {
-        eprintln!(
-            "WARN: could not prefetch branch liveness; falling back to one query per candidate"
-        );
-    }
-
-    let mut candidates = Vec::new();
-    for patch in &examined {
-        let branch = format!("{}{}", opts.branch_prefix, patch.issue);
-        let attempt = attempt_state(repo.as_deref(), &branch, attempt_index.as_ref());
-
-        // HELD is a queue: a recorded hold disqualifies only while its
-        // re-gate still holds. A changed patch, or a dependent file that
-        // moved on the base since the hold, re-offers it.
-        let held_recorded = match held.get(&patch.issue) {
-            Some(record) => {
-                let changed = base_changed_files(&record.base_sha, &base_ref)
-                    .unwrap_or_else(|| vec!["<base: unknown — over-re-gate>".to_string()]);
-                re_gate(record, &patch.patch_key, &changed).is_still_held()
-            }
-            None => false,
-        };
-
-        candidates.push(PatchCandidate {
-            issue: patch.issue,
-            patch_key: patch.patch_key.clone(),
-            attempt,
-            held_recorded,
-            delivered: delivered_issues.contains(&patch.issue),
-            language: language::candidate_language(patch),
-        });
-    }
+    // The candidate list is (base, entries), not entries (#4512): attempt
+    // state, re-gated holds, and the already-delivered residue, all measured
+    // against the current tip of origin/<base>.
+    let candidates =
+        stale::classify(&examined, repo.as_deref(), &base_ref, &opts.branch_prefix, &held);
 
     Ok(ConvertPlan {
         opts,
         llm_root,
         examined,
+        classified_base,
+        held,
         outcome: language::plan_outcome(&candidates),
         candidates,
     })
@@ -1163,6 +1137,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             "schema": CONVERT_PLAN_SCHEMA,
             "llm_root": plan.llm_root.display().to_string(),
             "base": plan.opts.base,
+            "classified_base": plan.classified_base.clone(),
             "apply": false,
             "examined": plan.candidates.len(),
             "fresh": fresh,
@@ -1185,7 +1160,15 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         return gate_source::finish_with_coverage(coverage.as_ref());
     }
 
-    println!("{selection_line}");
+    // The counts are a measurement against a base, not a standing fact
+    // (#4512): the base is on the line, so "45 fresh" reads as
+    // "45 fresh against origin/main#01234567".
+    let base_label = stale::base_label(
+        &plan.opts.base,
+        &format!("origin/{}", plan.opts.base),
+        plan.classified_base.as_deref(),
+    );
+    println!("{selection_line} @ {base_label}");
     for c in &selection.fresh {
         progress::report_line(&format!(
             "  FRESH #{issue} {patch_key}",
