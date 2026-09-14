@@ -347,3 +347,32 @@ message as a `WARN` and still reports the plan (a plan is useful; the
 refusal belongs to the run that would judge). The registry is read from the
 checkout's working directory, so the file travels with the repository it
 describes.
+## The push-before-PR window, and the attempt axis (#4499)
+
+The pass pushes a branch and only then opens the PR. An interruption in that
+window — a timeout, a killed session, a rate limit — leaves a branch with no
+PR, and a liveness check that reads the branch alone as "attempted" retires
+the issue forever: the evidence of the attempt is created *before* the thing
+that attempts, so the partial state is indistinguishable from the complete
+state by the check that runs on the branch alone.
+
+The invariant: **a step that marks work as done must not complete before the
+work does.** The liveness check therefore requires the marker that only the
+final step produces — a branch *with* an open or merged PR — and the
+candidate's state is an `Attempt`, not a boolean:
+
+| observed state | attempt | the pass |
+|---|---|---|
+| no branch | `fresh` | offers it |
+| branch, no live PR (or the pass's own worktree, no live PR) | `interrupted` | offers it again, reports it as a distinct category, and its `--apply` redo overwrites the orphan branch with `--force-with-lease` |
+| branch with an open or merged PR | `live` | disqualifies it |
+| the liveness lookup failed | `unknown` | disqualifies it (fail-closed: offering risks a duplicate PR) |
+
+A `--force-with-lease` push is the overwrite with the safety: it refuses if
+the remote branch moved since the pass's fetch — for instance a PR opened on
+it in the window, which is exactly the state that disqualifies a redo.
+
+`--apply` prints `START  #N` when an issue begins and `DONE   #N: <outcome>`
+when it ends, at the moment it ends. A START without a DONE is where the run
+stopped: an interrupted run is diagnosable from its output, not from hunting
+for orphan branches on the remote.

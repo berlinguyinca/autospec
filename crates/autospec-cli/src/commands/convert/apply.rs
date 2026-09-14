@@ -6,7 +6,10 @@ use autospec_core::conversion_pass::PassOutcome;
 use autospec_core::unfed_pass::PassCounters;
 
 use super::git::{run_git, run_git_capture};
-use super::{ApplyResult, ConvertPlan, ConversionBuffer, apply_one, gate_source, infer_repo, report_outcome};
+use super::{
+    buffer_from_candidates, Attempt, ApplyResult, ConvertPlan, ConversionBuffer, apply_one,
+    gate_source, infer_repo, report_outcome,
+};
 use super::language;
 use super::progress;
 use super::sizing;
@@ -71,18 +74,38 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             None => continue,
         };
         let item_started = std::time::Instant::now();
-        match apply_one(plan, &repo, &base_ref, &base_sha, patch, &gate_set) {
+        // The issue is on the record before the first remote write: a run
+        // killed anywhere below leaves START without DONE, and that is
+        // exactly where it stopped (#4499).
+        progress::started(patch.issue);
+        // A candidate re-offered from the interrupted state owns the orphan branch:
+        // its redo force-pushes over it (#4499).
+        let redo_interrupted = plan
+            .candidates
+            .iter()
+            .find(|cand| cand.issue == c.issue)
+            .map(|cand| cand.attempt == Attempt::Interrupted)
+            .unwrap_or(false);
+        match apply_one(plan, &repo, &base_ref, &base_sha, patch, redo_interrupted, &gate_set) {
             ApplyResult::Converted => {
                 counters.converted += 1;
                 progress::converted(patch.issue, &patch.patch_key);
+                progress::finished(patch.issue, "converted");
             }
-            ApplyResult::Held => counters.held += 1,
+            ApplyResult::Held => {
+                counters.held += 1;
+                progress::finished(patch.issue, "held");
+            }
             // Not converted and not held: the pass could not tell whether this
             // patch is good, so it says so and leaves the patch alone.
-            ApplyResult::BaseUnverifiable => counters.skipped += 1,
+            ApplyResult::BaseUnverifiable => {
+                counters.skipped += 1;
+                progress::finished(patch.issue, "skipped: base unverifiable");
+            }
             ApplyResult::Archived => {
                 counters.skipped += 1;
                 archived += 1;
+                progress::finished(patch.issue, "archived");
             }
         }
         last_cost = Some(item_started.elapsed());
@@ -91,12 +114,10 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     let outcome = PassOutcome::Examined(counters);
     report_outcome(&outcome);
 
-    // The buffer after the run, not just the run itself (#4558 ask 3):
-    // converted patches leave the waiting count (their PR is live) but
-    // stay on disk and still hold their queue entry; archived patches
-    // leave both. A report of only what converted hides how much is still
-    // waiting.
-    let initial = plan.buffer();
+    // The buffer after the run (#4558 ask 3): converted patches leave the
+    // waiting count (their PR is live) but hold their queue entry until
+    // archived; archived patches leave both.
+    let initial = buffer_from_candidates(&plan.candidates);
     let buffer = ConversionBuffer {
         waiting: initial.waiting.saturating_sub(counters.converted).saturating_sub(archived),
         queue_entries_blocked: initial.queue_entries_blocked.saturating_sub(archived),

@@ -7102,7 +7102,7 @@ fn branch_ref_exists(branch: &str) -> Result<bool, CommandFailure> {
 /// exactly the abandoned case, and a consumer counting them as live parks the
 /// issue behind a branch that will never merge (#4146).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AttemptLiveness {
+pub(crate) enum AttemptLiveness {
     /// A local worktree has the branch checked out; an attempt may still be
     /// writing to it.
     Worktree,
@@ -7135,7 +7135,7 @@ impl AttemptLiveness {
     }
 }
 
-fn attempt_liveness(repo: &str, branch: &str) -> Result<AttemptLiveness, CommandFailure> {
+pub(crate) fn attempt_liveness(repo: &str, branch: &str) -> Result<AttemptLiveness, CommandFailure> {
     if branch.trim().is_empty() {
         return Ok(AttemptLiveness::NoBranch);
     }

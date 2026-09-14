@@ -68,9 +68,13 @@ SH
 setup_fixture_paths() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     AUTOSPEC="$REPO_ROOT/target/debug/autospec"
-    if [ ! -x "$AUTOSPEC" ]; then
-        cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
-    fi
+    # Build unconditionally. Gating on `[ ! -x "$AUTOSPEC" ]` asks whether the
+    # binary EXISTS, when the question is whether it matches the source -- the
+    # two coincide only on a clean checkout. This suite was found running an
+    # executable six hours older than the tree it was meant to be testing.
+    # `cargo build` is incremental, so this costs nothing when nothing changed
+    # and is the only correct thing when something did.
+    cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
     TEST_TMP="$(mktemp -d)"
     AUTO_JSON="$TEST_TMP/auto.json"
     ACTIVE_JSON="$TEST_TMP/active.json"
