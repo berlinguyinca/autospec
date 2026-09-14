@@ -172,6 +172,7 @@ commands! {
     autonomous => "Plan and supervise autonomous conductor runs", direct;
     plan => "Inspect a generated spec package", diagnostic;
     rag => "Inspect Agentic RAG policy and routing", direct;
+    resilience => "Inspect the resilient runtime (checkpoints, work protocol, memory, learning)", direct;
     validate => "Run configured validation gates", diagnostic;
     run => "Execute the spec queue", diagnostic;
     runtime => "Inspect runtime ownership policy", direct;

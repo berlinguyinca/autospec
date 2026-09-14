@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-lesson-candidate.schema.json",
+  "title": "autospec lesson candidate",
+  "description": "A Verified Engineering Learning lesson candidate (autospec.lesson-candidate.v1) with provenance, evidence, scope, and confidence. Only promoted lessons are authoritative shared memory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "candidate_id", "source_work_id", "source_attempt_id", "kind",
+    "statement", "scope", "evidence", "confidence", "status"
+  ],
+  "properties": {
+    "schema": { "const": "autospec.lesson-candidate.v1" },
+    "candidate_id": { "type": "string", "pattern": "^lesson-" },
+    "created_at": { "type": "string" },
+    "source_work_id": { "type": "string", "pattern": "^work-" },
+    "source_attempt_id": { "type": "string", "pattern": "^attempt-" },
+    "repository": { "type": "string" },
+    "commit": { "type": "string" },
+    "issue": { "type": "string" },
+    "pull_request": { "type": "string" },
+    "kind": {
+      "type": "string",
+      "enum": ["procedure", "warning", "architecture", "debugging", "test", "tooling", "failure-pattern"]
+    },
+    "statement": { "type": "string", "minLength": 1 },
+    "scope": { "type": "string", "minLength": 1 },
+    "preconditions": { "type": "array", "items": { "type": "string" } },
+    "evidence": {
+      "type": "object",
+      "required": ["validation_results", "review_results", "counterevidence"],
+      "properties": {
+        "validation_results": { "type": "array", "items": { "type": "string" } },
+        "review_results": { "type": "array", "items": { "type": "string" } },
+        "counterevidence": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "status": {
+      "type": "string",
+      "enum": ["candidate", "validated", "rejected", "promoted", "superseded"]
+    },
+    "supersedes": { "type": "string" },
+    "expires_at": { "type": "string" },
+    "memory_target": { "type": "string" }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-attention-stream.schema.json",
+  "title": "autospec repository attention stream",
+  "description": "A resumable repository/corpus analysis job (autospec.attention-stream.v1) with a durable cursor and source digests for mutation detection.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "stream_id", "objective", "created_at", "updated_at", "status",
+    "source_set", "cursor", "chunks_completed", "accumulated_findings"
+  ],
+  "properties": {
+    "schema": { "const": "autospec.attention-stream.v1" },
+    "stream_id": { "type": "string", "pattern": "^stream-" },
+    "objective": { "type": "string", "minLength": 1 },
+    "scope": { "type": "string" },
+    "created_at": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["created", "active", "suspended", "completed", "cancelled", "needs-reconciliation"]
+    },
+    "source_set": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "digest"],
+        "properties": { "path": { "type": "string" }, "digest": { "type": "string" } }
+      }
+    },
+    "cursor": { "type": "integer", "minimum": 0 },
+    "chunks_completed": { "type": "integer", "minimum": 0 },
+    "chunks_total_if_known": { "type": "integer" },
+    "accumulated_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["summary", "evidence_refs"],
+        "properties": {
+          "summary": { "type": "string" },
+          "evidence_refs": { "type": "array", "items": { "type": "string" } },
+          "contradictions": { "type": "array", "items": { "type": "string" } },
+          "hypothesis": { "type": "string" }
+        }
+      }
+    },
+    "unresolved_questions": { "type": "array", "items": { "type": "string" } },
+    "follow_up_queries": { "type": "array", "items": { "type": "string" } },
+    "checkpoint_refs": { "type": "array", "items": { "type": "string" } },
+    "memory_refs": { "type": "array", "items": { "type": "string" } },
+    "artifact_refs": { "type": "array", "items": { "type": "string" } }
+  }
+}
