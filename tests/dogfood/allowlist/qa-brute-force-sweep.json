@@ -48,22 +48,16 @@
     "justification": "Hand-rolled parser for the flat portfolio-manifest subset; each field is its own literal prefix (id:/capability:/path:) rather than a shared shape that a table could carry."
   },
   {
-    "file": "crates/autospec-cli/tests/autonomous_accountability_github/contracts.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This integration test asserts exact managed-marker and GitHub protocol strings; its substring checks validate the command contract rather than encode domain representation logic."
+    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
+    "function": "new",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Test-only fixture builder: the repeated rows are fake GitHub CLI responses keyed by command, the same shape already allowlisted for autonomous_integration_base_sync.rs. Attribution moved to this function when #3472 fixed function_ranges_brace()."
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "This integration test reads Rust source to prohibit legacy foreground launch authority; its substring assertions do not encode domain representation logic."
-  },
-  {
-    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
-    "function": "new",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "Test-only fixture builder: the repeated rows are fake GitHub CLI responses keyed by command, the same shape already allowlisted for autonomous_integration_base_sync.rs. Attribution moved to this function when #3472 fixed function_ranges_brace()."
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_drain_commands.rs",
@@ -117,7 +111,7 @@
     "file": "crates/autospec-core/src/aar/outcome.rs",
     "function": "score_outcome",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "The genuinely uniform part \u2014 the four signal penalties \u2014 is already a table with a single dispatcher loop. The remaining branches each apply a different scoring formula (flat credit, clamped coverage ratio, cache-hit rate, churn ratio) to a different field, so they share no row shape."
+    "justification": "The genuinely uniform part — the four signal penalties — is already a table with a single dispatcher loop. The remaining branches each apply a different scoring formula (flat credit, clamped coverage ratio, cache-hit rate, churn ratio) to a different field, so they share no row shape."
   },
   {
     "file": "crates/autospec-core/src/aar/topology.rs",
@@ -190,5 +184,17 @@
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "Test fixtures and assertions for event-log normalization (ISO-8601 error wording); the literals are test inputs and expected output, not domain logic."
+  },
+  {
+    "file": "crates/autospec-core/tests/service_address.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Acceptance test for service-address resolution (#3776). Its string comparisons assert on the recorded address and on scheduler state names as OBSERVED VALUES -- the wire and scheduler vocabulary the code must agree with -- rather than deriving behaviour from them. The domain logic under test is which record is authoritative and when a revision counts as deployed, and that is expressed in types, not in these strings."
+  },
+  {
+    "file": "crates/autospec-core/tests/wire_fixture.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Wire-format fixture test (#4243), whose whole subject is that a test must assert against CAPTURED bytes rather than bytes it authored. Matching on literal response text is the evidence being checked, not logic branching on it; replacing those literals with parsed abstractions would reintroduce the defect the file exists to prevent."
   }
 ]
