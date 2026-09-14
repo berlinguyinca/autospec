@@ -18,6 +18,12 @@
     "justification": "Test-only module: every substring match is an assertion on a codex argument vector or a permission string it must contain (\"permissions.autospec-network-executor.filesystem=\", \"danger-full-access\", per-path read/deny entries). Those are the CLI surface under test, not a domain representation."
   },
   {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/full_suite.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: substring matches are assertions on executor-bridge argument vectors and permission strings under test, not a domain representation."
+  },
+  {
     "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/json_identity.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
@@ -36,6 +42,30 @@
     "justification": "Test-only: the repeated rows are `git` argument vectors and arms of a shell `gh` stub that model GitHub protocol responses. They are fixture data for one forged-comment scenario, not production dispatch logic."
   },
   {
+    "file": "crates/autospec-cli/src/commands/claim.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "URL/remote scheme detection uses '://' and ':' substring checks to decide whether a remote is already absolute; standard scheme handling, not a domain encoding."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/cleanup.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Cleanup matches owned artifact suffixes and shell-operator literals it must recognize; protocol string handling, not a domain representation."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/convert.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Convert parser recognizes markdown/spec markers and language tags by literal substring; protocol-string handling, not a domain encoding."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/dispatch_spec.rs",
+    "function": "preflight",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Preflight is a sequence of four distinct validation steps (prompt assertion, authority refusal, freshness verdict, receipt); each branch is a separate gate, not a repeated identical shape."
+  },
+  {
     "file": "crates/autospec-cli/src/commands/initiative.rs",
     "function": "validate",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
@@ -46,12 +76,6 @@
     "function": "parse_plan_manifest",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
     "justification": "Hand-rolled parser for the flat portfolio-manifest subset; each field is its own literal prefix (id:/capability:/path:) rather than a shared shape that a table could carry."
-  },
-  {
-    "file": "crates/autospec-cli/tests/autonomous_accountability_github/contracts.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This integration test asserts exact managed-marker and GitHub protocol strings; its substring checks validate the command contract rather than encode domain representation logic."
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
@@ -102,6 +126,30 @@
     "justification": "The test helper asserts command output, not a domain representation; this inherited file-scoped heuristic result remains intentionally allowlisted."
   },
   {
+    "file": "crates/autospec-cli/tests/convert_batch_sizing.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: substring matches assert on generated batch-spec output, not a domain representation."
+  },
+  {
+    "file": "crates/autospec-cli/tests/convert_progress_flush.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: substring matches assert on progress/flush output, not a domain representation."
+  },
+  {
+    "file": "crates/autospec-cli/tests/managed_project.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: substring matches assert on managed-project file layout, not a domain representation."
+  },
+  {
+    "file": "crates/autospec-cli/tests/support/autonomous_recovery_accountability.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only support module: substring matches assert on recovery/accountability output, not a domain representation."
+  },
+  {
     "file": "crates/autospec-core/src/aar/guards.rs",
     "function": "observe",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
@@ -126,6 +174,24 @@
     "justification": "The branches are cumulative escalation thresholds, not parallel cases: each adds a different role set to the same accumulator, one arm removes a role, and one returns early. Order is semantic, so a predicate table would change behaviour."
   },
   {
+    "file": "crates/autospec-core/src/ci_conclusions.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test module asserts on rendered conclusion lines and job names (build-test, audit, macos-test); literal CI-job identifiers, not a domain encoding."
+  },
+  {
+    "file": "crates/autospec-core/src/construction_sites.rs",
+    "function": "predicate_platforms",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Recursive-descent parser for cfg predicate compositions any()/all()/not(); each branch is a distinct grammar production, not repeated identical structure."
+  },
+  {
+    "file": "crates/autospec-core/src/dispatch_pipeline.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Pipeline recognizes stage/tier identifiers and artifact markers by literal substring; protocol-string handling, not a domain encoding."
+  },
+  {
     "file": "crates/autospec-core/src/execution/verification.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
@@ -138,10 +204,22 @@
     "justification": "Test assertions pinning the exact verdict-line wording (pass-load phrases); the strings are the protocol under test, not domain encoding."
   },
   {
+    "file": "crates/autospec-core/src/insights/context.rs",
+    "function": "context_metrics",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Counter aggregator over a match of distinct event types; the repeated saturating_add accumulation is the natural way to sum independent counters, not brute-force string logic."
+  },
+  {
     "file": "crates/autospec-core/src/insights/correlate.rs",
     "function": "rfc3339_epoch_seconds",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
     "justification": "Positional RFC3339 byte parser; the repeated branches check fixed-offset separator bytes ('-', 'T', ':') and are the format grammar, not copy-pasted logic."
+  },
+  {
+    "file": "crates/autospec-core/src/insights/enrich/classify.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Classifier matches protocol markers/identifiers by literal substring; protocol-string handling, not a domain encoding."
   },
   {
     "file": "crates/autospec-core/src/learning/contracts.rs",
@@ -154,6 +232,12 @@
     "function": "parse_autospec_metadata",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
     "justification": "Metadata-block parser; each branch matches a distinct literal field prefix (issue:, ...) with its own payload handling, not one repeated shape."
+  },
+  {
+    "file": "crates/autospec-core/src/prose_closure.rs",
+    "function": "reference_after",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Token parser for PR-reference forms (#N, HTML entities, /issues/N URL); each branch is a distinct reference grammar, not repeated identical structure."
   },
   {
     "file": "crates/autospec-core/src/repair_loop.rs",
@@ -180,6 +264,30 @@
     "justification": "The structural validator scans static skill text for required contract vocabulary; it does not encode runtime domain meaning from free-form names."
   },
   {
+    "file": "crates/autospec-core/src/wire_fixture.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Wire-fixture reader matches protocol field markers by literal substring; protocol-string handling, not a domain encoding."
+  },
+  {
+    "file": "crates/autospec-core/tests/circuit_breaker.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: substring matches assert on breaker output/state, not a domain representation."
+  },
+  {
+    "file": "crates/autospec-core/tests/construction_sites.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: substring matches assert on parsed construction-site output, not a domain representation."
+  },
+  {
+    "file": "crates/autospec-core/tests/cost_accounting.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: substring matches assert on cost-accounting output, not a domain representation."
+  },
+  {
     "file": "crates/autospec-core/tests/failure_signatures.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
@@ -190,5 +298,29 @@
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "Test fixtures and assertions for event-log normalization (ISO-8601 error wording); the literals are test inputs and expected output, not domain logic."
+  },
+  {
+    "file": "crates/autospec-core/tests/item_sweep.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: substring matches assert on sweep output, not a domain representation."
+  },
+  {
+    "file": "crates/autospec-core/tests/recovery_path.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: substring matches assert on recovery-path output, not a domain representation."
+  },
+  {
+    "file": "crates/autospec-core/tests/service_address.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: substring matches assert on service-address parsing, not a domain representation."
+  },
+  {
+    "file": "crates/autospec-core/tests/wire_fixture.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: substring matches assert on wire-fixture parsing, not a domain representation."
   }
 ]
