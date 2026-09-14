@@ -2,10 +2,11 @@
 //! what the plan selected, with the pass's own deadline sizing the batch
 //! it starts (#4607).
 
-use autospec_core::conversion_pass::PassOutcome;
+use autospec_core::conversion_pass::{select_fresh, PassOutcome};
 use autospec_core::unfed_pass::PassCounters;
 
 use super::git::{run_git, run_git_capture};
+
 use super::{
     buffer_from_candidates, Attempt, ApplyResult, ConvertPlan, ConversionBuffer, apply_one,
     gate_source, infer_repo, report_outcome,
@@ -30,8 +31,33 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     let base_ref = format!("origin/{}", plan.opts.base);
     run_git(&["fetch", "origin"])?;
 
-    let selection = plan.selection();
-    let base_sha = run_git_capture(&["rev-parse", "HEAD"])?;
+    // The base the hold records will cite is the base the patches are gated
+    // against — the tip of origin/<base>, not the checkout's HEAD (#4512).
+    // HEAD can be any branch; citing it records a fact about the wrong ref.
+    let base_sha = match run_git_capture(&["rev-parse", &base_ref]) {
+        Ok(sha) => sha,
+        Err(_) => {
+            eprintln!(
+                "WARN: {base_ref} could not be resolved; citing the checkout's HEAD in the                  hold records"
+            );
+            run_git_capture(&["rev-parse", "HEAD"])?
+        }
+    };
+
+    // The classification is a fact about the base it was derived against
+    // (#4512): if the base moved between the plan and now, revalidate before
+    // mutating. A stale entry produces a reported reclassification, never a
+    // silent act on the old state.
+    let (candidates, flips, _current_base) = super::stale::revalidate(plan, &base_ref);
+    for flip in &flips {
+        progress::report_line(&format!(
+            "  STALE #{issue}: {from} -> {to} (the base moved since the plan;              revalidated before acting)",
+            issue = flip.issue,
+            from = flip.from,
+            to = flip.to
+        ));
+    }
+    let selection = select_fresh(&candidates);
 
     let mut counters = PassCounters {
         examined: plan.candidates.len(),
@@ -94,8 +120,7 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         progress::started(patch.issue);
         // A candidate re-offered from the interrupted state owns the orphan branch:
         // its redo force-pushes over it (#4499).
-        let redo_interrupted = plan
-            .candidates
+        let redo_interrupted = candidates
             .iter()
             .find(|cand| cand.issue == c.issue)
             .map(|cand| cand.attempt == Attempt::Interrupted)
@@ -135,7 +160,7 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     // The buffer after the run (#4558 ask 3): converted patches leave the
     // waiting count (their PR is live) but hold their queue entry until
     // archived; archived patches leave both.
-    let initial = buffer_from_candidates(&plan.candidates);
+    let initial = buffer_from_candidates(&candidates);
     let buffer = ConversionBuffer {
         waiting: initial.waiting.saturating_sub(counters.converted).saturating_sub(archived),
         queue_entries_blocked: initial.queue_entries_blocked.saturating_sub(archived),
