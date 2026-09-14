@@ -7139,17 +7139,25 @@ pub(crate) fn attempt_liveness(repo: &str, branch: &str) -> Result<AttemptLivene
     if branch.trim().is_empty() {
         return Ok(AttemptLiveness::NoBranch);
     }
-    if local_branch_checked_out(&format!("refs/heads/{branch}"))? {
-        return Ok(AttemptLiveness::Worktree);
-    }
     // A branch that does not exist cannot be a live attempt, so answer locally
     // and do not ask GitHub. Asking anyway made this predicate depend on network
     // reachability for a question git already answers: with an unreachable repo
     // the lookup errored, callers' `unwrap_or(true)` read that as "live", and an
     // abandoned generation was never requeued (#4123). It also spends a `gh` call
     // per stale record in production for branches that are provably gone.
+    //
+    // The branch-existence answer is definitive and local, so it is asked
+    // before the worktree lookup: a branch that does not exist cannot be
+    // checked out in any worktree, and the worktree list is CWD-dependent and
+    // may be unreadable (e.g. the queue is reconciled from a directory that is
+    // not a checkout). Reading the worktree list first turned a provably-absent
+    // branch into `Unknown`, which blocked stale-startup recovery for a claim
+    // whose worker never started (#4653).
     if !branch_ref_exists(branch)? {
         return Ok(AttemptLiveness::NoBranch);
+    }
+    if local_branch_checked_out(&format!("refs/heads/{branch}"))? {
+        return Ok(AttemptLiveness::Worktree);
     }
     if let Some(state) = branch_live_pr_state(repo, branch)? {
         return Ok(if state == "open" {
