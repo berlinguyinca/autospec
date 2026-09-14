@@ -140,3 +140,39 @@
         );
         assert_eq!(result, AcquireResult::Terminal);
     }
+
+    #[test]
+    fn distinct_acquisitions_carry_distinct_claim_ids() {
+        let mut store = InMemoryWorkStore::default();
+        store.insert_work(make_work());
+        let clock = FixedClock(1000);
+        let attempt = AttemptId::new(b"a");
+        let session = SessionId::new(b"s");
+        let first = match acquire_lease(
+            &mut store,
+            &WorkId::new(b"w"),
+            &attempt,
+            &session,
+            1000,
+            DEFAULT_LEASE_SECONDS,
+            &clock,
+        ) {
+            AcquireResult::Acquired(l) => l,
+            other => panic!("unexpected {other:?}"),
+        };
+        // A different work item's acquisition must not share the claim identity.
+        store.insert_work(make_work());
+        let second = match acquire_lease(
+            &mut store,
+            &WorkId::new(b"w2"),
+            &attempt,
+            &session,
+            1000,
+            DEFAULT_LEASE_SECONDS,
+            &clock,
+        ) {
+            AcquireResult::Acquired(l) => l,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_ne!(first.claim_id, second.claim_id);
+    }

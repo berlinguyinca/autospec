@@ -164,6 +164,11 @@ pub fn promote_verdict(candidate: &LessonCandidate) -> PromotionVerdict {
     if contains_secret(candidate) {
         return PromotionVerdict::Reject;
     }
+    // Safety: role/safety/merge policy is versioned policy, never a "lesson".
+    // A model may not weaken it by writing a candidate; the gate itself rejects it.
+    if is_unsafe_lesson(candidate) {
+        return PromotionVerdict::Reject;
+    }
     if candidate.statement.trim().is_empty() || candidate.scope.trim().is_empty() {
         return PromotionVerdict::KeepCandidate;
     }
@@ -303,6 +308,12 @@ mod tests {
         assert!(!touches_immutable_policy("use cargo test for validation"));
         let c = base(LessonKind::Procedure, "weaken the security gate");
         assert!(is_unsafe_lesson(&c));
+    }
+
+    #[test]
+    fn promote_gate_rejects_policy_weakening_lesson() {
+        let c = with_evidence(base(LessonKind::Procedure, "weaken the security gate"));
+        assert_eq!(promote_verdict(&c), PromotionVerdict::Reject);
     }
 
     #[test]

@@ -146,6 +146,19 @@ mutation requiring reconciliation.
   opened as a PR against `main` (control-plane contracts + schemas + docs + tests).
 - The dirty local branch `fix/quarantine-recheck-escape-hatch` was left untouched.
 
+## Self-review fixes (post-merge-prep review)
+
+During the pre-merge review, two improvements were made to the pure contracts:
+- **learning**: the deterministic `promote_verdict` gate now also rejects
+  policy-weakening lessons via `is_unsafe_lesson`, so role/safety/merge policy
+  can never be weakened by a lesson even if a caller forgets the separate guard
+  (defense-in-depth; spec §10/§11). New test
+  `promote_gate_rejects_policy_weakening_lesson`.
+- **work_protocol**: each lease acquisition now carries a distinct `ClaimId`
+  derived from (work, attempt, fencing generation) instead of a fixed value, so
+  ownership identities are unique. New test
+  `distinct_acquisitions_carry_distinct_claim_ids`.
+
 ## Pre-existing failures (separate from this work)
 
 Verified against clean `origin/main` in a detached worktree, the following fail

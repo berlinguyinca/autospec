@@ -275,7 +275,7 @@ pub fn acquire_lease(
             // Same attempt re-claim: only if expired.
             if existing.is_expired(now) {
                 let lease = Lease {
-                    claim_id: ClaimId::new(b"claim"),
+                    claim_id: claim_id(work_id, attempt_id, existing.fencing_generation + 1),
                     work_id: work_id.clone(),
                     attempt_id: attempt_id.clone(),
                     session_id: session_id.clone(),
@@ -295,7 +295,7 @@ pub fn acquire_lease(
     }
 
     let lease = Lease {
-        claim_id: ClaimId::new(b"claim"),
+        claim_id: claim_id(work_id, attempt_id, 1),
         work_id: work_id.clone(),
         attempt_id: attempt_id.clone(),
         session_id: session_id.clone(),
@@ -308,6 +308,19 @@ pub fn acquire_lease(
     store.save_lease(&lease);
     let _ = clock.now_secs();
     AcquireResult::Acquired(lease)
+}
+
+/// Derive a distinct claim id for one acquisition of an attempt. The claim is
+/// keyed to the (work, attempt, fencing generation) so each acquisition has a
+/// unique ownership identity instead of sharing a single fixed value.
+fn claim_id(work_id: &WorkId, attempt_id: &AttemptId, generation: u64) -> ClaimId {
+    let mut nonce = Vec::new();
+    nonce.extend_from_slice(work_id.as_str().as_bytes());
+    nonce.push(b':');
+    nonce.extend_from_slice(attempt_id.as_str().as_bytes());
+    nonce.push(b':');
+    nonce.extend_from_slice(generation.to_string().as_bytes());
+    ClaimId::new(&nonce)
 }
 
 /// Heartbeat renews a lease. Returns true when renewed. A stale worker whose
