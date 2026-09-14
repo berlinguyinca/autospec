@@ -5,9 +5,13 @@
 setup() {
     REPO_ROOT="$(git rev-parse --show-toplevel)"
     AUTOSPEC="$REPO_ROOT/target/debug/autospec"
-    if [ ! -x "$AUTOSPEC" ]; then
-        cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
-    fi
+    # Build unconditionally. Gating on `[ ! -x "$AUTOSPEC" ]` asks whether the
+    # binary EXISTS, when the question is whether it matches the source -- the
+    # two coincide only on a clean checkout. This suite was found running an
+    # executable six hours older than the tree it was meant to be testing.
+    # `cargo build` is incremental, so this costs nothing when nothing changed
+    # and is the only correct thing when something did.
+    cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
     FIXTURE="$REPO_ROOT/tests/fixtures/autospec-run/issue-1858-run-state.json"
     TMPDIR_BATS="$(mktemp -d)"
     MOCK_BIN="$TMPDIR_BATS/bin"
