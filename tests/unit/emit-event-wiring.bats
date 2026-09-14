@@ -62,8 +62,7 @@ teardown() {
 # a real database.
 
 REGISTRY="$REPO_ROOT/scripts/autospec-run-registry.sh"
-# Honour CARGO_TARGET_DIR: cargo writes there, so hardcoding $REPO_ROOT/target
-# builds one binary and executes another (see #4652).
+# Honour CARGO_TARGET_DIR or we build one binary and run another (#4661).
 AUTOSPEC="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/debug/autospec"
 
 # _enable_emit stages the shim under a fresh AUTOSPEC_SCRIPTS_DIR and puts the
