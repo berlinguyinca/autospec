@@ -241,3 +241,29 @@ fn run_shell_lint_flags_the_unguarded_cd_and_ignores_advisory_only() {
 
     fs::remove_dir_all(&root).expect("remove temporary shell-lint fixture");
 }
+
+#[test]
+fn block_expansion_failure_keeps_the_reason_not_only_its_hash() {
+    // The sibling test asserts the DIGEST preserves child evidence. A digest is
+    // a hash: it proved the message had been consumed while the message itself
+    // was dropped, which is exactly how this went unnoticed. Assert the text.
+    let result = block_expansion_result(
+        "check_block_expansion",
+        true,
+        Vec::new(),
+        Some("skills/demo/codex/prompt.md has no golden".to_string()),
+    );
+    assert!(result.is_failure());
+    assert_eq!(
+        result.failure.as_deref(),
+        Some("skills/demo/codex/prompt.md has no golden"),
+        "a failing block-expansion result must carry its reason, not only count it"
+    );
+}
+
+#[test]
+fn block_expansion_success_carries_no_failure() {
+    let result = block_expansion_result("check_block_expansion", true, Vec::new(), None);
+    assert!(result.failure.is_none());
+    assert!(!result.is_failure());
+}

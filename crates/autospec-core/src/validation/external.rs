@@ -1565,6 +1565,15 @@ fn block_expansion_result(
             + failure_message.as_ref().map_or(0, |message| message.len()),
         output_digest(&digest_input, &[]),
     )
+    // Third instance of one defect in this file: the message was counted into
+    // stderr_bytes above and folded into the digest, then dropped. The result
+    // carried the reason's length and its hash but not the reason, so
+    // check_block_expansion reported "no reason captured" over 2.8 MB of child
+    // output it had actually collected.
+    //
+    // The existing test asserted the DIGEST preserved child evidence -- the
+    // hash, which is precisely the artefact that made the loss invisible.
+    .with_failure_opt(failure_message)
 }
 
 fn run_autospec_explore_implementer_base(id: &str, required: bool, root: &Path) -> CheckResult {
@@ -4317,7 +4326,7 @@ fn run_implementer_contract(id: &str, required: bool, root: &Path) -> CheckResul
     }
     let captured = bundled_prompt(id, required, root, "implementer");
     if captured.result.is_failure() {
-        return captured.result;
+        return captured_command_failure(captured.result, &captured.stdout);
     }
     if contains_bytes(&captured.stdout, b"SKILL.md (implementer role)") {
         return captured_failure(
@@ -4376,7 +4385,7 @@ fn run_reviewer_contract(id: &str, required: bool, root: &Path) -> CheckResult {
     }
     let captured = bundled_prompt(id, required, root, "reviewer");
     if captured.result.is_failure() {
-        return captured.result;
+        return captured_command_failure(captured.result, &captured.stdout);
     }
     if contains_bytes(&captured.stdout, b"SKILL.md (reviewer role)") {
         return captured_failure(
@@ -5236,7 +5245,52 @@ fn captured_failure(mut result: CheckResult, stdout: &[u8], message: &str) -> Ch
     result.exit_code = Some(1);
     result.stderr_bytes += message.len();
     result.output_digest = output_digest(stdout, message.as_bytes());
-    result
+    // Keep the message, not only its length. This function counted
+    // `message.len()` into stderr_bytes and dropped the text, so every check
+    // routed through it reported "failed (no reason captured)" while the
+    // byte count proved the reason had existed -- the same defect #3734 fixed
+    // for native checks, living inside the helper meant to attach failures.
+    result.with_failure(message)
+}
+
+/// A failing captured command, reported with the output it produced.
+///
+/// The early-return paths returned `captured.result` untouched when the command
+/// itself failed, discarding stdout and stderr that were already in hand.
+/// check_block_expansion produced 2.8 MB that way and reported nothing.
+///
+/// The text is bounded rather than dropped: megabytes are not printable, but a
+/// failure's first lines almost always name the cause, and a stated byte count
+/// tells the reader what was elided.
+fn captured_command_failure(result: CheckResult, stdout: &[u8]) -> CheckResult {
+    const KEEP: usize = 1600;
+    let mut detail = String::new();
+    for (label, bytes) in [("stdout", stdout)] {
+        if bytes.is_empty() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(bytes);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !detail.is_empty() {
+            detail.push_str(" | ");
+        }
+        if trimmed.len() <= KEEP {
+            detail.push_str(&format!("{label}: {trimmed}"));
+        } else {
+            detail.push_str(&format!(
+                "{label} ({} bytes, first {KEEP} shown): {}",
+                bytes.len(),
+                &trimmed[..KEEP]
+            ));
+        }
+    }
+    if detail.is_empty() {
+        detail = "the command failed and produced no output".to_string();
+    }
+    result.with_failure(detail)
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -6550,6 +6604,18 @@ fn unmeasured_tool(id: &str, required: bool, program: &str) -> CheckResult {
 }
 
 fn failure(id: &str, required: bool, message: &str) -> CheckResult {
+    // `.with_failure` is the point of this helper, and it was missing.
+    //
+    // The message was passed as `stderr_bytes` and folded into the digest, so
+    // the result carried the reason's LENGTH and its HASH but not the reason.
+    // Every one of this function's callers therefore reported
+    // "failed (no reason captured)" while proving, in its own byte count, that
+    // a reason had existed -- the symptom that made several required checks on
+    // main undiagnosable at once.
+    //
+    // #3734 fixed exactly this for native checks. It survived here because the
+    // external checks route through their own constructors, and nothing
+    // compared them.
     CheckResult::completed(
         id,
         required,
@@ -6560,6 +6626,7 @@ fn failure(id: &str, required: bool, message: &str) -> CheckResult {
         message.len(),
         output_digest(&[], message.as_bytes()),
     )
+    .with_failure(message)
 }
 
 fn relative_path(root: &Path, path: &Path) -> String {
@@ -6875,3 +6942,78 @@ if failures:
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod captured_failure_tests {
+    use super::failure;
+
+    #[test]
+    fn the_shared_failure_constructor_attaches_its_message() {
+        // Used by 84 call sites. It recorded message.len() as stderr_bytes and
+        // digested the text, but never attached it -- so every external check
+        // built this way reported "no reason captured" while its own byte count
+        // proved the reason existed.
+        let out = failure("check_example", true, "skills/x.md: missing TOKEN");
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("skills/x.md: missing TOKEN"),
+            "the reason must survive construction"
+        );
+        assert_eq!(out.stderr_bytes, "skills/x.md: missing TOKEN".len());
+        assert!(out.is_failure());
+    }
+
+    use super::{captured_command_failure, captured_failure};
+    use crate::validation::results::CheckResult;
+
+    fn base() -> CheckResult {
+        CheckResult::completed("check_example", true, 1, 5, 1, 0, 0, "digest")
+    }
+
+    #[test]
+    fn a_message_is_kept_not_merely_counted() {
+        // captured_failure added message.len() to stderr_bytes and dropped the
+        // text, so the byte count proved a reason had existed while the reason
+        // itself was gone.
+        let out = captured_failure(base(), b"", "bundler: the prefix is still injected");
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("bundler: the prefix is still injected")
+        );
+        assert!(out.stderr_bytes > 0, "the count is still recorded");
+    }
+
+    #[test]
+    fn a_failing_command_reports_the_output_it_produced() {
+        let out = captured_command_failure(base(), b"not ok 3 the thing diverged\n");
+        let reason = out.failure.expect("a failing command must carry a reason");
+        assert!(reason.contains("not ok 3 the thing diverged"), "{reason}");
+    }
+
+    #[test]
+    fn a_huge_output_is_bounded_and_says_so() {
+        // check_block_expansion produced 2.8 MB. Printing it is useless and
+        // dropping it is worse; the head names the cause and the count tells
+        // the reader what was elided.
+        let noisy = vec![b'x'; 3_000_000];
+        let out = captured_command_failure(base(), &noisy);
+        let reason = out.failure.expect("bounded, not dropped");
+        assert!(
+            reason.contains("3000000 bytes"),
+            "{}",
+            &reason[..80.min(reason.len())]
+        );
+        assert!(reason.len() < 4_000, "reason is {} bytes", reason.len());
+    }
+
+    #[test]
+    fn a_silent_failure_says_it_was_silent() {
+        // Distinguishable from "the runner discarded it", which is the whole
+        // point: these need different fixes.
+        let out = captured_command_failure(base(), b"   \n  ");
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("the command failed and produced no output")
+        );
+    }
+}

@@ -60,10 +60,29 @@ fn scan_sources(
             // worktree location, so the same tree validated from two directories would
             // produce different bytes (#3802).
             let display = file.strip_prefix(root).unwrap_or(&file);
-            for (line_no, line) in text.lines().enumerate() {
-                if !(line.contains("println!(") || line.contains("eprintln!(")) // autospec:allow-output
-                    || line.contains("autospec:allow-output")
+            let lines: Vec<&str> = text.lines().collect();
+            for (line_no, line) in lines.iter().enumerate() {
+                if !(line.contains("println!(") || line.contains("eprintln!("))
+                // autospec:allow-output
                 {
+                    continue;
+                }
+                // The escape marker may sit inside the invocation rather than on
+                // the line that opens it. A call long enough to need wrapping
+                // puts its first argument -- and any leading comment -- on the
+                // following line, which is exactly where rustfmt moves it. Three
+                // legitimate test-skip notices were being reported as violations
+                // for that reason alone, so the escape hatch failed precisely
+                // when the call was long enough to want it.
+                //
+                // Bounded to the invocation's first two lines rather than
+                // scanning to the closing paren: a marker further inside would be
+                // describing an argument, not the call.
+                let marked = line.contains("autospec:allow-output")
+                    || lines
+                        .get(line_no + 1)
+                        .is_some_and(|next| next.contains("autospec:allow-output"));
+                if marked {
                     continue;
                 }
                 if target_kind == "binary" {
