@@ -17,7 +17,12 @@
 
 setup() {
     REPO_ROOT="$(git rev-parse --show-toplevel)"
-    AUTOSPEC="$REPO_ROOT/target/debug/autospec"
+    # Honour CARGO_TARGET_DIR. `cargo build` writes into it, so hardcoding
+    # $REPO_ROOT/target builds one binary and executes another -- observed
+    # running a 2.5h-old executable while the fresh one sat in the real
+    # target dir. Building unconditionally (#4652) does not help if the
+    # build output and the run path disagree.
+    AUTOSPEC="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/debug/autospec"
     unset AUTOSPEC_RUN_ONLY_ISSUES
     # Build unconditionally. Gating on `[ ! -x "$AUTOSPEC" ]` asks whether the
     # binary EXISTS, when the question is whether it matches the source -- the
