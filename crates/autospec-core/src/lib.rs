@@ -153,6 +153,7 @@ pub mod restart_safety;
 pub mod result_soundness;
 pub mod review_checklist;
 pub mod roll_selection;
+pub mod rule_reach;
 pub mod run_lifecycle;
 pub mod run_status;
 pub mod runner_verdict;
