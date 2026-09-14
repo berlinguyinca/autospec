@@ -1466,6 +1466,7 @@ fn run_block_expansion(id: &str, required: bool, root: &Path) -> CheckResult {
 
     let mut commands = Vec::new();
     let mut mismatches = Vec::new();
+    let mut evidence: Vec<String> = Vec::new();
     for skill_directory in skill_directories {
         let Some(skill) = skill_directory.file_name().and_then(|name| name.to_str()) else {
             continue;
@@ -1519,20 +1520,32 @@ fn run_block_expansion(id: &str, required: bool, root: &Path) -> CheckResult {
                 .next()
                 .unwrap_or_default()
                 .to_string();
-            commands.push(expanded.result);
-            commands.push(hashed.result);
-
             if got != expected {
                 mismatches.push(format!("{skill}.{suffix}"));
+                // The expander's output is the evidence for the mismatch; keep
+                // its bounded edges rather than its size alone (#4632). Capped at
+                // three members: the names above already list them all.
+                if evidence.len() < 3 {
+                    if let Some(snippet) = bounded_output(&expanded.stdout) {
+                        evidence.push(snippet);
+                    }
+                }
             }
+            commands.push(expanded.result);
+            commands.push(hashed.result);
         }
     }
 
     let failure = (!mismatches.is_empty()).then(|| {
-        format!(
+        let mut message = format!(
             "check_block_expansion: sha256 mismatch for members: {}",
             mismatches.join(" ")
-        )
+        );
+        for snippet in &evidence {
+            message.push_str("; ");
+            message.push_str(snippet);
+        }
+        message
     });
     block_expansion_result(id, required, commands, failure)
 }
@@ -4326,13 +4339,13 @@ fn run_implementer_contract(id: &str, required: bool, root: &Path) -> CheckResul
     }
     let captured = bundled_prompt(id, required, root, "implementer");
     if captured.result.is_failure() {
-        return captured_command_failure(captured.result, &captured.stdout);
+        return captured_check_failure(captured.result, &captured.stdout, None);
     }
     if contains_bytes(&captured.stdout, b"SKILL.md (implementer role)") {
-        return captured_failure(
+        return captured_check_failure(
             captured.result,
             &captured.stdout,
-            "bundler: implementer output still injects the SKILL.md prefix",
+            Some("bundler: implementer output still injects the SKILL.md prefix"),
         );
     }
     // Everything byte-stable belongs inside the cache boundary; only label-filtered
@@ -4350,19 +4363,16 @@ fn run_implementer_contract(id: &str, required: bool, root: &Path) -> CheckResul
         .filter(|line| line.starts_with("## "))
         .collect::<Vec<_>>();
     if sections_below != ["## Project rules (saved memory)"] {
-        return captured_failure(
-            captured.result,
-            &captured.stdout,
-            &format!(
-                "bundler: only saved memory may sit below the closing cache boundary, found {sections_below:?}"
-            ),
+        let message = format!(
+            "bundler: only saved memory may sit below the closing cache boundary, found {sections_below:?}"
         );
+        return captured_check_failure(captured.result, &captured.stdout, Some(message.as_str()));
     }
     if rule_ids.is_empty() {
-        return captured_failure(
+        return captured_check_failure(
             captured.result,
             &captured.stdout,
-            "AGENTS.md: RULE_ID table yielded no RULE_IDs",
+            Some("AGENTS.md: RULE_ID table yielded no RULE_IDs"),
         );
     }
     captured.result
@@ -4385,13 +4395,13 @@ fn run_reviewer_contract(id: &str, required: bool, root: &Path) -> CheckResult {
     }
     let captured = bundled_prompt(id, required, root, "reviewer");
     if captured.result.is_failure() {
-        return captured_command_failure(captured.result, &captured.stdout);
+        return captured_check_failure(captured.result, &captured.stdout, None);
     }
     if contains_bytes(&captured.stdout, b"SKILL.md (reviewer role)") {
-        return captured_failure(
+        return captured_check_failure(
             captured.result,
             &captured.stdout,
-            "bundler: reviewer output still injects the SKILL.md prefix",
+            Some("bundler: reviewer output still injects the SKILL.md prefix"),
         );
     }
     let output = String::from_utf8_lossy(&captured.stdout);
@@ -4401,10 +4411,10 @@ fn run_reviewer_contract(id: &str, required: bool, root: &Path) -> CheckResult {
         .count()
         != 1
     {
-        return captured_failure(
+        return captured_check_failure(
             captured.result,
             &captured.stdout,
-            "bundler: reviewer output must contain exactly one RULE_ID table",
+            Some("bundler: reviewer output must contain exactly one RULE_ID table"),
         );
     }
     for rule_id in [
@@ -4416,10 +4426,11 @@ fn run_reviewer_contract(id: &str, required: bool, root: &Path) -> CheckResult {
         "INVENTED_CONFIG",
     ] {
         if !output.contains(rule_id) {
-            return captured_failure(
+            let message = format!("bundler: reviewer output missing {rule_id}");
+            return captured_check_failure(
                 captured.result,
                 &captured.stdout,
-                &format!("bundler: reviewer output missing {rule_id}"),
+                Some(message.as_str()),
             );
         }
     }
@@ -5241,54 +5252,76 @@ fn bundled_prompt(
     .execute_in_capturing(id, required, root)
 }
 
-fn captured_failure(mut result: CheckResult, stdout: &[u8], message: &str) -> CheckResult {
-    result.exit_code = Some(1);
-    result.stderr_bytes += message.len();
-    result.output_digest = output_digest(stdout, message.as_bytes());
-    // Keep the message, not only its length. This function counted
-    // `message.len()` into stderr_bytes and dropped the text, so every check
-    // routed through it reported "failed (no reason captured)" while the
-    // byte count proved the reason had existed -- the same defect #3734 fixed
-    // for native checks, living inside the helper meant to attach failures.
-    result.with_failure(message)
+/// The captured-output half of an external check's failure text (#4632).
+///
+/// Bounded, not dropped: 2.8 MB is not printable, but its first and last lines
+/// are, and the stated byte count tells the reader what was elided. Truncation
+/// keeps the evidence usable; silence does not.
+fn bounded_output(bytes: &[u8]) -> Option<String> {
+    const LINE_KEEP: usize = 400;
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let (first, last) = match (lines.first().copied(), lines.last().copied()) {
+        (Some(first), Some(last)) => (first, last),
+        _ => return None,
+    };
+    let first: String = first.chars().take(LINE_KEEP).collect();
+    let last: String = last.chars().take(LINE_KEEP).collect();
+    if lines.len() == 1 {
+        Some(format!("stdout ({} bytes): {first}", bytes.len()))
+    } else {
+        Some(format!(
+            "stdout ({} bytes, first and last lines): {first} \u{2026} {last}",
+            bytes.len()
+        ))
+    }
 }
 
-/// A failing captured command, reported with the output it produced.
+/// The one helper that builds every external check's failure from what its
+/// runner already captured (#4632).
 ///
-/// The early-return paths returned `captured.result` untouched when the command
-/// itself failed, discarding stdout and stderr that were already in hand.
-/// check_block_expansion produced 2.8 MB that way and reported nothing.
+/// A runner that captures output attaches it to the result it returns: measuring
+/// a size and discarding the content is strictly worse than not capturing, because
+/// the harness then reports a number that proves the evidence existed.
 ///
-/// The text is bounded rather than dropped: megabytes are not printable, but a
-/// failure's first lines almost always name the cause, and a stated byte count
-/// tells the reader what was elided.
-fn captured_command_failure(result: CheckResult, stdout: &[u8]) -> CheckResult {
-    const KEEP: usize = 1600;
+/// `message` is the runner's own diagnosis when it has one (a content check that
+/// read a successful command's output and found it wrong), `None` when the
+/// child's own report is the reason. A failing child already carries a bounded
+/// stderr-first snippet in `result.failure` from the command layer; carrying it
+/// through is what keeps a run with 0 bytes of stdout and 106 of stderr from
+/// reporting "produced no output" -- a claim its own byte count refutes.
+fn captured_check_failure(
+    result: CheckResult,
+    stdout: &[u8],
+    message: Option<&str>,
+) -> CheckResult {
+    let mut result = result;
     let mut detail = String::new();
-    for (label, bytes) in [("stdout", stdout)] {
-        if bytes.is_empty() {
-            continue;
-        }
-        let text = String::from_utf8_lossy(bytes);
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+    if let Some(message) = message {
+        detail.push_str(message);
+    }
+    // A failing child's own report (stderr first) outranks its stdout; only when
+    // there is none is the captured stdout the report.
+    let evidence = result.failure.take().or_else(|| bounded_output(stdout));
+    if let Some(evidence) = &evidence {
         if !detail.is_empty() {
-            detail.push_str(" | ");
+            detail.push_str("; ");
         }
-        if trimmed.len() <= KEEP {
-            detail.push_str(&format!("{label}: {trimmed}"));
-        } else {
-            detail.push_str(&format!(
-                "{label} ({} bytes, first {KEEP} shown): {}",
-                bytes.len(),
-                &trimmed[..KEEP]
-            ));
-        }
+        detail.push_str(evidence);
     }
     if detail.is_empty() {
         detail = "the command failed and produced no output".to_string();
+    }
+    // A content check failing a command that exited 0 must record the failure.
+    if result.exit_code == Some(0) {
+        result.exit_code = Some(1);
+    }
+    if let Some(message) = message {
+        result.stderr_bytes += message.len();
+        result.output_digest = output_digest(stdout, message.as_bytes());
     }
     result.with_failure(detail)
 }
@@ -6942,78 +6975,3 @@ if failures:
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod captured_failure_tests {
-    use super::failure;
-
-    #[test]
-    fn the_shared_failure_constructor_attaches_its_message() {
-        // Used by 84 call sites. It recorded message.len() as stderr_bytes and
-        // digested the text, but never attached it -- so every external check
-        // built this way reported "no reason captured" while its own byte count
-        // proved the reason existed.
-        let out = failure("check_example", true, "skills/x.md: missing TOKEN");
-        assert_eq!(
-            out.failure.as_deref(),
-            Some("skills/x.md: missing TOKEN"),
-            "the reason must survive construction"
-        );
-        assert_eq!(out.stderr_bytes, "skills/x.md: missing TOKEN".len());
-        assert!(out.is_failure());
-    }
-
-    use super::{captured_command_failure, captured_failure};
-    use crate::validation::results::CheckResult;
-
-    fn base() -> CheckResult {
-        CheckResult::completed("check_example", true, 1, 5, 1, 0, 0, "digest")
-    }
-
-    #[test]
-    fn a_message_is_kept_not_merely_counted() {
-        // captured_failure added message.len() to stderr_bytes and dropped the
-        // text, so the byte count proved a reason had existed while the reason
-        // itself was gone.
-        let out = captured_failure(base(), b"", "bundler: the prefix is still injected");
-        assert_eq!(
-            out.failure.as_deref(),
-            Some("bundler: the prefix is still injected")
-        );
-        assert!(out.stderr_bytes > 0, "the count is still recorded");
-    }
-
-    #[test]
-    fn a_failing_command_reports_the_output_it_produced() {
-        let out = captured_command_failure(base(), b"not ok 3 the thing diverged\n");
-        let reason = out.failure.expect("a failing command must carry a reason");
-        assert!(reason.contains("not ok 3 the thing diverged"), "{reason}");
-    }
-
-    #[test]
-    fn a_huge_output_is_bounded_and_says_so() {
-        // check_block_expansion produced 2.8 MB. Printing it is useless and
-        // dropping it is worse; the head names the cause and the count tells
-        // the reader what was elided.
-        let noisy = vec![b'x'; 3_000_000];
-        let out = captured_command_failure(base(), &noisy);
-        let reason = out.failure.expect("bounded, not dropped");
-        assert!(
-            reason.contains("3000000 bytes"),
-            "{}",
-            &reason[..80.min(reason.len())]
-        );
-        assert!(reason.len() < 4_000, "reason is {} bytes", reason.len());
-    }
-
-    #[test]
-    fn a_silent_failure_says_it_was_silent() {
-        // Distinguishable from "the runner discarded it", which is the whole
-        // point: these need different fixes.
-        let out = captured_command_failure(base(), b"   \n  ");
-        assert_eq!(
-            out.failure.as_deref(),
-            Some("the command failed and produced no output")
-        );
-    }
-}
