@@ -74,11 +74,12 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 
 use autospec_core::conversion_gate::{test_count_contradiction, tests_added_by_patch};
 use autospec_core::conversion_pass::{select_fresh, PassOutcome, PatchCandidate};
 use autospec_core::failure_attribution::attribute;
+use autospec_core::gate_registry;
 use autospec_core::hold_memo::{re_gate, HoldRecord};
 use autospec_core::prefilter_scope::derive_prefilter_scope;
 use autospec_core::unfed_pass::PassCounters;
@@ -88,6 +89,7 @@ use serde_json::{json, Value};
 use super::claim::{branch_liveness, local_branch_checked_out, BranchLiveness};
 use super::CommandFailure;
 mod git;
+mod gate_source;
 mod language;
 mod progress;
 
@@ -99,62 +101,7 @@ pub const CONVERT_PLAN_SCHEMA: &str = "autospec.convert-plan.v1";
 /// The branch-name prefix the pass uses for a conversion attempt.
 pub const DEFAULT_BRANCH_PREFIX: &str = "conv-";
 
-const USAGE: &str = "\
-USAGE:
-    autospec convert [--llm-root DIR] [--repo OWNER/NAME] [--base BRANCH]
-                     [--held-file PATH] [--branch-prefix PREFIX]
-                     [--free-slots N] [--apply] [--archive] [--json]
-                     [--convert-ledger PATH] [ISSUE ...]
-
-PLAN (default): enumerate $LLM/*/out/issue-*/changes.patch, select the patches
-not already attempted (a live branch/PR, or a recorded HELD entry whose
-re-gate still holds, disqualify), and report the plan. No mutations.
-
---apply: perform the real conversion of each selected patch — branch off
-origin/<base>, full gate (fmt --check, build, clippy, test --no-fail-fast),
-open a PR per passing patch, and record a HELD line (a JSON HoldRecord in
-the ledger format below, never prose) for failures.
-
-OPTIONS:
-    --llm-root DIR        the agent-patch root (default: $LLM)
-    --repo OWNER/NAME     the GitHub repo for PR liveness (default: gh)
-    --base BRANCH         trunk to branch off origin/<base> (default: main)
-    --held-file PATH      the HELD ledger (default: <llm-root>/held.txt)
-    --branch-prefix P     conversion branch prefix (default: conv-)
-    --free-slots N        the free agent slots the fleet reports: with it,
-                          the pass alarms when the queue entries blocked on
-                          conversion exceed the free slots — the precise
-                          condition under which the fleet is wasting GPU
-                          time (#4558)
-    --apply               perform the conversion, not just the plan
-    --archive             archive the named issues' patches (move, never
-                          delete, to out/issue-N/superseded/) and release
-                          their queue entries — the explicit exit for a
-                          patch that can never convert. Requires explicit
-                          ISSUE numbers; a bare sweep would free every
-                          entry at once (#4558)
-    --json                machine-readable plan
-    --convert-ledger PATH one-off: convert a prose HELD ledger (lines of
-                          `- <issue>  HELD <reason>`) into the JSON
-                          HoldRecord lines the pass reads, one record per
-                          issue, preserving the recorded reason; writes to
-                          --held-file (default: <llm-root>/held.txt)
-    ISSUE ...             restrict the pass to these issue numbers
-
-BUFFER (reported on every plan and apply run): how many finished patches
-are waiting (on disk, no live PR) and how many queue entries they block
-(one per patch on disk; the dispatch guard holds each). With --free-slots
-N an ALARM line when the blocked entries exceed the free slots: the
-fleet's throughput is then limited by conversion, not compute (#4558).
-
-HELD LEDGER (--held-file): one JSON line per hold — the serde form of
-hold_memo::HoldRecord — fields issue, patch_key (patch mtime, seconds),
-base_sha (trunk tip the hold was derived against), depends_on (file paths;
-empty = the whole base), reason (what the gate reported: clippy=2, test X
-FAILED, conflict in PATH — the report, not a sentence). Blank and # comment
-lines are skipped. Prose belongs in reason (converted prose keeps its
-sentence there) or in a sidecar keyed by issue; a HELD line is always
-written in this format, never prose.";
+mod usage;
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     // A bare `autospec convert` is NOT a help request: it is the incident
@@ -171,7 +118,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
 }
 
 fn print_usage() {
-    println!("autospec convert — the patch-to-PR conversion pass\n\n{USAGE}");
+    println!("autospec convert — the patch-to-PR conversion pass\n\n{}", usage::USAGE);
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +133,8 @@ struct Options {
     archive: bool,
     as_json: bool,
     convert_ledger: Option<PathBuf>,
+    gate_registry: Option<PathBuf>,
+    shared_llm_root: bool,
     issues: Vec<u64>,
 }
 
@@ -201,6 +150,8 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
         archive: false,
         as_json: false,
         convert_ledger: None,
+        gate_registry: None,
+        shared_llm_root: false,
         issues: Vec::new(),
     };
     let value = |args: &[String], i: &mut usize, flag: &str| -> Result<String, CommandFailure> {
@@ -221,33 +172,42 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
             "--free-slots" => {
                 let raw = value(args, &mut i, &arg)?;
                 opts.free_slots = Some(
-                    raw.parse::<usize>().map_err(|_| {
-                        CommandFailure::diagnostic(format!(
-                            "--free-slots must be a non-negative integer, got {raw:?}\n{USAGE}"
-                        ))
-                    })?,
+                    raw.parse::<usize>()
+                        .map_err(|_| {
+                            CommandFailure::diagnostic(format!(
+                                "--free-slots must be a non-negative integer, got {raw:?}\n{}",
+                                usage::USAGE
+                            ))
+                        })?,
                 );
             }
             "--apply" => opts.apply = true,
             "--archive" => opts.archive = true,
+            "--shared-llm-root" => opts.shared_llm_root = true,
+            "--gate-registry" => {
+                opts.gate_registry = Some(PathBuf::from(value(args, &mut i, &arg)?))
+            }
             "--json" => opts.as_json = true,
             "--convert-ledger" => {
                 opts.convert_ledger = Some(PathBuf::from(value(args, &mut i, &arg)?))
             }
             other if other.starts_with("--") => {
                 return Err(CommandFailure::diagnostic(format!(
-                    "unknown autospec convert option: {other}\n{USAGE}"
+                    "unknown autospec convert option: {other}\n{}",
+                    usage::USAGE
                 )))
             }
             other => {
                 let issue = other.parse::<u64>().map_err(|_| {
                     CommandFailure::diagnostic(format!(
-                        "ISSUE must be a positive integer, got {other:?}\n{USAGE}"
+                        "ISSUE must be a positive integer, got {other:?}\n{}",
+                        usage::USAGE
                     ))
                 })?;
                 if issue == 0 {
                     return Err(CommandFailure::diagnostic(format!(
-                        "ISSUE must be a positive integer, got 0\n{USAGE}"
+                        "ISSUE must be a positive integer, got 0\n{}",
+                        usage::USAGE
                     )));
                 }
                 opts.issues.push(issue);
@@ -1037,6 +997,10 @@ fn convert(args: &[String]) -> Result<(), CommandFailure> {
         return run_apply(&plan);
     }
     gate::gate_tool_warning();
+    if let Some(repo) = plan.opts.repo.clone().or_else(infer_repo) {
+        let _ = gate_source::resolve_gate(plan.opts.gate_registry.as_deref(), &repo)
+            .map_err(|error| eprintln!("WARN: {error}"));
+    }
     render_plan(&plan)
 }
 
@@ -1141,7 +1105,12 @@ fn archive_issues(plan: &ConvertPlan) -> Result<(), CommandFailure> {
 
 fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     let selection = plan.selection();
-    let selection_line = selection.line(plan.candidates.len());
+    // Pipeline-glob coverage (#4556): suffix, gap warnings, incomplete exits 3.
+    let coverage = gate_source::plan_coverage(&plan.llm_root, plan.opts.shared_llm_root);
+    let selection_line = match &coverage {
+        Some(c) => format!("{} {}", selection.line(plan.candidates.len()), c.suffix()),
+        None => selection.line(plan.candidates.len()),
+    };
 
     let buffer = plan.buffer();
 
@@ -1174,10 +1143,13 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
                 "free_slots": plan.opts.free_slots,
                 "alarm": buffer.alarm(plan.opts.free_slots).is_some(),
             }),
+            "coverage": coverage.as_ref().map(|c| {
+                json!({ "reached": c.reached, "complete": c.complete(), "suffix": c.suffix() })
+            }),
             "summary": selection_line,
         });
         println!("{value}");
-        return Ok(());
+        return gate_source::finish_with_coverage(coverage.as_ref());
     }
 
     println!("{selection_line}");
@@ -1205,7 +1177,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     if let Some(alarm) = buffer.alarm(plan.opts.free_slots) {
         println!("{alarm}");
     }
-    Ok(())
+    gate_source::finish_with_coverage(coverage.as_ref())
 }
 
 /// The real conversion of each selected patch (steps 3-6). Side effects are
@@ -1218,6 +1190,8 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         ));
     }
     let repo: String = plan.opts.repo.clone().or_else(infer_repo).unwrap_or_default();
+
+    let gate_set = gate_source::resolve_gate(plan.opts.gate_registry.as_deref(), &repo)?;
 
     // Fetch the trunk so the pass branches off current origin/<base>.
     let base_ref = format!("origin/{}", plan.opts.base);
@@ -1242,7 +1216,7 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             Some(p) => p,
             None => continue,
         };
-        match apply_one(plan, &repo, &base_ref, &base_sha, patch) {
+        match apply_one(plan, &repo, &base_ref, &base_sha, patch, &gate_set) {
             ApplyResult::Converted => {
                 counters.converted += 1;
                 progress::converted(patch.issue, &patch.patch_key);
@@ -1275,7 +1249,10 @@ fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     if let Some(alarm) = buffer.alarm(plan.opts.free_slots) {
         println!("{alarm}");
     }
-    Ok(())
+    // A run reaching only part of its pipeline glob is not a success (#4556):
+    // the counters above are true; the exit says it was not whole.
+    let coverage = gate_source::plan_coverage(&plan.llm_root, plan.opts.shared_llm_root);
+    gate_source::finish_with_coverage(coverage.as_ref())
 }
 
 mod conflict;
@@ -1306,6 +1283,7 @@ fn apply_one(
     base_ref: &str,
     base_sha: &str,
     patch: &PatchLocation,
+    gate_set: &gate_registry::GateSet,
 ) -> ApplyResult {
     let branch = format!("{}{}", plan.opts.branch_prefix, patch.issue);
     let worktree = std::env::temp_dir().join(format!("autospec-conv-{branch}"));
@@ -1341,7 +1319,7 @@ fn apply_one(
     // the patch is applied. Being slow is recoverable; being narrow is not.
     let tests_added = tests_added_by_patch(&patch_text);
     let baseline_tests = if tests_added > 0 {
-        match run_test_count(&worktree, &packages) {
+        match run_test_count(&worktree, gate_set, &packages) {
             Some(count) => Some(count),
             None => {
                 teardown_worktree(&worktree);
@@ -1416,8 +1394,15 @@ fn apply_one(
             // The gate begins loudly: a verdict can take 11+ minutes, and a log
             // silent between start and verdict reads as a hang (#4572).
             progress::gate_scope(patch.issue, &packages);
-            let gate = run_gate(patch.issue, &worktree, &packages, tests_added, baseline_tests);
-            match gate {
+            let verdict = run_gate(
+                patch.issue,
+                &worktree,
+                &packages,
+                tests_added,
+                baseline_tests,
+                gate_set,
+            );
+            match verdict {
                 GateResult::Pass => {
                     // Step 5: open a PR per passing patch.
                     let opened = open_pr(repo, &worktree, &branch, patch, &packages, &resolutions);
@@ -1488,13 +1473,13 @@ fn classify_apply(output: &str, rc: Option<i32>) -> ApplyLifecycle {
     ApplyLifecycle::Conflict
 }
 
-/// The gate's test-stage argv at the given scope: `test --no-fail-fast`
-/// plus the scope tokens. The baseline count and the gate's test stage run
-/// this same argv, so they measure the same set of tests.
-fn test_stage(packages: &[String]) -> Vec<String> {
-    let mut stage = vec!["test".to_string(), "--no-fail-fast".to_string()];
-    stage.extend_from_slice(packages);
-    stage
+/// The recorded `test` stage expanded against the scope (baseline count and
+/// test stage run this same argv). `None` when no test stage is recorded.
+fn gate_test_stage(gate: &gate_registry::GateSet, packages: &[String]) -> Option<Vec<String>> {
+    gate.stages
+        .iter()
+        .find(|s| s.first().map(String::as_str) == Some("test"))
+        .map(|s| gate_registry::expand_scope(s, packages))
 }
 
 /// The baseline test count at the given scope: the test stage run at the
@@ -1502,8 +1487,8 @@ fn test_stage(packages: &[String]) -> Vec<String> {
 /// line (passed + failed — every test that ran). `None` when the stage
 /// produced no test result line (the base did not build, or no test ran) —
 /// a count that cannot be measured is not a zero.
-fn run_test_count(worktree: &Path, packages: &[String]) -> Option<u64> {
-    let stage = test_stage(packages);
+fn run_test_count(worktree: &Path, gate: &gate_registry::GateSet, packages: &[String]) -> Option<u64> {
+    let stage = gate_test_stage(gate, packages)?;
     let output = run_cargo(worktree, &stage)?;
     let text = format!(
         "{}\n{}",
@@ -1527,19 +1512,18 @@ fn run_gate(
     packages: &[String],
     tests_added: usize,
     baseline_tests: Option<u64>,
+    gate: &gate_registry::GateSet,
 ) -> GateResult {
-    // The gate, in order: fmt --check, build, clippy, then the test stage
-    // (handled separately — its output is the evidence for the
-    // unchanged-count contradiction). Each stage is its own cargo argv; the
-    // pinned toolchain is inherited from the environment (rust-toolchain.toml).
+    // The gate's non-test stages, in recorded order (#4556): each is its own
+    // cargo argv on the pinned toolchain. The test stage is handled separately
+    // — its output is the unchanged-count contradiction evidence.
     announce_placement();
-    let mut stages: Vec<Vec<String>> = vec![vec!["fmt".to_string(), "--check".to_string()]];
-    let mut build = vec!["build".to_string()];
-    build.extend_from_slice(packages);
-    stages.push(build);
-    let mut clippy = vec!["clippy".to_string(), "--all-targets".to_string()];
-    clippy.extend_from_slice(packages);
-    stages.push(clippy);
+    let stages: Vec<Vec<String>> = gate
+        .stages
+        .iter()
+        .filter(|s| s.first().map(String::as_str) != Some("test"))
+        .map(|s| gate_registry::expand_scope(s, packages))
+        .collect();
 
     for stage in &stages {
         progress::gate_stage(issue, &stage_name(stage));
@@ -1566,41 +1550,42 @@ fn run_gate(
         }
     }
 
-    let stage = test_stage(packages);
-    progress::gate_stage(issue, &stage_name(&stage));
-    let Some(output) = run_cargo(worktree, &stage) else {
-        return GateResult::Fail(format!("cargo {stage:?}: failed to spawn"));
-    };
-    let text = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if output.status.code() != Some(0) {
-        if was_never_placed(&output) {
-            return GateResult::BaseUnverifiable {
-                stage: stage_name(&stage),
-                detail: format!(
-                    "the work was never placed on an execution host ({}); the patch is \
-                     unmeasured, not defective",
-                    gate_placement()
-                ),
-            };
+    if let Some(stage) = gate_test_stage(gate, packages) {
+        progress::gate_stage(issue, &stage_name(&stage));
+        let Some(output) = run_cargo(worktree, &stage) else {
+            return GateResult::Fail(format!("cargo {stage:?}: failed to spawn"));
+        };
+        let text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.code() != Some(0) {
+            if was_never_placed(&output) {
+                return GateResult::BaseUnverifiable {
+                    stage: stage_name(&stage),
+                    detail: format!(
+                        "the work was never placed on an execution host ({}); the patch is \
+                         unmeasured, not defective",
+                        gate_placement()
+                    ),
+                };
+            }
+            return classify_stage_failure(worktree, &stage, text);
         }
-        return classify_stage_failure(worktree, &stage, text);
-    }
 
-    // Green stages are not yet a pass: the unchanged-count contradiction
-    // (issue #4532). `baseline_tests` is `Some` exactly when the patch adds
-    // test functions and the baseline was measured.
-    if let Some(baseline) = baseline_tests {
-        let aggregate = parse_test_run(&text);
-        let post = aggregate.passed.saturating_add(aggregate.failed);
-        if let Some(contradiction) = test_count_contradiction(tests_added, baseline, post) {
-            return GateResult::Contradiction(format!(
-                "gate failed: {contradiction} (gate scope: {})",
-                packages.join(" ")
-            ));
+        // Green stages are not yet a pass: the unchanged-count contradiction
+        // (issue #4532). `baseline_tests` is `Some` exactly when the patch adds
+        // test functions and the baseline was measured.
+        if let Some(baseline) = baseline_tests {
+            let aggregate = parse_test_run(&text);
+            let post = aggregate.passed.saturating_add(aggregate.failed);
+            if let Some(contradiction) = test_count_contradiction(tests_added, baseline, post) {
+                return GateResult::Contradiction(format!(
+                    "gate failed: {contradiction} (gate scope: {})",
+                    packages.join(" ")
+                ));
+            }
         }
     }
     GateResult::Pass
@@ -1881,20 +1866,30 @@ mod tests {
         );
     }
 
+    /// The recorded gate the scope tests run against (#4556): the four stages
+    /// `data/convert-gate-registry.json` records for the autospec repository.
+    fn test_gate() -> gate_registry::GateSet {
+        gate_registry::GateSet {
+            base_ref: "main".into(),
+            toolchain: None,
+            stages: vec![
+                vec!["fmt".into(), "--check".into()],
+                vec!["build".into(), "@scope".into()],
+                vec!["clippy".into(), "--all-targets".into(), "@scope".into()],
+                vec!["test".into(), "--no-fail-fast".into(), "@scope".into()],
+            ],
+        }
+    }
+
     #[test]
     fn the_test_stage_carries_the_derived_scope() {
         // The incident's shape: a cli patch gates the test stage at
         // `-p autospec-cli`, never at a fixed crate (issue #4532).
         let scope = gate_packages(&["crates/autospec-cli/tests/a.rs".to_string()]);
-        assert_eq!(
-            test_stage(&scope),
-            vec![
-                "test".to_string(),
-                "--no-fail-fast".to_string(),
-                "-p".to_string(),
-                "autospec-cli".to_string(),
-            ]
-        );
+        let expected: Vec<String> = ["test", "--no-fail-fast", "-p", "autospec-cli"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(gate_test_stage(&test_gate(), &scope), Some(expected));
     }
 
     #[test]
@@ -2175,6 +2170,8 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             archive: true,
             as_json: false,
             convert_ledger: None,
+            gate_registry: None,
+            shared_llm_root: false,
             issues,
         };
         build_plan(opts, root.to_path_buf()).unwrap()
@@ -2299,6 +2296,8 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             archive: false,
             as_json: false,
             convert_ledger: Some(prose.clone()),
+            gate_registry: None,
+            shared_llm_root: false,
             issues: Vec::new(),
         };
         assert!(convert_ledger(&opts, &prose).is_ok());

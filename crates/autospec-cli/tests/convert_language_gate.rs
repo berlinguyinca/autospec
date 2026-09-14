@@ -185,6 +185,19 @@ fn the_json_plan_carries_the_language_holds() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Record the gate the pass will run: without a recorded gate the pass
+/// refuses to judge at all (#4556), so a fixture that exercises the gate
+/// records it the way a real checkout carries its registry file.
+fn record_gate(dir: &Path) {
+    let data = dir.join("data");
+    fs::create_dir_all(&data).expect("data dir");
+    fs::write(
+        data.join("convert-gate-registry.json"),
+        r#"{"schema":1,"repos":{"test/fake":{"base_ref":"main","stages":[["fmt","--check"],["build","@scope"],["clippy","--all-targets","@scope"],["test","--no-fail-fast","@scope"]]}}}"#,
+    )
+    .expect("registry");
+}
+
 fn init_git_repo(dir: &Path) {
     let git = |args: &[&str]| {
         let status = Command::new("git")
@@ -227,6 +240,8 @@ fn apply_mode_archives_language_holds_and_never_reoffers_them() {
     };
     git(&["remote", "add", "origin", origin.to_str().unwrap()]);
     git(&["push", "-q", "origin", "main"]);
+
+    record_gate(&repo);
 
     let llm_root = work.join("llm");
     write_patch(&llm_root, "node-a", 101, &["scripts/x.sh"]); // shell only

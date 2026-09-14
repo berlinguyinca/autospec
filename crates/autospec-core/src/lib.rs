@@ -78,6 +78,7 @@ pub mod fleet_pipeline_health;
 pub mod gate_coverage;
 pub mod gate_hold;
 pub mod gate_provenance;
+pub mod gate_registry;
 pub mod gate_serialization;
 pub mod gate_verdict;
 pub mod grading;
@@ -117,6 +118,7 @@ pub mod negative_evidence;
 pub mod not_reproducible;
 pub mod patch_archive;
 pub mod patch_language;
+pub mod pipeline_coverage;
 pub mod planning;
 pub mod platform_gate;
 

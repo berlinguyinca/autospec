@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "repos": {
+    "berlinguyinca/autospec": {
+      "base_ref": "main",
+      "toolchain": "pinned-by-repository-rust-toolchain-toml",
+      "stages": [
+        ["fmt", "--check"],
+        ["build", "@scope"],
+        ["clippy", "--all-targets", "@scope"],
+        ["test", "--no-fail-fast", "@scope"]
+      ]
+    }
+  }
+}

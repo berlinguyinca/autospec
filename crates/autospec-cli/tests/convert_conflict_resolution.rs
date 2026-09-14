@@ -55,6 +55,20 @@ fn origin_show(origin: &Path, what: &str) -> String {
 /// Returns the base blobs the agent's patch will carry in its `index` lines:
 /// `git apply --3way` needs them to find the pre-move version of a file,
 /// exactly as it would from a real `git diff`.
+
+/// Record the gate the pass will run: without a recorded gate the pass
+/// refuses to judge at all (#4556), so a fixture that exercises the gate
+/// records it the way a real checkout carries its registry file.
+fn record_gate(repo: &Path) {
+    let data = repo.join("data");
+    fs::create_dir_all(&data).expect("data dir");
+    fs::write(
+        data.join("convert-gate-registry.json"),
+        r#"{"schema":1,"repos":{"test/fake":{"base_ref":"main","stages":[["fmt","--check"],["build","@scope"],["clippy","--all-targets","@scope"],["test","--no-fail-fast","@scope"]]}}}"#,
+    )
+    .expect("registry");
+}
+
 fn init_fixture_repo(repo: &Path, origin: &Path) -> (String, String) {
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::write(
@@ -204,6 +218,7 @@ fn an_additive_declarations_conflict_is_resolved_gated_and_named_in_the_pr() {
     let llm_root = work.join("llm");
     let gh_log = work.join("gh.log");
     let (lib_blob, _a_blob) = init_fixture_repo(&repo, &origin);
+    record_gate(&repo);
     move_main(&repo, false);
     write_patch(&llm_root, 201, &agent_patch(false, &lib_blob, &""));
     let bin_dir = install_fake_gh(&work);
@@ -282,6 +297,7 @@ fn a_mixed_conflict_holds_and_names_every_file() {
     let llm_root = work.join("llm");
     let gh_log = work.join("gh.log");
     let (lib_blob, a_blob) = init_fixture_repo(&repo, &origin);
+    record_gate(&repo);
     move_main(&repo, true); // main rewrites fn a's body, too
     write_patch(&llm_root, 202, &agent_patch(true, &lib_blob, &a_blob)); // the patch rewrites it differently
     let bin_dir = install_fake_gh(&work);
