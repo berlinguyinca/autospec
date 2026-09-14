@@ -1298,13 +1298,20 @@ fn apply_one(
             Some(count) => Some(count),
             None => {
                 teardown_worktree(&worktree);
-                return record_held_and_result(
+                // A test stage that produces no result line did not measure
+                // this patch and did not measure the base either: it is a fault
+                // on the host, not a verdict. Recording it as one is what let a
+                // full disk strand twelve patches behind holds nobody had
+                // reached.
+                return record_infrastructure_hold(
                     plan,
                     base_sha,
                     patch,
-                    "baseline test count undeterminable at the base (the test stage \
-                     produced no test result line) — the unchanged-count \
-                     contradiction cannot be checked",
+                    "the test stage produced no test result line, so no baseline \
+                     could be measured — the gate did not run. This is a fault on \
+                     the host (a full disk, a missing toolchain, an unbuildable \
+                     base), NOT a verdict about the patch, and it is re-gated \
+                     automatically once the fault clears",
                 );
             }
         }
@@ -1662,24 +1669,58 @@ fn open_pr(
 
 /// Append a HELD line (a JSON [`HoldRecord`]) to the ledger — the pass's
 /// "never discard" step — and return the held result.
+/// Record a hold for a gate that COULD NOT RUN.
+///
+/// Distinct from [`record_held_and_result`] because the two are not the same
+/// kind of fact: that one records a verdict about the patch, this one records a
+/// fault on the host. An infrastructure hold is always re-gated once the fault
+/// clears, so it cannot outlive the thing that caused it.
+fn record_infrastructure_hold(
+    plan: &ConvertPlan,
+    base_sha: &str,
+    patch: &PatchLocation,
+    reason: &str,
+) -> ApplyResult {
+    record_held_inner(plan, base_sha, patch, reason, true)
+}
+
 fn record_held_and_result(
     plan: &ConvertPlan,
     base_sha: &str,
     patch: &PatchLocation,
     reason: &str,
 ) -> ApplyResult {
+    record_held_inner(plan, base_sha, patch, reason, false)
+}
+
+fn record_held_inner(
+    plan: &ConvertPlan,
+    base_sha: &str,
+    patch: &PatchLocation,
+    reason: &str,
+    infrastructure: bool,
+) -> ApplyResult {
     let held_path = plan
         .opts
         .held_file
         .clone()
         .unwrap_or_else(|| plan.llm_root.join("held.txt"));
-    let record = HoldRecord::new(
-        patch.issue,
-        patch.patch_key.clone(),
-        base_sha,
-        Vec::new(),
-        reason.to_string(),
-    );
+    let record = if infrastructure {
+        HoldRecord::infrastructure(
+            patch.issue,
+            patch.patch_key.clone(),
+            base_sha,
+            reason.to_string(),
+        )
+    } else {
+        HoldRecord::new(
+            patch.issue,
+            patch.patch_key.clone(),
+            base_sha,
+            Vec::new(),
+            reason.to_string(),
+        )
+    };
     if let Some(record) = record {
         if let Some(parent) = held_path.parent() {
             let _ = fs::create_dir_all(parent);

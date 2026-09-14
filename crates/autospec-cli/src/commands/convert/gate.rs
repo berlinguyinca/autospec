@@ -126,12 +126,58 @@ pub(super) fn parse_gate_target_dir(raw: Option<&str>) -> Option<std::path::Path
 }
 
 /// The default cache location: this machine's `~/.cache`, created on first
-/// use. A host without a home directory gets no shared cache, and the gate
-/// runs exactly as before (its own `target/` in the worktree).
+/// use — but only when it is demonstrably writable. A host without a usable
+/// home directory gets no shared cache, and the gate runs exactly as before
+/// (its own `target/` in the worktree): colder, and correct.
+///
+/// The probe is not defensive padding. `$HOME` on a cluster is routinely a
+/// quota-limited network filesystem, and a cache is exactly the thing that
+/// grows until it hits that limit. Observed 2026-09-14: this directory reached
+/// 13 GB of a 20 GB home, after which every gate died ~2s in with
+///
+///     error: failed to write `.../debug/.fingerprint/...`
+///     Caused by: Disk quota exceeded (os error 122)
+///
+/// producing no `test result:` line, so twelve patches were held as
+/// "baseline test count undeterminable" — a verdict nobody had reached. A
+/// cache that cannot be written is worse than no cache, because the failure
+/// arrives as a mis-attributed verdict rather than as a slow build.
 fn default_gate_target_dir() -> Option<std::path::PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|home| Path::new(&home).join(".cache/autospec-convert-target"))
+    let dir = Path::new(&std::env::var("HOME").ok()?).join(".cache/autospec-convert-target");
+    usable_cache_dir(dir)
+}
+
+/// The writability decision, split from the environment lookup so it is
+/// testable without mutating process-wide state — the same discipline as
+/// [`parse_gate_target_dir`].
+pub(super) fn usable_cache_dir(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!(
+            "gate: not using {} as a build cache ({e}); \
+             falling back to the worktree's own target/",
+            dir.display()
+        );
+        return None;
+    }
+    // Writable *now*, with space: create_dir_all succeeds on a full filesystem
+    // when the directory already exists, which is the case that stranded the
+    // twelve patches.
+    let probe = dir.join(".autospec-write-probe");
+    match std::fs::write(&probe, b"probe") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            Some(dir)
+        }
+        Err(e) => {
+            eprintln!(
+                "gate: {} is not writable ({e}); falling back to the worktree's \
+                 own target/. A cache that cannot be written makes every gate \
+                 look like a patch defect.",
+                dir.display()
+            );
+            None
+        }
+    }
 }
 
 /// Whether the shared cache already holds built artifacts, for the report.
@@ -589,5 +635,50 @@ mod tests {
         assert!(line.starts_with("FATAL: cargo, git not on PATH"), "{line}");
         assert!(line.contains("no patch was judged"), "{line}");
         assert!(line.contains("nothing was recorded"), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod cache_dir_tests {
+    use super::usable_cache_dir;
+
+    /// A writable directory is used, and the probe leaves nothing behind.
+    #[test]
+    fn a_writable_directory_is_used_and_left_clean() {
+        let base = std::env::temp_dir().join(format!("autospec-cache-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let got = usable_cache_dir(base.clone()).expect("a writable dir is usable");
+        assert_eq!(got, base);
+        let leftovers: Vec<_> = std::fs::read_dir(&base)
+            .expect("created")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the write probe must clean up after itself, found {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The case that stranded twelve patches: the directory EXISTS, so
+    /// `create_dir_all` succeeds, but it cannot be written. A cache that cannot
+    /// be written must be refused here rather than discovered by cargo dying
+    /// mid-gate, where the failure is mis-attributed to the patch.
+    #[test]
+    fn an_existing_but_unwritable_directory_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("autospec-cache-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("setup");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+        let got = usable_cache_dir(base.clone());
+        // Restore before asserting so a failure still cleans up.
+        let _ = std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            got.is_none(),
+            "an unwritable cache dir must fall back to the worktree's target/, got {got:?}"
+        );
     }
 }
