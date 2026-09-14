@@ -53,6 +53,10 @@ fn write_patch(root: &Path, node: &str, issue: u64, paths: &[&str]) {
     fs::write(issue_dir.join("changes.patch"), patch_for(paths)).expect("patch");
 }
 
+/// The test's working directory, whose *parent* is unique to this test
+/// (#4556): the pass's coverage question is the llm root's siblings, and
+/// parallel tests in one binary share a PID — so a shared parent would make
+/// each test see the others' llm roots as pipelines it never reached.
 fn temp_dir(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "autospec-convert-lang-{tag}-{}",
@@ -63,9 +67,17 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+/// The llm root under this test's unique parent: its siblings are this
+/// test's own artifacts only, so the coverage question is well-formed.
+fn llm_root(work: &std::path::Path) -> std::path::PathBuf {
+    let root = work.join("root").join("llm");
+    fs::create_dir_all(&root).expect("llm root");
+    root
+}
+
 #[test]
 fn plan_mode_holds_ungatetable_languages_before_any_branch() {
-    let root = temp_dir("plan");
+    let root = llm_root(&temp_dir("plan"));
     write_patch(&root, "node-a", 101, &["scripts/x.sh"]); // shell only
     write_patch(
         &root,
@@ -153,7 +165,7 @@ fn plan_mode_holds_ungatetable_languages_before_any_branch() {
 
 #[test]
 fn the_json_plan_carries_the_language_holds() {
-    let root = temp_dir("json");
+    let root = llm_root(&temp_dir("json"));
     write_patch(&root, "node-a", 101, &["scripts/x.sh"]);
     write_patch(&root, "node-a", 103, &["crates/autospec-core/src/a.rs"]);
 
@@ -183,6 +195,19 @@ fn the_json_plan_carries_the_language_holds() {
     assert_eq!(fresh.len(), 1);
     assert_eq!(fresh[0]["issue"], 103);
     let _ = fs::remove_dir_all(&root);
+}
+
+/// Record the gate the pass will run: without a recorded gate the pass
+/// refuses to judge at all (#4556), so a fixture that exercises the gate
+/// records it the way a real checkout carries its registry file.
+fn record_gate(dir: &Path) {
+    let data = dir.join("data");
+    fs::create_dir_all(&data).expect("data dir");
+    fs::write(
+        data.join("convert-gate-registry.json"),
+        r#"{"schema":1,"repos":{"test/fake":{"base_ref":"main","stages":[["fmt","--check"],["build","@scope"],["clippy","--all-targets","@scope"],["test","--no-fail-fast","@scope"]]}}}"#,
+    )
+    .expect("registry");
 }
 
 fn init_git_repo(dir: &Path) {
@@ -228,7 +253,9 @@ fn apply_mode_archives_language_holds_and_never_reoffers_them() {
     git(&["remote", "add", "origin", origin.to_str().unwrap()]);
     git(&["push", "-q", "origin", "main"]);
 
-    let llm_root = work.join("llm");
+    record_gate(&repo);
+
+    let llm_root = llm_root(&work);
     write_patch(&llm_root, "node-a", 101, &["scripts/x.sh"]); // shell only
     write_patch(&llm_root, "node-a", 102, &["README.md"]); // neither
 

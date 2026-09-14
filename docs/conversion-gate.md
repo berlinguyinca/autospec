@@ -288,6 +288,65 @@ first because one incident demanded it; the same reasoning always applied to the
 others, and the stage that actually broke the pipeline in production was `fmt`,
 which had none.
 
+## Pipeline coverage and the gate registry (issue #4556)
+
+Two holes in the pass's contract, found by measurement on the fleet: 110
+patches across 3 pipelines had never been converted — not held, not rejected,
+not recorded — because the pass was specified over the whole pipeline glob
+(`$L/*/out/issue-*/changes.patch`) but run against one pipeline's root, and
+the gate it enforced was hard-coded in the binary rather than recorded per
+repository.
+
+### 1. A run that reaches part of its glob says so and is not a success
+
+Every plan and apply run reports its coverage of the pipeline glob:
+`coverage=N/M pipelines` on the summary line, a `coverage` object
+(`reached`, `complete`, `suffix`) in the `--json` plan, and a
+`coverage gap: pipeline 'X' holds K patch(es) ...` line (stderr) per
+unreached pipeline that still holds patches. An incomplete run exits `3` —
+distinct from `0` (complete), `1` (apply fatal), and `2` (diagnostic) — with
+the status line naming the reached pipeline and every gap. A zero count from
+a directory that was never opened is not reportable as "nothing to convert":
+the gap line says what was never examined.
+
+The tree shape is the operator's to declare because the two shapes are
+structurally identical at the root (a pipeline's node directories look
+exactly like a shared root's pipeline directories):
+
+- **default**: `--llm-root` is one pipeline's directory; the other pipelines
+  are its siblings under the same parent, counted the same way the pass's own
+  enumeration counts (directly or through node directories).
+- **`--shared-llm-root`**: `--llm-root` is the shared parent; its children
+  that hold `out` directly are the pipelines, and the pass's enumeration read
+  every one — `reached = "all"`, complete by construction.
+
+A single pipeline (no siblings) has no coverage question: no suffix, no
+gaps, the usual exit codes.
+
+### 2. The gate is recorded data, not a guess
+
+The gate set a pass enforces is data in the checkout being gated:
+
+```
+data/convert-gate-registry.json
+```
+
+(or `--gate-registry PATH`, else `$AUTOSPEC_GATE_REGISTRY`). The file is
+`{"schema":1,"repos":{"OWNER/NAME":{"base_ref":"main","stages":[[...]]}}}` —
+one entry per repository, each naming its base branch and the gate's stages
+in order; a stage's `@scope` token expands to the pass's affected packages
+for that patch. The pass runs the recorded stages: every stage except the
+`test` stage, then the recorded `test` stage (its output is the evidence for
+the unchanged-test-count contradiction, which runs only when a `test` stage
+is recorded).
+
+Under `--apply`, a repository with no recorded gate is refused before any
+patch is judged: `no gate established for REPO: ...` and exit `2` — a pass
+must not guess the gate it claims to enforce. Plan mode prints the same
+message as a `WARN` and still reports the plan (a plan is useful; the
+refusal belongs to the run that would judge). The registry is read from the
+checkout's working directory, so the file travels with the repository it
+describes.
 ## The push-before-PR window, and the attempt axis (#4499)
 
 The pass pushes a branch and only then opens the PR. An interruption in that

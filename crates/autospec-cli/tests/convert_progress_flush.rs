@@ -46,6 +46,20 @@ fn run_git_output(dir: &Path, args: &[&str]) -> String {
 /// whose test fails, so the gate runs every stage — fmt, build, clippy —
 /// before it dies at test: a multi-second run with nothing to flush but our
 /// progress lines.
+
+/// Record the gate the pass will run: without a recorded gate the pass
+/// refuses to judge at all (#4556), so a fixture that exercises the gate
+/// records it the way a real checkout carries its registry file.
+fn record_gate(repo: &Path) {
+    let data = repo.join("data");
+    fs::create_dir_all(&data).expect("data dir");
+    fs::write(
+        data.join("convert-gate-registry.json"),
+        r#"{"schema":1,"repos":{"test/fake":{"base_ref":"main","stages":[["fmt","--check"],["build","@scope"],["clippy","--all-targets","@scope"],["test","--no-fail-fast","@scope"]]}}}"#,
+    )
+    .expect("registry");
+}
+
 fn init_fixture_repo(repo: &Path, origin: &Path) -> String {
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::write(
@@ -120,6 +134,7 @@ fn decision_lines_arrive_while_the_pass_is_still_running() {
     let stderr_path = work.join("stderr.log");
     let stderr_file = fs::File::create(&stderr_path).unwrap();
     let lib_blob = init_fixture_repo(&repo, &origin);
+    record_gate(&repo);
     write_patch(&llm_root, 201, &agent_patch(&lib_blob));
     let bin_dir = install_fake_gh(&work);
 
@@ -277,6 +292,7 @@ fn the_plan_banner_names_the_held_ledger() {
     let origin = work.join("origin.git");
     let llm_root = work.join("llm");
     let lib_blob = init_fixture_repo(&repo, &origin);
+    record_gate(&repo);
     write_patch(&llm_root, 201, &agent_patch(&lib_blob));
     let bin_dir = install_fake_gh(&work);
 

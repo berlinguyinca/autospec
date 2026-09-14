@@ -75,6 +75,15 @@ fn init_fixture_repo(repo: &Path, origin: &Path) -> String {
         "pub fn one() -> u32 {\n    1\n}\n\n#[test]\nfn the_base_tests() {\n    assert_eq!(one(), 1);\n}\n",
     )
     .unwrap();
+    // Record the gate the pass will run: without one, --apply refuses to
+    // judge at all (#4556).
+    let data = repo.join("data");
+    fs::create_dir_all(&data).expect("data dir");
+    fs::write(
+        data.join("convert-gate-registry.json"),
+        r#"{"schema":1,"repos":{"test/fake":{"base_ref":"main","stages":[["fmt","--check"],["build","@scope"],["clippy","--all-targets","@scope"],["test","--no-fail-fast","@scope"]]}}}"#,
+    )
+    .expect("registry");
     run_git(repo, &["init", "-q", "-b", "main"]);
     let status = Command::new("git")
         .args(["init", "-q", "--bare", origin.to_str().unwrap()])
@@ -286,6 +295,15 @@ fn a_patch_already_in_the_base_is_delivered_not_fresh() {
 
     // The base: one function.
     fs::create_dir_all(repo.join("src")).unwrap();
+    // Record the gate the pass will run (#4556); the delivered path archives
+    // without gating, but the pass resolves the gate source first.
+    let data = repo.join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(
+        data.join("convert-gate-registry.json"),
+        r#"{"schema":1,"repos":{"test/fake":{"base_ref":"main","stages":[["fmt","--check"],["build","@scope"],["clippy","--all-targets","@scope"],["test","--no-fail-fast","@scope"]]}}}"#,
+    )
+    .unwrap();
     fs::write(
         repo.join("Cargo.toml"),
         "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
