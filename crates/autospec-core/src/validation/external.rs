@@ -4317,7 +4317,7 @@ fn run_implementer_contract(id: &str, required: bool, root: &Path) -> CheckResul
     }
     let captured = bundled_prompt(id, required, root, "implementer");
     if captured.result.is_failure() {
-        return captured.result;
+        return captured_command_failure(captured.result, &captured.stdout);
     }
     if contains_bytes(&captured.stdout, b"SKILL.md (implementer role)") {
         return captured_failure(
@@ -4376,7 +4376,7 @@ fn run_reviewer_contract(id: &str, required: bool, root: &Path) -> CheckResult {
     }
     let captured = bundled_prompt(id, required, root, "reviewer");
     if captured.result.is_failure() {
-        return captured.result;
+        return captured_command_failure(captured.result, &captured.stdout);
     }
     if contains_bytes(&captured.stdout, b"SKILL.md (reviewer role)") {
         return captured_failure(
@@ -5236,7 +5236,52 @@ fn captured_failure(mut result: CheckResult, stdout: &[u8], message: &str) -> Ch
     result.exit_code = Some(1);
     result.stderr_bytes += message.len();
     result.output_digest = output_digest(stdout, message.as_bytes());
-    result
+    // Keep the message, not only its length. This function counted
+    // `message.len()` into stderr_bytes and dropped the text, so every check
+    // routed through it reported "failed (no reason captured)" while the
+    // byte count proved the reason had existed -- the same defect #3734 fixed
+    // for native checks, living inside the helper meant to attach failures.
+    result.with_failure(message)
+}
+
+/// A failing captured command, reported with the output it produced.
+///
+/// The early-return paths returned `captured.result` untouched when the command
+/// itself failed, discarding stdout and stderr that were already in hand.
+/// check_block_expansion produced 2.8 MB that way and reported nothing.
+///
+/// The text is bounded rather than dropped: megabytes are not printable, but a
+/// failure's first lines almost always name the cause, and a stated byte count
+/// tells the reader what was elided.
+fn captured_command_failure(result: CheckResult, stdout: &[u8]) -> CheckResult {
+    const KEEP: usize = 1600;
+    let mut detail = String::new();
+    for (label, bytes) in [("stdout", stdout)] {
+        if bytes.is_empty() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(bytes);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !detail.is_empty() {
+            detail.push_str(" | ");
+        }
+        if trimmed.len() <= KEEP {
+            detail.push_str(&format!("{label}: {trimmed}"));
+        } else {
+            detail.push_str(&format!(
+                "{label} ({} bytes, first {KEEP} shown): {}",
+                bytes.len(),
+                &trimmed[..KEEP]
+            ));
+        }
+    }
+    if detail.is_empty() {
+        detail = "the command failed and produced no output".to_string();
+    }
+    result.with_failure(detail)
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -6875,3 +6920,60 @@ if failures:
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod captured_failure_tests {
+    use super::{captured_command_failure, captured_failure};
+    use crate::validation::results::CheckResult;
+
+    fn base() -> CheckResult {
+        CheckResult::completed("check_example", true, 1, 5, 1, 0, 0, "digest")
+    }
+
+    #[test]
+    fn a_message_is_kept_not_merely_counted() {
+        // captured_failure added message.len() to stderr_bytes and dropped the
+        // text, so the byte count proved a reason had existed while the reason
+        // itself was gone.
+        let out = captured_failure(base(), b"", "bundler: the prefix is still injected");
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("bundler: the prefix is still injected")
+        );
+        assert!(out.stderr_bytes > 0, "the count is still recorded");
+    }
+
+    #[test]
+    fn a_failing_command_reports_the_output_it_produced() {
+        let out = captured_command_failure(base(), b"not ok 3 the thing diverged\n");
+        let reason = out.failure.expect("a failing command must carry a reason");
+        assert!(reason.contains("not ok 3 the thing diverged"), "{reason}");
+    }
+
+    #[test]
+    fn a_huge_output_is_bounded_and_says_so() {
+        // check_block_expansion produced 2.8 MB. Printing it is useless and
+        // dropping it is worse; the head names the cause and the count tells
+        // the reader what was elided.
+        let noisy = vec![b'x'; 3_000_000];
+        let out = captured_command_failure(base(), &noisy);
+        let reason = out.failure.expect("bounded, not dropped");
+        assert!(
+            reason.contains("3000000 bytes"),
+            "{}",
+            &reason[..80.min(reason.len())]
+        );
+        assert!(reason.len() < 4_000, "reason is {} bytes", reason.len());
+    }
+
+    #[test]
+    fn a_silent_failure_says_it_was_silent() {
+        // Distinguishable from "the runner discarded it", which is the whole
+        // point: these need different fixes.
+        let out = captured_command_failure(base(), b"   \n  ");
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("the command failed and produced no output")
+        );
+    }
+}
