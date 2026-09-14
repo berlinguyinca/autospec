@@ -74,6 +74,27 @@ function hd_delim(line,   i, s, c) {
     }
     return s
 }
+# Single-quote parity across a block: a `!` at the start of a line is data,
+# not a statement, while a single-quoted program (an awk '...') is still open.
+# Double quotes are tracked so an apostrophe in echo "it's" never toggles the
+# state. Comment and blank lines carry no quotes that matter here.
+function quote_state(line,   i, c, esc) {
+    for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (in_sq) {
+            if (c == SQ) in_sq = 0
+        } else if (in_dq) {
+            if (esc) esc = 0
+            else if (c == "\\") esc = 1
+            else if (c == DQ) in_dq = 0
+        } else {
+            if (c == SQ) in_sq = 1
+            else if (c == DQ) { in_dq = 1; esc = 0 }
+            else esc = (c == "\\")
+        }
+    }
+    in_dq = 0   # a double-quoted string spanning lines is out of scope
+}
 function flush(   i, last, l) {
     last = 0
     for (i = 1; i <= n; i++) {
@@ -82,13 +103,22 @@ function flush(   i, last, l) {
         if (l ~ /^[[:space:]]*#/) continue
         last = i
     }
-    for (i = 1; i <= n; i++)
-        if (lines[i] ~ /^[[:space:]]*!/ && i != last)
+    in_sq = 0; in_dq = 0
+    for (i = 1; i <= n; i++) {
+        l = lines[i]
+        if (l ~ /^[[:space:]]*$/ || l ~ /^[[:space:]]*#/) continue
+        # A site: line-leading `!`, not the block's final statement, not a
+        # find predicate (`! -name`, a find operator), not mid-program data
+        # inside an open single-quoted string (an awk '...').
+        is_find = (l ~ /^[[:space:]]*! -[a-z]/)
+        if (l ~ /^[[:space:]]*!/ && i != last && !is_find && !in_sq)
             printf "%s:%d\n", FILENAME, lno[i]
+        quote_state(l)
+    }
     intest = 0
     n = 0
 }
-BEGIN { SQ = sprintf("%c", 39); DQ = sprintf("%c", 34); intest = 0; n = 0; hd = "" }
+BEGIN { SQ = sprintf("%c", 39); DQ = sprintf("%c", 34); intest = 0; n = 0; hd = ""; in_sq = 0; in_dq = 0 }
 FNR == 1 { if (intest) flush(); hd = "" }
 hd != "" {
     if ($0 ~ "^[ \t]*" hd "[ \t]*$") hd = ""

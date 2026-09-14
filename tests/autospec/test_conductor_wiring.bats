@@ -189,7 +189,7 @@ $body"
 
   [[ "$output" == *"parking"* ]]
   if [ -f "$run_log" ]; then
-    ! grep -q 'should-not-' "$run_log"
+    if grep -q 'should-not-' "$run_log"; then false; fi
   fi
 }
 
@@ -230,10 +230,10 @@ $body"
   [ "$status" -eq 0 ]
   [ ! -f "$gate_log" ]
   if [ -f "$run_log" ]; then
-    ! grep -q 'should-not-run' "$run_log"
+    if grep -q 'should-not-run' "$run_log"; then false; fi
   fi
   if [ -f "$spend_log" ]; then
-    ! grep -q 'spend-add' "$spend_log"
+    if grep -q 'spend-add' "$spend_log"; then false; fi
   fi
   [[ "$output" == *"Tier-1 queue empty"* ]]
 }
@@ -296,8 +296,8 @@ $body"
   [ ! -f "$queue_log" ]
   [ ! -f "$gate_log" ]
   if [ -f "$run_log" ]; then
-    ! grep -q 'lint-implementation.sh 1898 --issue 1886' "$run_log"
-    ! grep -q 'autospec validate' "$run_log"
+    if grep -q 'lint-implementation.sh 1898 --issue 1886' "$run_log"; then false; fi
+    if grep -q 'autospec validate' "$run_log"; then false; fi
   fi
   grep -q 'state:stopped:operator:stop-flag:cycle-0' "$resilience_log"
 
@@ -336,7 +336,7 @@ $body"
 
   # Run command must NOT have been invoked when gate blocks.
   if [ -f "$run_log" ]; then
-    ! grep -q 'should-not-run' "$run_log"
+    if grep -q 'should-not-run' "$run_log"; then false; fi
   fi
 }
 
@@ -522,7 +522,7 @@ EOF
   run jq -r '.issues' <<<"$output"
   [ "$output" = "0" ]
   if [ -f "$run_log" ]; then
-    ! grep -q 'should-not-run' "$run_log"
+    if grep -q 'should-not-run' "$run_log"; then false; fi
   fi
 }
 
@@ -557,7 +557,7 @@ EOF
 
   # autospec-run must NOT have been invoked.
   if [ -f "$run_log" ]; then
-    ! grep -q 'run' "$run_log"
+    if grep -q 'run' "$run_log"; then false; fi
   fi
 }
 

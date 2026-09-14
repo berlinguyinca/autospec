@@ -309,7 +309,7 @@ install_all_mocks() {
     TAG_LOG="$TAG_LOG" COMMIT_LOG="$COMMIT_LOG" \
     BUILD_FAIL_COUNT=999 TEST_ROOT="$TEST_ROOT" \
     bash "$ENGINE" --hops "$FX/hops-multi.json" --root "$TEST_ROOT" --max-fix 2
-  ! grep -qF 'pre-upgrade-angular-22' "$TAG_LOG"
+  if grep -qF 'pre-upgrade-angular-22' "$TAG_LOG"; then false; fi
   ! grep -qF 'post-upgrade-angular-22' "$TAG_LOG"
 }
 

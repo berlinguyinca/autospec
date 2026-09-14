@@ -43,25 +43,33 @@
 /// The counters a pass reports after it has been through its candidate list.
 ///
 /// [`PassCounters::examined`] is the size of the input the pass was handed;
-/// the other three are what it did with it. A zero counter says nothing
-/// about work performed until it is read against `examined` (invariant 4).
+/// the others are what it did with it, including what it declined to start.
+/// A zero counter says nothing about work performed until it is read
+/// against `examined` (invariant 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PassCounters {
     pub examined: usize,
     pub converted: usize,
     pub held: usize,
     pub skipped: usize,
+    /// Candidates the pass never started: a deadline was given and the
+    /// remaining time dropped below the observed per-item cost before they
+    /// were reached (#4607). A pass that quietly did 1 of 12 and one that
+    /// did 12 of 12 must not print the same line; `deferred` is what keeps
+    /// them apart.
+    pub deferred: usize,
 }
 
 impl PassCounters {
-    /// A pass cannot have acted on more items than it examined.
+    /// A pass cannot have accounted for more items than it examined.
     ///
-    /// `converted + held + skipped > examined` is a state that cannot exist;
-    /// a report whose counters do not reconcile is reporting a state that
-    /// cannot exist (the same discipline as the frontier counts in
-    /// `stored_output`).
+    /// `converted + held + skipped + deferred > examined` is a state that
+    /// cannot exist; a report whose counters do not reconcile is reporting
+    /// a state that cannot exist (the same discipline as the frontier counts
+    /// in `stored_output`). Deferral is accounted work too: the pass decided
+    /// about those candidates, it decided not to start them.
     pub fn reconciles(&self) -> bool {
-        self.converted + self.held + self.skipped <= self.examined
+        self.converted + self.held + self.skipped + self.deferred <= self.examined
     }
 }
 
@@ -87,8 +95,8 @@ pub fn unfed_line(tool: &str, script: &str, selector: &str) -> String {
 /// the line that prints it is a different line (invariant 1).
 pub fn examined_line(tool: &str, counters: &PassCounters) -> String {
     format!(
-        "######## {tool}: examined={} converted={} held={} skipped={} ########",
-        counters.examined, counters.converted, counters.held, counters.skipped
+        "######## {tool}: examined={} converted={} held={} skipped={} deferred={} ########",
+        counters.examined, counters.converted, counters.held, counters.skipped, counters.deferred
     )
 }
 

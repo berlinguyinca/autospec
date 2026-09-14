@@ -68,9 +68,9 @@ setup() {
 @test "detailed end-of-run procedures are out of the body" {
     for f in "$BODY" "$CODEX" "$OPENCODE"; do
         # these markers live only in the moved reference, never in the body
-        ! grep -q 'gap-remediation-loop.sh' "$f"
-        ! grep -q 'fab-completeness.sh' "$f"
-        ! grep -q 'advisor-sweep-tick.sh' "$f"
+        if grep -q 'gap-remediation-loop.sh' "$f"; then false; fi
+        if grep -q 'fab-completeness.sh' "$f"; then false; fi
+        if grep -q 'advisor-sweep-tick.sh' "$f"; then false; fi
     done
 }
 

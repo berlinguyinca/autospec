@@ -8218,9 +8218,9 @@ fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         for entry in fs::read_dir(path).expect("read fixture tree") {
             let entry = entry.expect("read fixture entry");
             let path = entry.path();
-            if path.is_dir() {
+            if path.is_dir() && path.file_name() != Some(std::ffi::OsStr::new(".git")) {
                 visit(root, &path, snapshot);
-            } else {
+            } else if !path.is_dir() {
                 snapshot.insert(
                     path.strip_prefix(root)
                         .expect("fixture entry below root")

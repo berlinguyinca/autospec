@@ -94,6 +94,7 @@ fn an_idle_plan_is_distinct_from_a_broken_one() {
         converted: 0,
         held: 0,
         skipped: 110,
+        deferred: 0,
     });
     // The pass was handed no candidates: it did no work, and its line must
     // not look like the idle one.
