@@ -41,6 +41,7 @@ pub(crate) fn plan_outcome(candidates: &[PatchCandidate]) -> PassOutcome {
         held: 0,
         skipped: selection.disqualified.len() + selection.language_held.len(),
         deferred: 0,
+        delivered: selection.delivered.len(),
     })
 }
 

@@ -95,8 +95,80 @@ fn the_plan_line_reports_examined_fresh_and_each_reason() {
     assert!(line.contains("examined=121"), "{line}");
     assert!(line.contains("fresh=36"), "{line}");
     assert!(line.contains("interrupted=26"), "{line}");
+    assert!(line.contains("delivered=0"), "{line}");
     assert!(line.contains("70 attempted"), "{line}");
     assert!(line.contains("15 held"), "{line}");
+}
+
+#[test]
+fn a_delivered_patch_is_reported_not_offered() {
+    // #4501: the changes are in the base — the patch is residue. It must
+    // not be offered (the gate would spend two hours on nothing), and it
+    // must be visible on its own: the backlog number has to mean what a
+    // reader assumes it means.
+    let candidates = vec![fresh(1), with(fresh(2), |c| c.delivered = true)];
+    let selection = select_fresh(&candidates);
+    assert_eq!(
+        selection.fresh.len(),
+        1,
+        "only the undelivered patch is offered"
+    );
+    assert_eq!(
+        selection.fresh.first().map(|c| c.patch_key.as_str()),
+        Some("patch-1")
+    );
+    assert_eq!(
+        selection.delivered.first().map(|c| c.patch_key.as_str()),
+        Some("patch-2"),
+        "the residue is named as delivered, not hidden"
+    );
+    assert_eq!(selection.delivered_count(), 1);
+    let line = selection.line(2);
+    assert!(line.contains("delivered=1"), "{line}");
+    assert!(line.contains("fresh=1"), "{line}");
+}
+
+#[test]
+fn a_delivered_patch_beats_a_live_attempt_and_a_hold() {
+    // The changes are in the base: the attempt state and any recorded hold
+    // are both stale facts about a patch that has nothing left to convert.
+    // Delivered must win so the pass reports it, not re-offers or skips it.
+    let live = with(fresh(1), |c| c.attempt = Attempt::Live);
+    let held = with(fresh(2), |c| c.held_recorded = true);
+    let candidates = vec![
+        with(live, |c| c.delivered = true),
+        with(held, |c| c.delivered = true),
+    ];
+    let selection = select_fresh(&candidates);
+    assert_eq!(selection.fresh.len(), 0, "delivered is never offered");
+    assert_eq!(
+        selection.disqualified.len(),
+        0,
+        "delivered is not a disqualification; it is its own category"
+    );
+    assert_eq!(
+        selection.delivered.len(),
+        2,
+        "both are reported as delivered"
+    );
+}
+
+#[test]
+fn the_line_counts_delivered_alongside_fresh_and_interrupted() {
+    let selection = select_fresh(&[
+        with(fresh(1), |c| c.attempt = Attempt::Interrupted),
+        with(fresh(2), |c| c.delivered = true),
+        with(fresh(3), |c| c.delivered = true),
+        with(fresh(4), |c| c.attempt = Attempt::Live),
+        fresh(5),
+    ]);
+    let line = selection.line(5);
+    // fresh counts the offered: the new one and the re-offered
+    // interrupted one (issue #4499); delivered and live are not offered.
+    assert!(line.contains("fresh=2"), "{line}");
+    assert!(line.contains("interrupted=1"), "{line}");
+    assert!(line.contains("delivered=2"), "{line}");
+    assert!(line.contains("1 attempted"), "{line}");
 }
 
 #[test]
@@ -109,6 +181,7 @@ fn an_idle_plan_is_distinct_from_a_broken_one() {
         held: 0,
         skipped: 85,
         deferred: 0,
+        delivered: 0,
     });
     // The pass was handed no candidates: it did no work, and its line must
     // not look like the idle one.
@@ -342,6 +415,7 @@ fn an_unfed_pass_and_an_idle_pass_print_different_lines() {
         converted: 0,
         held: 0,
         skipped: 0,
+        delivered: 0,
         deferred: 0,
     })
     .line(tool, script, selector);
@@ -357,6 +431,7 @@ fn an_unfed_pass_and_an_idle_pass_print_different_lines() {
         held: 0,
         skipped: 0,
         deferred: 11,
+        delivered: 0,
     })
     .line(tool, script, selector);
     assert!(partial.contains("deferred=11"), "{partial}");
@@ -374,6 +449,7 @@ fn an_unfed_outcome_carries_no_counters() {
         held: 1,
         skipped: 1,
         deferred: 0,
+        delivered: 0,
     });
     assert_eq!(examined.counters().unwrap().examined, 3);
 }
@@ -387,6 +463,7 @@ fn the_outcome_reconciles_its_counters() {
         held: 1,
         skipped: 1,
         deferred: 0,
+        delivered: 0,
     });
     assert!(ok.reconciles());
     let impossible = PassOutcome::Examined(PassCounters {
@@ -395,6 +472,7 @@ fn the_outcome_reconciles_its_counters() {
         held: 1,
         skipped: 0,
         deferred: 0,
+        delivered: 0,
     });
     assert!(
         !impossible.reconciles(),
@@ -408,6 +486,7 @@ fn the_outcome_reconciles_its_counters() {
         held: 0,
         skipped: 0,
         deferred: 3,
+        delivered: 0,
     });
     assert!(!deferred_impossible.reconciles());
 }

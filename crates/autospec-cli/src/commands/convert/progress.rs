@@ -67,6 +67,14 @@ pub(super) fn started(issue: u64) {
     report_line(&format!("  START  #{issue}"));
 }
 
+/// A patch is already-delivered residue (#4501): its changes are in the
+/// base, so it is reported on its own line, never offered or gated.
+pub(super) fn delivered(issue: u64) {
+    report_line(&format!(
+        "  DELIVERED #{issue} (patch is empty against the base)"
+    ));
+}
+
 /// An issue finishes, with its outcome, at the moment it did.
 pub(super) fn finished(issue: u64, outcome: &str) {
     report_line(&format!("  DONE   #{issue}: {outcome}"));
@@ -107,5 +115,10 @@ mod tests {
         assert_eq!(started, "  START  #2995");
         let done = format!("  DONE   #{issue}: {outcome}", issue = 2995, outcome = "converted");
         assert_eq!(done, "  DONE   #2995: converted");
+        let delivered = format!(
+            "  DELIVERED #{issue} (patch is empty against the base)",
+            issue = 3246
+        );
+        assert_eq!(delivered, "  DELIVERED #3246 (patch is empty against the base)");
     }
 }
