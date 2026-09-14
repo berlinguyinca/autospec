@@ -90,6 +90,7 @@ use super::CommandFailure;
 mod git;
 mod language;
 mod progress;
+mod sizing;
 
 use git::{run_capture_in, run_git, run_git_capture, run_git_in, teardown_worktree};
 
@@ -103,8 +104,8 @@ const USAGE: &str = "\
 USAGE:
     autospec convert [--llm-root DIR] [--repo OWNER/NAME] [--base BRANCH]
                      [--held-file PATH] [--branch-prefix PREFIX]
-                     [--free-slots N] [--apply] [--archive] [--json]
-                     [--convert-ledger PATH] [ISSUE ...]
+                     [--free-slots N] [--deadline SECS] [--apply] [--archive]
+                     [--json] [--convert-ledger PATH] [ISSUE ...]
 
 PLAN (default): enumerate $LLM/*/out/issue-*/changes.patch, select the patches
 not already attempted (a live branch/PR, or a recorded HELD entry whose
@@ -182,6 +183,12 @@ struct Options {
     held_file: Option<PathBuf>,
     branch_prefix: String,
     free_slots: Option<usize>,
+    /// The pass's own deadline in seconds (#4607): the pass sizes its batch
+    /// to it — it stops *starting* new patches when the remaining time is
+    /// less than what a patch has been observed to cost in this pass, and
+    /// finishes the one in flight. `None` (no deadline given) keeps the old
+    /// behavior: work through the whole batch.
+    deadline: Option<u64>,
     apply: bool,
     archive: bool,
     as_json: bool,
@@ -197,6 +204,7 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
         held_file: None,
         branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
         free_slots: None,
+        deadline: None,
         apply: false,
         archive: false,
         as_json: false,
@@ -228,6 +236,16 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
                     })?,
                 );
             }
+            "--deadline" => {
+                let raw = value(args, &mut i, &arg)?;
+                opts.deadline = Some(
+                    raw.parse::<u64>().map_err(|_| {
+                        CommandFailure::diagnostic(format!(
+                            "--deadline must be a non-negative integer number of seconds, got {raw:?}\n{USAGE}"
+                        ))
+                    })?,
+                );
+            }
             "--apply" => opts.apply = true,
             "--archive" => opts.archive = true,
             "--json" => opts.as_json = true,
@@ -254,6 +272,17 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
             }
         }
         i += 1;
+    }
+    // The deadline can also come from the environment: the scheduler that
+    // runs a scheduled pass is the one that knows the deadline, and the env
+    // is how it hands the pass its own time box without the pass inventing
+    // one (#4607). The flag, when given, is explicit and wins.
+    if opts.deadline.is_none() {
+        if let Ok(raw) = std::env::var("AUTOSPEC_CONVERT_DEADLINE") {
+            if let Ok(secs) = raw.trim().parse::<u64>() {
+                opts.deadline = Some(secs);
+            }
+        }
     }
     Ok(opts)
 }
@@ -1034,7 +1063,7 @@ fn convert(args: &[String]) -> Result<(), CommandFailure> {
         if let Err(fatal) = gate::gate_tool_precondition() {
             return Err(CommandFailure::status(fatal, 1));
         }
-        return run_apply(&plan);
+        return apply::run_apply(&plan);
     }
     gate::gate_tool_warning();
     render_plan(&plan)
@@ -1210,74 +1239,8 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
 
 /// The real conversion of each selected patch (steps 3-6). Side effects are
 /// confined to the pass's own branches/PRs and the HELD ledger.
-fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
-    if plan.opts.repo.is_none() {
-        return Err(CommandFailure::diagnostic(
-            "autospec convert --apply requires --repo OWNER/NAME (or a gh-inferable repo) to \
-             check PR liveness and open PRs",
-        ));
-    }
-    let repo: String = plan.opts.repo.clone().or_else(infer_repo).unwrap_or_default();
 
-    // Fetch the trunk so the pass branches off current origin/<base>.
-    let base_ref = format!("origin/{}", plan.opts.base);
-    run_git(&["fetch", "origin"])?;
-
-    let selection = plan.selection();
-    let base_sha = run_git_capture(&["rev-parse", "HEAD"])?;
-
-    let mut counters = PassCounters {
-        examined: plan.candidates.len(),
-        converted: 0,
-        held: 0,
-        skipped: selection.disqualified.len(),
-    };
-    // Patches archived this run (superseded by the base): they leave the
-    // buffer entirely — no patch on disk, so no queue entry held.
-    let mut archived = 0;
-
-    language::archive_held(plan, &selection.language_held, &mut counters, &mut archived);
-    for c in &selection.fresh {
-        let patch = match plan.examined.iter().find(|p| p.issue == c.issue) {
-            Some(p) => p,
-            None => continue,
-        };
-        match apply_one(plan, &repo, &base_ref, &base_sha, patch) {
-            ApplyResult::Converted => {
-                counters.converted += 1;
-                progress::converted(patch.issue, &patch.patch_key);
-            }
-            ApplyResult::Held => counters.held += 1,
-            // Not converted and not held: the pass could not tell whether this
-            // patch is good, so it says so and leaves the patch alone.
-            ApplyResult::BaseUnverifiable => counters.skipped += 1,
-            ApplyResult::Archived => {
-                counters.skipped += 1;
-                archived += 1;
-            }
-        }
-    }
-
-    let outcome = PassOutcome::Examined(counters);
-    report_outcome(&outcome);
-
-    // The buffer after the run, not just the run itself (#4558 ask 3):
-    // converted patches leave the waiting count (their PR is live) but
-    // stay on disk and still hold their queue entry; archived patches
-    // leave both. A report of only what converted hides how much is still
-    // waiting.
-    let initial = plan.buffer();
-    let buffer = ConversionBuffer {
-        waiting: initial.waiting.saturating_sub(counters.converted).saturating_sub(archived),
-        queue_entries_blocked: initial.queue_entries_blocked.saturating_sub(archived),
-    };
-    println!("{}", buffer.line(plan.opts.free_slots));
-    if let Some(alarm) = buffer.alarm(plan.opts.free_slots) {
-        println!("{alarm}");
-    }
-    Ok(())
-}
-
+mod apply;
 mod conflict;
 mod gate;
 
@@ -1822,6 +1785,7 @@ mod tests {
             converted: 0,
             held: 0,
             skipped: 0,
+            deferred: 0,
         })
         .line("convert", "autospec convert", "enumerate $LLM");
         assert_ne!(unfed.message, idle);
@@ -2171,6 +2135,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             held_file: None,
             branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
             free_slots: None,
+            deadline: None,
             apply: false,
             archive: true,
             as_json: false,
@@ -2295,6 +2260,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             held_file: Some(out.clone()),
             branch_prefix: DEFAULT_BRANCH_PREFIX.to_string(),
             free_slots: None,
+            deadline: None,
             apply: false,
             archive: false,
             as_json: false,
@@ -2328,10 +2294,15 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             converted: 3,
             held: 2,
             skipped: 1,
+            deferred: 4,
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(line.contains("examined"), "the line still carries the counts");
+        // The deferral is part of the accounting the line reports: 3+2+1+4
+        // accounts for all 10, so no alarm — and the line names the four
+        // that were never started (#4607).
         assert!(alarm.is_none(), "sound arithmetic needs no alarm");
+        assert!(line.contains("deferred=4"), "the line must carry the deferral");
     }
 
     #[test]
@@ -2343,6 +2314,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             converted: 5,
             held: 0,
             skipped: 0,
+            deferred: 0,
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(
