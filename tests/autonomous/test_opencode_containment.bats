@@ -100,6 +100,17 @@ EOF
     if ! command -v bwrap >/dev/null 2>&1; then
         skip "bubblewrap not installed"
     fi
+    # The adapter unshares pid/ipc/uts without a user namespace, which the
+    # environment must permit. A bwrap that is present but cannot create those
+    # namespaces (CI runners without CAP_SYS_ADMIN) is an environment
+    # limitation, not an adapter defect: the adapter documents its
+    # permission-profile fallback for exactly this case, so the isolation
+    # assertion applies only where it can be proven.
+    local probe_err
+    if ! probe_err="$(bwrap --unshare-pid --unshare-ipc --unshare-uts \
+            --ro-bind / / --dev /dev --proc /proc /bin/true 2>&1)"; then
+        skip "bwrap cannot unshare pid/ipc/uts here; containment not provable in this environment ($probe_err)"
+    fi
     local bwrap_adapter
     bwrap_adapter="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/lib/opencode-containment-bwrap.sh"
 

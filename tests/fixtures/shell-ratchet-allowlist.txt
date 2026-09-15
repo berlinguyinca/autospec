@@ -815,7 +815,7 @@ tests/autonomous/test_idle_rescan.bats 123
 tests/autonomous/test_immutable_verifier.bats 100
 tests/autonomous/test_integration_branch.bats 565
 tests/autonomous/test_loop_growth_dispatch.bats 350
-tests/autonomous/test_opencode_containment.bats 96
+tests/autonomous/test_opencode_containment.bats 107
 tests/autonomous/test_operator_cli.bats 427
 tests/autonomous/test_operator_conductor_list.bats 84
 tests/autonomous/test_origin_self_labeling.bats 195
