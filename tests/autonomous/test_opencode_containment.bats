@@ -97,8 +97,8 @@ EOF
 }
 
 @test "bwrap adapter isolates the filesystem: worktree writable, host read-only" {
-    if ! command -v bwrap >/dev/null 2>&1; then
-        skip "bubblewrap not installed"
+    if ! bwrap --unshare-pid --unshare-ipc --unshare-uts --ro-bind / / true >/dev/null 2>&1; then
+        skip "bubblewrap not installed or namespace sandboxing unavailable"
     fi
     local bwrap_adapter
     bwrap_adapter="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/lib/opencode-containment-bwrap.sh"

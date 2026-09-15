@@ -53,7 +53,7 @@ export TMPDIR="$adapter_tmp"
 
 worktree="$PWD"
 
-if command -v bwrap >/dev/null 2>&1; then
+if bwrap --unshare-pid --unshare-ipc --unshare-uts --ro-bind / / true >/dev/null 2>&1; then
     # Read-only host, writable worktree + private config dir, minimal runtime.
     # No --unshare-net (model API) and no --unshare-user (uid-map/credentials).
     # No --tmpfs /tmp: a fresh tmpfs would hide a worktree living under /tmp, and
@@ -70,6 +70,6 @@ if command -v bwrap >/dev/null 2>&1; then
         --new-session \
         -- "$opencode_bin" "$@"
 else
-    echo "WARN: opencode-containment-bwrap: bubblewrap not found; falling back to permission-profile-only containment" >&2
+    echo "WARN: opencode-containment-bwrap: bubblewrap unavailable or unable to namespace; falling back to permission-profile-only containment" >&2
     exec "$opencode_bin" "$@"
 fi
