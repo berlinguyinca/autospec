@@ -146,6 +146,19 @@ mutation requiring reconciliation.
   opened as a PR against `main` (control-plane contracts + schemas + docs + tests).
 - The dirty local branch `fix/quarantine-recheck-escape-hatch` was left untouched.
 
+### Reconciliation with concurrent main work
+
+While this PR was open, `main` advanced with 5 commits, including #4712 which
+independently fixed the bwrap containment **test** (probe + skip, ratchet 107).
+The branch was merged forward onto the new `main`:
+- The bwrap **test** now matches main's #4712 version (the redundant duplicate
+  probe was dropped).
+- This PR retains its complementary **adapter** fix (`scripts/lib/opencode-containment-bwrap.sh`):
+  the adapter now probes bwrap's ability to namespace and falls back with a WARN,
+  making its documented "fails to launch" fallback real — main still lacked that.
+- The dogfood allowlist and accessibility-test fixes are retained (main does not
+  yet have them).
+
 ## Self-review fixes (post-merge-prep review)
 
 During the pre-merge review, two improvements were made to the pure contracts:
