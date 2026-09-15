@@ -182,6 +182,8 @@ fn an_idle_plan_is_distinct_from_a_broken_one() {
         skipped: 85,
         deferred: 0,
         delivered: 0,
+
+        invalidated: 0,
     });
     // The pass was handed no candidates: it did no work, and its line must
     // not look like the idle one.
@@ -416,6 +418,8 @@ fn an_unfed_pass_and_an_idle_pass_print_different_lines() {
         held: 0,
         skipped: 0,
         delivered: 0,
+
+        invalidated: 0,
         deferred: 0,
     })
     .line(tool, script, selector);
@@ -432,6 +436,8 @@ fn an_unfed_pass_and_an_idle_pass_print_different_lines() {
         skipped: 0,
         deferred: 11,
         delivered: 0,
+
+        invalidated: 0,
     })
     .line(tool, script, selector);
     assert!(partial.contains("deferred=11"), "{partial}");
@@ -450,6 +456,8 @@ fn an_unfed_outcome_carries_no_counters() {
         skipped: 1,
         deferred: 0,
         delivered: 0,
+
+        invalidated: 0,
     });
     assert_eq!(examined.counters().unwrap().examined, 3);
 }
@@ -464,6 +472,8 @@ fn the_outcome_reconciles_its_counters() {
         skipped: 1,
         deferred: 0,
         delivered: 0,
+
+        invalidated: 0,
     });
     assert!(ok.reconciles());
     let impossible = PassOutcome::Examined(PassCounters {
@@ -473,6 +483,8 @@ fn the_outcome_reconciles_its_counters() {
         skipped: 0,
         deferred: 0,
         delivered: 0,
+
+        invalidated: 0,
     });
     assert!(
         !impossible.reconciles(),
@@ -487,6 +499,8 @@ fn the_outcome_reconciles_its_counters() {
         skipped: 0,
         deferred: 3,
         delivered: 0,
+
+        invalidated: 0,
     });
     assert!(!deferred_impossible.reconciles());
 }

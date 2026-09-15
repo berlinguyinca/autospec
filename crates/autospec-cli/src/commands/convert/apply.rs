@@ -66,6 +66,8 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         skipped: selection.disqualified.len(),
         deferred: 0,
         delivered: 0,
+
+        invalidated: 0,
     };
     // Patches archived this run (superseded by the base): they leave the
     // buffer entirely — no patch on disk, so no queue entry held.
@@ -149,6 +151,14 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             ApplyResult::Delivered => {
                 counters.delivered += 1;
                 progress::finished(patch.issue, "delivered");
+            }
+            ApplyResult::Invalidated => {
+                counters.invalidated += 1;
+                // The patch left disk: the queue entry it held is released
+                // with it, and the issue re-enters dispatch for regeneration
+                // against the current base (#4637).
+                archived += 1;
+                progress::finished(patch.issue, "invalidated");
             }
         }
         last_cost = Some(item_started.elapsed());
