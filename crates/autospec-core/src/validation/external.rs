@@ -1128,13 +1128,16 @@ fn run_bash_help_usage(id: &str, required: bool, root: &Path, script: &str) -> C
     let captured = ToolCommand::new("bash", [script, "--help"])
         .expect("bash help command is a direct argument vector")
         .execute_in_capturing(id, required, root);
-    let mut help = captured.result;
-    if help.is_success() && !has_usage_line(&captured.stdout) {
+    // The content-check failure shape goes through the one helper: building it
+    // by hand (count the message, digest it, drop it) is how the other two
+    // sites in this file lost their reasons (#4639).
+    let help = captured.result;
+    let help = if help.is_success() && !has_usage_line(&captured.stdout) {
         const MESSAGE: &str = "--help did not print a 'Usage:' line";
-        help.exit_code = Some(1);
-        help.stderr_bytes += MESSAGE.len();
-        help.output_digest = output_digest(&captured.stdout, MESSAGE.as_bytes());
-    }
+        captured_check_failure(help, &captured.stdout, Some(MESSAGE))
+    } else {
+        help
+    };
     aggregate(id, required, vec![syntax, help])
 }
 
@@ -6637,18 +6640,11 @@ fn unmeasured_tool(id: &str, required: bool, program: &str) -> CheckResult {
 }
 
 fn failure(id: &str, required: bool, message: &str) -> CheckResult {
-    // `.with_failure` is the point of this helper, and it was missing.
-    //
-    // The message was passed as `stderr_bytes` and folded into the digest, so
-    // the result carried the reason's LENGTH and its HASH but not the reason.
-    // Every one of this function's callers therefore reported
-    // "failed (no reason captured)" while proving, in its own byte count, that
-    // a reason had existed -- the symptom that made several required checks on
-    // main undiagnosable at once.
-    //
-    // #3734 fixed exactly this for native checks. It survived here because the
-    // external checks route through their own constructors, and nothing
-    // compared them.
+    // `.with_failure` is the point of this helper, and it was missing: the
+    // message reached the result only as its LENGTH and its HASH, so all 84
+    // callers reported "no reason captured" while their own byte count proved
+    // a reason had existed. #3734 fixed this for native checks; the external
+    // constructors were never compared against it (#4639).
     CheckResult::completed(
         id,
         required,

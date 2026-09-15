@@ -308,6 +308,35 @@ mod captured_failure_tests {
     }
 
     #[test]
+    fn a_content_check_failing_a_successful_command_reports_its_own_message() {
+        // The shape run_bash_help_usage used to build by hand (count the
+        // message, digest it, drop it): the child exits 0, the content check
+        // rejects its output, and the check fails for its own reason, which
+        // must survive as readable text alongside the rejected output.
+        let ok = CheckResult::completed("check_help", true, 0, 5, 1, 120, 0, "digest");
+        let out = captured_check_failure(
+            ok,
+            b"some help text without a Usage line",
+            Some("--help did not print a 'Usage:' line"),
+        );
+        assert_eq!(
+            out.exit_code,
+            Some(1),
+            "a content-check failure records a failure"
+        );
+        assert!(out.is_failure());
+        let reason = out.failure.expect("the check's own message must survive");
+        assert!(
+            reason.starts_with("--help did not print a 'Usage:' line"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("some help text without a Usage line"),
+            "the rejected output is the evidence: {reason}"
+        );
+    }
+
+    #[test]
     fn a_failing_command_reports_the_output_it_produced() {
         let out = captured_check_failure(base(), b"not ok 3 the thing diverged\n", None);
         let reason = out.failure.expect("a failing command must carry a reason");
