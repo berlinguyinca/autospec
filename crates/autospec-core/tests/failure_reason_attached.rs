@@ -45,10 +45,11 @@ fn find_count_without_attach(lines: &[String]) -> Vec<(usize, String)> {
     let mut hits = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.contains(".stderr_bytes +=") && trimmed.contains(".len()") {
-            if !attach_within(lines, index, 7) {
-                hits.push((index + 1, trimmed.to_string()));
-            }
+        if trimmed.contains(".stderr_bytes +=")
+            && trimmed.contains(".len()")
+            && !attach_within(lines, index, 7)
+        {
+            hits.push((index + 1, trimmed.to_string()));
         }
     }
     hits
