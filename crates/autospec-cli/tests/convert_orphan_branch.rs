@@ -100,6 +100,36 @@ fn init_fixture_repo(repo: &Path, origin: &Path) -> String {
 
 /// A stand-in for `gh`: no PRs exist (so the orphan branch is not live),
 /// and `pr create` succeeds (so the redo opens its PR).
+/// The `--json` plan for the fixture: one clean JSON document on stdout.
+fn json_plan(repo: &Path, llm_root: &Path, work: &Path) -> serde_json::Value {
+    let path = format!(
+        "{}:{}",
+        work.join("fakebin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut command = Command::new(autospec_bin());
+    command
+        .args(["convert", "--llm-root"])
+        .arg(llm_root)
+        .arg("--base")
+        .arg("main")
+        .arg("--repo")
+        .arg("test/fake")
+        .arg("--json")
+        .current_dir(repo)
+        .env("LLM", "/nonexistent-llm-for-this-test")
+        .env("PATH", &path)
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = command.output().expect("autospec convert --json runs");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    serde_json::from_str(&stdout).expect("the plan is one JSON document")
+}
+
 fn install_fake_gh(work: &Path) -> std::path::PathBuf {
     let bin_dir = work.join("fakebin");
     fs::create_dir_all(&bin_dir).unwrap();
@@ -376,6 +406,135 @@ fn a_patch_already_in_the_base_is_delivered_not_fresh() {
         .filter_map(|e| e.ok())
         .count();
     assert_eq!(archived, 1, "the patch is archived, never discarded");
+
+    let _ = fs::remove_dir_all(&work);
+    let _ = bin_dir;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4512: a classification is a fact about the base it was derived
+// against, and expires when the base moves.
+// ---------------------------------------------------------------------------
+
+/// A fixture whose base can move: the patch is fresh against v1, and v2
+/// (pushed after the plan) already carries the patch's change.
+fn init_movable_base_fixture(work: &Path, repo: &Path, origin: &Path, llm_root: &Path) -> String {
+    fs::create_dir_all(repo).unwrap();
+    fs::create_dir_all(&llm_root).unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    let data = repo.join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(
+        data.join("convert-gate-registry.json"),
+        r#"{"schema":1,"repos":{"test/fake":{"base_ref":"main","stages":[["fmt","--check"],["build","@scope"],["clippy","--all-targets","@scope"],["test","--no-fail-fast","@scope"]]}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn one() -> u32 {\n    1\n}\n\n#[test]\nfn the_base_tests() {\n    assert_eq!(one(), 1);\n}\n",
+    )
+    .unwrap();
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    let status = Command::new("git")
+        .args(["init", "-q", "--bare", origin.to_str().unwrap()])
+        .current_dir(repo)
+        .status()
+        .expect("git runs");
+    assert!(status.success());
+    run_git(repo, &["add", "-A"]);
+    run_git(repo, &["commit", "-q", "-m", "base v1"]);
+    run_git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    run_git(repo, &["push", "-q", "origin", "main"]);
+
+    // The patch: adds `two`. Generated with git itself — hand-rolled hunks
+    // rot (phantom trailing lines, wrong context counts).
+    let lib = repo.join("src/lib.rs");
+    let base = fs::read_to_string(&lib).unwrap();
+    fs::write(&lib, format!("{base}\npub fn two() -> u32 {{\n    2\n}}\n")).unwrap();
+    let patch = run_git_output(repo, &["diff"]);
+    // Back to v1: the patch is on disk, the base is unchanged.
+    run_git(repo, &["checkout", "-q", "--", "src/lib.rs"]);
+    let issue_dir = llm_root.join("node-a").join("out").join("issue-888");
+    fs::create_dir_all(&issue_dir).unwrap();
+    fs::write(issue_dir.join("changes.patch"), &patch).unwrap();
+    run_git_output(repo, &["rev-parse", "main"])
+}
+
+/// Advance origin/main so that it already carries exactly the patch's change:
+/// the same patch that was fresh against v1 is delivered against v2.
+fn push_delivering_base(repo: &Path, patch: &Path) {
+    run_git(repo, &["apply", patch.to_str().unwrap()]);
+    run_git(repo, &["commit", "-q", "-am", "the delivered work"]);
+    run_git(repo, &["push", "-q", "origin", "main"]);
+}
+
+#[test]
+fn a_plan_names_the_base_its_classification_was_derived_against() {
+    let work = std::env::temp_dir().join(format!("autospec-conv-4512-base-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
+    let repo = work.join("repo");
+    let origin = work.join("origin.git");
+    let llm_root = work.join("llm");
+    let base_sha = init_movable_base_fixture(&work, &repo, &origin, &llm_root)
+        .trim_end()
+        .to_string();
+    let bin_dir = install_fake_gh(&work);
+
+    // The counts are a measurement against a base: the base is on the line.
+    let (code, out, err) = run_pass(&repo, &llm_root, &work, false);
+    assert_eq!(code, 0, "plan exits clean: {out} {err}");
+    assert!(
+        out.contains(&format!("origin/main#{}", &base_sha[..8])),
+        "the selection line names the base it was derived against: {out}"
+    );
+    assert!(
+        out.contains("fresh=1"),
+        "the patch is fresh against v1: {out}"
+    );
+
+    // And in the machine-readable plan, as the sha the classification
+    // belongs to — not just the branch name.
+    let json_out = {
+        let mut command = Command::new(autospec_bin());
+        command
+            .args(["convert", "--llm-root"])
+            .arg(&llm_root)
+            .arg("--base")
+            .arg("main")
+            .arg("--repo")
+            .arg("test/fake")
+            .arg("--json")
+            .current_dir(&repo)
+            .env("LLM", "/nonexistent-llm-for-this-test")
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    work.join("fakebin").display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = command.output().expect("autospec convert --json runs");
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&json_out).expect("the plan is one JSON document");
+    assert_eq!(
+        value["classified_base"].as_str(),
+        Some(base_sha.as_str()),
+        "the --json plan carries the classification's base sha: {json_out}"
+    );
 
     let _ = fs::remove_dir_all(&work);
     let _ = bin_dir;

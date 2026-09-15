@@ -23,6 +23,15 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// The llm root under this test's unique parent: its siblings are this
+/// test's own artifacts only, so the coverage question (#4556) is
+/// well-formed and cannot see another test's pipelines.
+fn llm_root(work: &Path) -> PathBuf {
+    let root = work.join("llm");
+    fs::create_dir_all(&root).expect("llm root");
+    root
+}
+
 /// A rust patch the gate can evaluate: the preflight is about the host, so
 /// the fixture must not add a language hold to the picture.
 fn write_patch(root: &Path, issue: u64) {
@@ -94,11 +103,12 @@ fn run_convert(
 fn a_missing_tool_is_one_fatal_before_any_judging_not_one_held_per_patch() {
     // The incident: a cron PATH without the toolchain produced 28 HELD
     // records, each naming the patch and none naming the host.
-    let root = temp_dir("fatal");
+    let work = temp_dir("fatal");
+    let root = llm_root(&work);
     write_patch(&root, 77);
 
     let (code, stdout, stderr) = run_convert(
-        &root,
+        &work,
         &[
             "--apply",
             "--llm-root",
@@ -129,18 +139,19 @@ fn a_missing_tool_is_one_fatal_before_any_judging_not_one_held_per_patch() {
         !stdout.contains("######## convert:"),
         "no outcome line: {stdout}"
     );
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&work);
 }
 
 #[test]
 fn a_missing_tool_in_plan_mode_warns_without_refusing() {
     // A plan does not run the gate, so it is still useful on a broken host —
     // but it must say that --apply would refuse.
-    let root = temp_dir("warn");
+    let work = temp_dir("warn");
+    let root = llm_root(&work);
     write_patch(&root, 77);
 
     let (code, stdout, stderr) = run_convert(
-        &root,
+        &work,
         &["--llm-root", root.to_str().unwrap(), "--base", "main"],
         "/nonexistent-path-for-this-test",
         None,
@@ -152,7 +163,7 @@ fn a_missing_tool_in_plan_mode_warns_without_refusing() {
     );
     // The plan itself is complete: the rust patch is offered.
     assert!(stdout.contains("FRESH #77"), "{stdout}");
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&work);
 }
 
 #[cfg(unix)]
@@ -169,11 +180,12 @@ fn a_wrapped_gate_needs_cargo_on_the_execution_host_not_the_submit_host() {
         return;
     }
     let bin = restricted_bin("wrapped", &["git", "gh"]);
-    let root = temp_dir("wrapped");
+    let work = temp_dir("wrapped");
+    let root = llm_root(&work);
     write_patch(&root, 77);
 
     let (code, _stdout, stderr) = run_convert(
-        &root,
+        &work,
         &[
             "--apply",
             "--llm-root",
@@ -190,7 +202,7 @@ fn a_wrapped_gate_needs_cargo_on_the_execution_host_not_the_submit_host() {
     // enough to hit the (equally absent) remote — a different failure.
     assert!(!stderr.contains("FATAL:"), "{stderr}");
     assert_ne!(code, 1, "stderr:\n{stderr}");
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&work);
     let _ = fs::remove_dir_all(&bin);
 }
 
@@ -207,11 +219,12 @@ fn a_complete_toolchain_passes_the_preflight_and_judges() {
         return;
     }
     let bin = restricted_bin("complete", &["git", "gh", "cargo"]);
-    let root = temp_dir("complete");
+    let work = temp_dir("complete");
+    let root = llm_root(&work);
     write_patch(&root, 77);
 
     let (code, _stdout, stderr) = run_convert(
-        &root,
+        &work,
         &[
             "--apply",
             "--llm-root",
@@ -228,6 +241,6 @@ fn a_complete_toolchain_passes_the_preflight_and_judges() {
     // the pass's own — the fixture has no remote — never the host's.
     assert!(!stderr.contains("FATAL:"), "{stderr}");
     assert_ne!(code, 1, "stderr:\n{stderr}");
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&work);
     let _ = fs::remove_dir_all(&bin);
 }

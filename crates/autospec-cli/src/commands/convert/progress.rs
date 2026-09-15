@@ -75,6 +75,15 @@ pub(super) fn delivered(issue: u64) {
     ));
 }
 
+/// A patch is conflict-bound against the base in a shape the pass will
+/// never merge: it is invalidated — recorded, archived, and its issue
+/// returned to dispatch for regeneration (#4637). Its own line, like
+/// HELD and DELIVERED: a summary counter that folds it into `skipped`
+/// would make the deadlock invisible again, which is the bug.
+pub(super) fn invalidated(issue: u64, reason: &str) {
+    report_line(&format!("  INVALIDATED #{issue}: {reason}"));
+}
+
 /// An issue finishes, with its outcome, at the moment it did.
 pub(super) fn finished(issue: u64, outcome: &str) {
     report_line(&format!("  DONE   #{issue}: {outcome}"));
@@ -120,5 +129,7 @@ mod tests {
             issue = 3246
         );
         assert_eq!(delivered, "  DELIVERED #3246 (patch is empty against the base)");
+        let invalidated = format!("  INVALIDATED #{issue}: {reason}", issue = 4637, reason = "conflict");
+        assert_eq!(invalidated, "  INVALIDATED #4637: conflict");
     }
 }

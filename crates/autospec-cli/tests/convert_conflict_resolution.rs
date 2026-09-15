@@ -135,6 +135,18 @@ fn agent_patch(body: bool, lib_blob: &str, a_blob: &str) -> String {
     )
 }
 
+/// The agent's patch against the pre-move base, touching only the function
+/// body — the single-file shape of #4637's deadlock: its one conflicted file
+/// is the unclassifiable plain-module shape, so no keep-both file can turn
+/// the conflict into a gate question.
+fn agent_patch_a_only(a_blob: &str) -> String {
+    format!(
+        "diff --git a/src/a.rs b/src/a.rs\nindex {a_blob}..0000000\n\
+         --- a/src/a.rs\n+++ b/src/a.rs\n\
+         @@ -1,3 +1,3 @@\n pub fn a() -> u32 {{\n-    1\n+    2\n }}\n"
+    )
+}
+
 fn write_patch(llm_root: &Path, issue: u64, text: &str) {
     let issue_dir = llm_root
         .join("node-a")
@@ -346,6 +358,121 @@ fn a_mixed_conflict_holds_and_names_every_file() {
     assert!(
         !branches.contains("conv-202"),
         "no conversion branch may exist for a held patch:\n{branches}"
+    );
+    let _ = fs::remove_dir_all(&work);
+}
+
+/// The terminal disposition (issue #4637): a patch whose every conflicted
+/// file is a shape the pass will never merge (here: the unclassifiable
+/// plain-module shape) is not held. A hold leaves the patch on disk, and a
+/// patch on disk suppresses re-dispatch of its issue forever — 193 queue
+/// entries and 27 idle agent slots were measured in exactly that state. The
+/// patch is invalidated instead: the disposition is recorded where the patch
+/// lived, the patch is archived (never deleted), and the issue returns to
+/// dispatch for regeneration against the current base.
+#[test]
+fn a_structurally_unconvertible_patch_is_invalidated_and_archived() {
+    let work = std::env::temp_dir().join(format!(
+        "autospec-conv-conflict-invalid-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
+    let repo = work.join("repo");
+    let origin = work.join("origin.git");
+    let llm_root = work.join("llm");
+    let gh_log = work.join("gh.log");
+    let (_lib_blob, a_blob) = init_fixture_repo(&repo, &origin);
+    record_gate(&repo);
+    move_main(&repo, true); // main rewrites fn a's body
+    write_patch(&llm_root, 303, &agent_patch_a_only(&a_blob)); // the patch rewrites it differently
+    let bin_dir = install_fake_gh(&work);
+
+    let (code, stdout, stderr) = run_convert(
+        &repo,
+        &[
+            "--apply",
+            "--llm-root",
+            llm_root.to_str().unwrap(),
+            "--base",
+            "main",
+            "--repo",
+            "test/fake",
+        ],
+        Some(&bin_dir),
+        Some(&gh_log),
+    );
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    // Invalidated, not held: the line names the shape the pass will never
+    // merge.
+    let invalid = stdout
+        .lines()
+        .find(|l| l.contains("  INVALIDATED #303:"))
+        .unwrap_or(&stdout);
+    assert!(
+        invalid.contains("refusing auto-resolution"),
+        "stdout:\n{stdout}"
+    );
+    assert!(invalid.contains("src/a.rs"), "stdout:\n{stdout}");
+    assert!(invalid.contains("unknown"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("  HELD  #303"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("  DONE   #303: invalidated"),
+        "stdout:\n{stdout}"
+    );
+
+    // The counter reports the category on its own: folded into `skipped` it
+    // would be invisible, which is the deadlock #4637 describes.
+    let outcome = stdout
+        .lines()
+        .find(|l| l.contains("convert: examined=1"))
+        .unwrap_or(&stdout);
+    assert!(outcome.contains("invalidated=1"), "stdout:\n{stdout}");
+    assert!(outcome.contains("held=0"), "stdout:\n{stdout}");
+
+    // The patch left the produced path — topup's `already produced` test can
+    // no longer see it, so the issue re-enters dispatch. Archived, never
+    // deleted.
+    let issue_dir = llm_root.join("node-a").join("out").join("issue-303");
+    assert!(
+        !issue_dir.join("changes.patch").exists(),
+        "the invalidated patch must leave the produced path"
+    );
+    let archived: Vec<String> = fs::read_dir(issue_dir.join("superseded"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        archived.len(),
+        1,
+        "the patch is archived, not deleted: {archived:?}"
+    );
+
+    // The disposition stands in for the patch: status, reason, and the base
+    // the verdict was made against.
+    let disposition = fs::read_to_string(issue_dir.join("disposition.txt")).unwrap();
+    assert!(
+        disposition.starts_with("status: invalidated\n"),
+        "{disposition}"
+    );
+    assert!(
+        disposition.contains("reason: conflict (refusing auto-resolution): src/a.rs"),
+        "{disposition}"
+    );
+    assert!(disposition.contains("base: "), "{disposition}");
+
+    // Nothing was offered: no PR, no branch.
+    let log = fs::read_to_string(&gh_log).unwrap_or_default();
+    assert!(
+        !log.trim_end().split('\u{1f}').any(|a| a == "create"),
+        "no gh pr create may run for an invalidation:\n{log}"
+    );
+    let branches = run_git_output(&repo, &["ls-remote", "--heads", "origin"]);
+    assert!(
+        !branches.contains("conv-303"),
+        "no conversion branch may exist for an invalidated patch:\n{branches}"
     );
     let _ = fs::remove_dir_all(&work);
 }

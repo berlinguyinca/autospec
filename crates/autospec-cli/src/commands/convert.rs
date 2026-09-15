@@ -20,9 +20,8 @@
 //! the certification of which conflicts the pass may resolve itself — the
 //! rest are refused — is [`autospec_core::conflict_resolution`], applied by
 //! the strict keep-both merge [`autospec_core::conflict_merge`]; the
-//! HELD-as-queue re-gate
-//! (re-attempt when the base moves, archive the stale) is
-//! [`autospec_core::hold_memo`] and [`autospec_core::stored_output`].
+//! HELD-as-queue re-gate is [`autospec_core::hold_memo`] and
+//! [`autospec_core::stored_output`].
 //!
 //! ## The HELD ledger format
 //!
@@ -43,33 +42,27 @@
 //!
 //! Step 6 is the loop's instruction to an operator: on a failed conversion,
 //! append a HELD line **in this format** — a JSON `HoldRecord` — never
-//! prose. A record kept for a future consumer is written in that consumer's
-//! format from the first entry, or the cost of the wrong choice is paid
-//! retroactively across every entry ever written (#4494).
+//! prose; a record is written in its consumer's format from the first
+//! entry, or the cost of the wrong choice is paid retroactively across
+//! every entry ever written (#4494).
 //!
 //! `--convert-ledger PATH` is the one-off that turns a pre-existing prose
-//! ledger (lines of `- <issue>  HELD <reason>`, reason may span lines) into
-//! this format: one record per issue, the recorded reason preserved, stamped
-//! with the current trunk tip and — where the patch is still on disk — its
-//! current key, so the first plan after conversion reports `held=N` instead
-//! of re-gating every entry at full gate cost.
+//! ledger into this format: one record per issue, the recorded reason
+//! preserved, stamped with the current trunk tip and — where the patch is
+//! still on disk — its current key.
 //!
 //! The command is side-effect-free by default: it plans the pass (enumerate +
 //! select + report). `--apply` performs the real conversion (branch, gate,
 //! PR, HELD).
 //!
-//! Every plan and apply run also reports the **conversion buffer** — how
-//! many finished patches are waiting (on disk, no live PR) and how many
-//! queue entries they block (one per patch on disk; the dispatch guard
-//! holds each). The pass is the pipeline's rate limiter, and a report of
-//! only what the run converted hides the buffer it is draining; with
-//! `--free-slots N` the pass alarms when the blocked entries exceed the
-//! free agent slots — the precise condition under which the fleet is
-//! wasting GPU time (#4558). `--archive` is the explicit exit for a patch
-//! that can never convert (shell-only, superseded, already in main): it
-//! moves the named issue's patch to that issue's `superseded/` directory
-//! (archival, never deletion), removes the issue's HELD record, and
-//! releases the queue entry the dispatch guard holds.
+//! Every plan and apply run also reports the **conversion buffer** — finished
+//! patches waiting and the queue entries they block — alarming with
+//! `--free-slots N` when blocked entries exceed the free agent slots, the
+//! precise condition under which the fleet wastes GPU time (#4558).
+//! `--archive` is the explicit exit for a patch that can never convert:
+//! it moves the named issue's patch to its `superseded/` directory
+//! (archival, never deletion), removes its HELD record, and releases the
+//! queue entry.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -93,6 +86,7 @@ mod gate_source;
 mod language;
 mod progress;
 mod sizing;
+mod stale;
 
 use git::{run_capture_in, run_git, run_git_capture, run_git_in, teardown_worktree};
 
@@ -363,16 +357,14 @@ fn enumerate_patches(root: &Path) -> Result<Vec<PatchLocation>, CommandFailure> 
 /// moved). Appending a HELD line is the pass's "never discard" step.
 /// Print the pass's summary line, having first checked that it can be true.
 ///
-/// `PassOutcome` has carried a `reconciles()` predicate, and a doc comment
-/// saying the counters "must reconcile", since it was written. Nothing in the
-/// running pass ever called it: the summary was printed whatever the arithmetic
-/// said (issue #4604). A pass reporting that it acted on more patches than it
-/// examined would emit a line that reads as authoritative and is impossible.
-///
-/// Every operational decision about this fleet is made from that one line, so
-/// the line now states whether it can be trusted. The counters are still
-/// printed -- suppressing them would destroy the evidence needed to find the
-/// accounting defect -- but they are no longer offered as fact.
+/// `PassOutcome` has carried a `reconciles()` predicate since it was written,
+/// and nothing in the running pass ever called it: the summary was printed
+/// whatever the arithmetic said (issue #4604) — a line that reads as
+/// authoritative and is impossible. Every operational decision about this
+/// fleet is made from that one line, so the line now states whether it can
+/// be trusted: the counters are still printed -- suppressing them would
+/// destroy the evidence needed to find the accounting defect -- but they are
+/// no longer offered as fact.
 fn report_outcome(outcome: &PassOutcome) {
     let (line, alarm) = outcome_report(outcome);
     println!("{line}");
@@ -382,11 +374,9 @@ fn report_outcome(outcome: &PassOutcome) {
 }
 
 /// The summary line, and the alarm that must accompany it when the pass's own
-/// arithmetic is impossible.
-///
-/// Split from the printing so the decision is testable without capturing
-/// stdout -- the check this issue is about should not itself be reachable only
-/// through a full pass.
+/// arithmetic is impossible. Split from the printing so the decision is
+/// testable without capturing stdout -- the check this issue is about should
+/// not itself be reachable only through a full pass.
 fn outcome_report(outcome: &PassOutcome) -> (String, Option<String>) {
     let line = outcome.line("convert", "autospec convert", "enumerate $LLM");
     if outcome.reconciles() {
@@ -486,10 +476,9 @@ fn parse_prose_ledger(text: &str) -> BTreeMap<u64, String> {
 
 /// The trunk tip the converted records are stamped against: `origin/<base>`
 /// when the remote ref resolves, else the local `HEAD` — resolved in the
-/// repository the pass runs in (the cwd), the same way the pass resolves its
-/// refs. Outside a git repository both fail — the records need a base sha to
-/// become re-gate cache keys at all, so the conversion refuses rather than
-/// stamps an empty one.
+/// repository the pass runs in (the cwd). Outside a git repository both fail
+/// — the records need a base sha to become re-gate cache keys at all, so the
+/// conversion refuses rather than stamps an empty one.
 fn current_base_sha(base: &str) -> Result<String, CommandFailure> {
     if let Ok(sha) = run_git_capture(&["rev-parse", &format!("origin/{base}")]) {
         return Ok(sha);
@@ -604,7 +593,7 @@ fn convert_ledger(opts: &Options, prose_path: &Path) -> Result<(), CommandFailur
 /// (unknown base sha, not a git repo, no network): the caller then
 /// over-re-gates, the safe direction (a needless re-derivation, never a
 /// stale "still held").
-fn base_changed_files(base_sha: &str, base_ref: &str) -> Option<Vec<String>> {
+pub(super) fn base_changed_files(base_sha: &str, base_ref: &str) -> Option<Vec<String>> {
     let output = Command::new("git")
         .args(["diff", "--name-only", base_sha, base_ref])
         .output()
@@ -630,7 +619,7 @@ fn base_changed_files(base_sha: &str, base_ref: &str) -> Option<Vec<String>> {
 /// reported, never silently retired: the pass pushes the branch before the
 /// PR, so an interruption in that window is exactly this state (#4499).
 /// `Unknown` stays `Unknown`: the selection folds it fail-closed.
-fn attempt_state(
+pub(super) fn attempt_state(
     repo: Option<&str>,
     branch: &str,
     prefetched: Option<&AttemptIndex>,
@@ -659,17 +648,14 @@ fn attempt_state(
 
 /// The remote half of branch liveness for a whole pass, fetched once
 /// (issue #4587). Its order matters and the index reproduces
-/// `attempt_liveness` exactly:
+/// `attempt_liveness` exactly: a local worktree holding the branch is checked
+/// first; otherwise a branch absent from the remote is `NoBranch` (asked
+/// about pull requests never); otherwise an open or merged pull request makes
+/// it live; otherwise the attempt is abandoned, and abandoned is not live.
 ///
-/// 1. a local worktree holding the branch is checked first;
-/// 2. otherwise a branch absent from the remote is `NoBranch` (asked about
-///    pull requests never);
-/// 3. otherwise an open or merged pull request makes it live;
-/// 4. otherwise the attempt is abandoned, and abandoned is not live.
-///
-/// Steps 2 and 3 are set-membership tests over answers the remote gives in one
-/// call each; over a 563-patch backlog this is two round-trips instead of up
-/// to three per candidate.
+/// The remote halves are set-membership tests over answers the remote gives
+/// in one call each: two round-trips for a 563-patch backlog instead of up to
+/// three per candidate.
 #[derive(Debug, Default)]
 struct AttemptIndex {
     /// Branch names present on the remote, from one prefixed `ls-remote`.
@@ -713,11 +699,10 @@ impl AttemptIndex {
 
 /// Fetch a pass's remote liveness facts in two calls (issue #4587).
 ///
-/// `None` when either call fails, so the caller keeps the per-branch path.
-/// Treating a failed batch as "nothing exists" would re-offer every patch and
-/// open duplicate pull requests, which is precisely the outcome the liveness
-/// check exists to prevent.
-fn prefetch_attempt_index(repo: &str, branch_prefix: &str) -> Option<AttemptIndex> {
+/// `None` when either call fails, so the caller keeps the per-branch path:
+/// treating a failed batch as "nothing exists" would re-offer every patch
+/// and open duplicate pull requests — precisely what liveness prevents.
+pub(super) fn prefetch_attempt_index(repo: &str, branch_prefix: &str) -> Option<AttemptIndex> {
     let heads = Command::new("git")
         .args([
             "ls-remote",
@@ -865,6 +850,13 @@ pub(crate) struct ConvertPlan {
     llm_root: PathBuf,
     pub(crate) examined: Vec<PatchLocation>,
     candidates: Vec<PatchCandidate>,
+    /// The base the classification was derived against (#4512): the tip of
+    /// `origin/<base>` at fetch time. `None` when the ref could not be
+    /// resolved — reported, and treated as "possibly stale" on revalidation.
+    pub(crate) classified_base: Option<String>,
+    /// The HELD ledger the plan read; revalidation re-gates against the
+    /// current base with the same records (#4512).
+    pub(crate) held: std::collections::BTreeMap<u64, HoldRecord>,
     outcome: PassOutcome,
 }
 
@@ -917,57 +909,23 @@ fn build_plan(opts: Options, llm_root: PathBuf) -> Result<ConvertPlan, CommandFa
         );
     }
 
-    // The already-delivered residue (#4501): reported, never offered or gated.
+    // Fetch the trunk so the classification is against the current base —
+    // and record that base: the classification is a fact about it (#4512).
     let _ = run_git(&["fetch", "origin"]);
-    let patches: Vec<_> = examined.iter().map(|p| (p.issue, p.path.clone())).collect();
-    let delivered_issues: BTreeSet<u64> = repo
-        .as_ref()
-        .map(|_| delivered::detect_delivered(&base_ref, &patches))
-        .unwrap_or_default();
+    let classified_base = stale::classify_base(&base_ref);
 
-    // The remote half of liveness, fetched once for the pass (issue #4587).
-    // `None` means a fetch failed and the per-branch path is used, so
-    // correctness never depends on the batch succeeding.
-    let attempt_index = repo
-        .as_deref()
-        .and_then(|repo| prefetch_attempt_index(repo, &opts.branch_prefix));
-    if repo.is_some() && attempt_index.is_none() {
-        eprintln!(
-            "WARN: could not prefetch branch liveness; falling back to one query per candidate"
-        );
-    }
-
-    let mut candidates = Vec::new();
-    for patch in &examined {
-        let branch = format!("{}{}", opts.branch_prefix, patch.issue);
-        let attempt = attempt_state(repo.as_deref(), &branch, attempt_index.as_ref());
-
-        // HELD is a queue: a recorded hold disqualifies only while its
-        // re-gate still holds. A changed patch, or a dependent file that
-        // moved on the base since the hold, re-offers it.
-        let held_recorded = match held.get(&patch.issue) {
-            Some(record) => {
-                let changed = base_changed_files(&record.base_sha, &base_ref)
-                    .unwrap_or_else(|| vec!["<base: unknown — over-re-gate>".to_string()]);
-                re_gate(record, &patch.patch_key, &changed).is_still_held()
-            }
-            None => false,
-        };
-
-        candidates.push(PatchCandidate {
-            issue: patch.issue,
-            patch_key: patch.patch_key.clone(),
-            attempt,
-            held_recorded,
-            delivered: delivered_issues.contains(&patch.issue),
-            language: language::candidate_language(patch),
-        });
-    }
+    // The candidate list is (base, entries), not entries (#4512): attempt
+    // state, re-gated holds, and the already-delivered residue, all measured
+    // against the current tip of origin/<base>.
+    let candidates =
+        stale::classify(&examined, repo.as_deref(), &base_ref, &opts.branch_prefix, &held);
 
     Ok(ConvertPlan {
         opts,
         llm_root,
         examined,
+        classified_base,
+        held,
         outcome: language::plan_outcome(&candidates),
         candidates,
     })
@@ -1163,6 +1121,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             "schema": CONVERT_PLAN_SCHEMA,
             "llm_root": plan.llm_root.display().to_string(),
             "base": plan.opts.base,
+            "classified_base": plan.classified_base.clone(),
             "apply": false,
             "examined": plan.candidates.len(),
             "fresh": fresh,
@@ -1185,7 +1144,15 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         return gate_source::finish_with_coverage(coverage.as_ref());
     }
 
-    println!("{selection_line}");
+    // The counts are a measurement against a base, not a standing fact
+    // (#4512): the base is on the line, so "45 fresh" reads as
+    // "45 fresh against origin/main#01234567".
+    let base_label = stale::base_label(
+        &plan.opts.base,
+        &format!("origin/{}", plan.opts.base),
+        plan.classified_base.as_deref(),
+    );
+    println!("{selection_line} @ {base_label}");
     for c in &selection.fresh {
         progress::report_line(&format!(
             "  FRESH #{issue} {patch_key}",
@@ -1229,6 +1196,7 @@ mod apply;
 mod conflict;
 mod delivered;
 mod gate;
+mod invalidated;
 
 use gate::{
     announce_placement, classify_stage_failure, gate_placement, report_base_broken, run_cargo,
@@ -1249,6 +1217,9 @@ enum ApplyResult {
     BaseUnverifiable,
     /// The patch's changes are already in the base: delivered (#4501).
     Delivered,
+    /// Conflict-bound in a shape the pass will never merge: invalidated —
+    /// disposition recorded, patch archived, issue re-dispatched (#4637).
+    Invalidated,
 }
 
 fn apply_one(
@@ -1298,13 +1269,20 @@ fn apply_one(
             Some(count) => Some(count),
             None => {
                 teardown_worktree(&worktree);
-                return record_held_and_result(
+                // A test stage that produces no result line did not measure
+                // this patch and did not measure the base either: it is a fault
+                // on the host, not a verdict. Recording it as one is what let a
+                // full disk strand twelve patches behind holds nobody had
+                // reached.
+                return record_infrastructure_hold(
                     plan,
                     base_sha,
                     patch,
-                    "baseline test count undeterminable at the base (the test stage \
-                     produced no test result line) — the unchanged-count \
-                     contradiction cannot be checked",
+                    "the test stage produced no test result line, so no baseline \
+                     could be measured — the gate did not run. This is a fault on \
+                     the host (a full disk, a missing toolchain, an unbuildable \
+                     base), NOT a verdict about the patch, and it is re-gated \
+                     automatically once the fault clears",
                 );
             }
         }
@@ -1334,8 +1312,7 @@ fn apply_one(
                 lifecycle = ApplyLifecycle::Applied;
             }
             Err(reason) => {
-                teardown_worktree(&worktree);
-                return record_held_and_result(plan, base_sha, patch, &reason);
+                return invalidated::settle_unresolved(plan, base_sha, patch, &worktree, &reason);
             }
         }
     }
@@ -1662,24 +1639,58 @@ fn open_pr(
 
 /// Append a HELD line (a JSON [`HoldRecord`]) to the ledger — the pass's
 /// "never discard" step — and return the held result.
+/// Record a hold for a gate that COULD NOT RUN.
+///
+/// Distinct from [`record_held_and_result`] because the two are not the same
+/// kind of fact: that one records a verdict about the patch, this one records a
+/// fault on the host. An infrastructure hold is always re-gated once the fault
+/// clears, so it cannot outlive the thing that caused it.
+fn record_infrastructure_hold(
+    plan: &ConvertPlan,
+    base_sha: &str,
+    patch: &PatchLocation,
+    reason: &str,
+) -> ApplyResult {
+    record_held_inner(plan, base_sha, patch, reason, true)
+}
+
 fn record_held_and_result(
     plan: &ConvertPlan,
     base_sha: &str,
     patch: &PatchLocation,
     reason: &str,
 ) -> ApplyResult {
+    record_held_inner(plan, base_sha, patch, reason, false)
+}
+
+fn record_held_inner(
+    plan: &ConvertPlan,
+    base_sha: &str,
+    patch: &PatchLocation,
+    reason: &str,
+    infrastructure: bool,
+) -> ApplyResult {
     let held_path = plan
         .opts
         .held_file
         .clone()
         .unwrap_or_else(|| plan.llm_root.join("held.txt"));
-    let record = HoldRecord::new(
-        patch.issue,
-        patch.patch_key.clone(),
-        base_sha,
-        Vec::new(),
-        reason.to_string(),
-    );
+    let record = if infrastructure {
+        HoldRecord::infrastructure(
+            patch.issue,
+            patch.patch_key.clone(),
+            base_sha,
+            reason.to_string(),
+        )
+    } else {
+        HoldRecord::new(
+            patch.issue,
+            patch.patch_key.clone(),
+            base_sha,
+            Vec::new(),
+            reason.to_string(),
+        )
+    };
     if let Some(record) = record {
         if let Some(parent) = held_path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -1776,6 +1787,7 @@ mod tests {
         let idle = PassOutcome::Examined(PassCounters {
             examined: 0,
             delivered: 0,
+            invalidated: 0,
             converted: 0,
             held: 0,
             skipped: 0,
@@ -2286,6 +2298,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             skipped: 1,
             deferred: 4,
     delivered: 0,
+    invalidated: 0,
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(line.contains("examined"), "the line still carries the counts");
@@ -2307,6 +2320,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             skipped: 0,
             deferred: 0,
     delivered: 0,
+    invalidated: 0,
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(

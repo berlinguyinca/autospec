@@ -62,6 +62,13 @@ pub struct PassCounters {
     /// is already delivered (#4501). A pending backlog and a delivered one
     /// must not print the same line.
     pub delivered: usize,
+    /// Candidates whose patch is conflict-bound against the base in a shape
+    /// the pass will never merge: the patch is work against a base that no
+    /// longer exists, so it is invalidated (recorded, archived, and its
+    /// issue returned to dispatch for regeneration) rather than held
+    /// forever (#4637). A pending backlog and a conflict-bound one must not
+    /// print the same line.
+    pub invalidated: usize,
 }
 
 impl PassCounters {
@@ -73,7 +80,13 @@ impl PassCounters {
     /// in `stored_output`). Deferral is accounted work too: the pass decided
     /// about those candidates, it decided not to start them.
     pub fn reconciles(&self) -> bool {
-        self.converted + self.held + self.skipped + self.deferred + self.delivered <= self.examined
+        self.converted
+            + self.held
+            + self.skipped
+            + self.deferred
+            + self.delivered
+            + self.invalidated
+            <= self.examined
     }
 }
 
@@ -99,13 +112,14 @@ pub fn unfed_line(tool: &str, script: &str, selector: &str) -> String {
 /// the line that prints it is a different line (invariant 1).
 pub fn examined_line(tool: &str, counters: &PassCounters) -> String {
     format!(
-        "######## {tool}: examined={} converted={} held={} skipped={} deferred={} delivered={} ########",
+        "######## {tool}: examined={} converted={} held={} skipped={} deferred={} delivered={} invalidated={} ########",
         counters.examined,
         counters.converted,
         counters.held,
         counters.skipped,
         counters.deferred,
-        counters.delivered
+        counters.delivered,
+        counters.invalidated
     )
 }
 

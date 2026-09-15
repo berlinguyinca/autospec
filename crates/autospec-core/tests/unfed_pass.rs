@@ -194,6 +194,8 @@ fn completed_trap_line_carries_populated_counters() {
         skipped: 0,
         deferred: 0,
         delivered: 0,
+
+        invalidated: 0,
     };
     let line = trap_line(TOOL, 0, &ExitPath::Completed(counters));
     assert!(line.contains("examined=4"));
@@ -224,6 +226,8 @@ fn counters_must_reconcile() {
         skipped: 0,
         deferred: 0,
         delivered: 0,
+
+        invalidated: 0,
     }
     .reconciles());
     assert!(!PassCounters {
@@ -233,6 +237,8 @@ fn counters_must_reconcile() {
         skipped: 1,
         deferred: 0,
         delivered: 0,
+
+        invalidated: 0,
     }
     .reconciles());
     // Deferral is accounted work: more deferred than examined is impossible
@@ -245,6 +251,8 @@ fn counters_must_reconcile() {
         skipped: 0,
         deferred: 4,
         delivered: 0,
+
+        invalidated: 0,
     }
     .reconciles());
     assert!(PassCounters {
@@ -254,6 +262,8 @@ fn counters_must_reconcile() {
         skipped: 0,
         deferred: 0,
         delivered: 0,
+
+        invalidated: 0,
     }
     .reconciles());
     assert!(PassCounters {
@@ -263,6 +273,8 @@ fn counters_must_reconcile() {
         skipped: 0,
         deferred: 11,
         delivered: 0,
+
+        invalidated: 0,
     }
     .reconciles());
     assert!(zero().reconciles());
@@ -295,6 +307,8 @@ fn fixed_pass_end_to_end() {
         skipped: 0,
         deferred: 0,
         delivered: 0,
+
+        invalidated: 0,
     };
     assert!(counters.reconciles());
     let summary = examined_line(TOOL, &counters);
