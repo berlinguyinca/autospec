@@ -97,8 +97,8 @@ EOF
 }
 
 @test "bwrap adapter isolates the filesystem: worktree writable, host read-only" {
-    if ! bwrap --unshare-pid --unshare-ipc --unshare-uts --ro-bind / / true >/dev/null 2>&1; then
-        skip "bubblewrap not installed or namespace sandboxing unavailable"
+    if ! command -v bwrap >/dev/null 2>&1; then
+        skip "bubblewrap not installed"
     fi
     # The adapter unshares pid/ipc/uts without a user namespace, which the
     # environment must permit. A bwrap that is present but cannot create those
