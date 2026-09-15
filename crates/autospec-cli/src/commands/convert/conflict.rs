@@ -46,6 +46,36 @@ pub(super) fn conflict_reason(path: &str, content: &str) -> String {
     }
 }
 
+/// Whether this conflict is terminal: every conflicted file is a shape the
+/// pass will never merge (refused, or regenerate-from-source), so no amount
+/// of re-gating converts this patch against this base — only regeneration
+/// can. `None` when the pass cannot make that claim: the conflicted files
+/// could not be enumerated, or at least one file is a certified keep-both
+/// shape (its hold may be the gate's, and the gate's holds clear when the
+/// trunk does).
+///
+/// This is the distinction #4637's deadlock needs: a patch held on a
+/// structural refusal is evidence of work against a base that no longer
+/// exists, and while it sits on disk it suppresses re-dispatch of its issue
+/// forever. A patch held on a gate or on a parser failure over a certified
+/// shape is not: it stays, and is re-offered.
+pub(super) fn is_structural_refusal(worktree: &Path) -> bool {
+    let names = conflicted_names(worktree);
+    if names.is_empty() {
+        return false;
+    }
+    for name in &names {
+        let content = fs::read_to_string(worktree.join(name)).unwrap_or_default();
+        if matches!(
+            resolution_for(&classify_file(name, &content)),
+            ResolutionPlan::KeepBothInOrder | ResolutionPlan::KeepBothDeduplicated
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
 /// The files a worktree left in a conflicted (unmerged) state, each with its
 /// shape — the refusal reason for a conflict the pass cannot resolve.
 pub(super) fn summary(worktree: &Path) -> String {
