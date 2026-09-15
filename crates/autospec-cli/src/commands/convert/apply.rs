@@ -7,6 +7,37 @@ use autospec_core::unfed_pass::PassCounters;
 
 use super::git::{run_git, run_git_capture};
 
+/// Release the hold record for an issue: the ledger is rewritten without it.
+///
+/// Returns `true` when a record was removed. The file is rewritten only then:
+/// a hold on a closed issue is a stale hold (the claim of pending work is
+/// false), and a ledger with none must not be created by the release — the
+/// same discipline `--archive` applies. A candidate classified closed carries
+/// a live hold record by construction (`closed` is only ever set on a
+/// still-held candidate), so the release normally finds one.
+pub(super) fn release_hold(plan: &super::ConvertPlan, issue: u64) -> bool {
+    let held_path = plan
+        .opts
+        .held_file
+        .clone()
+        .unwrap_or_else(|| plan.llm_root.join("held.txt"));
+    let Ok(mut held) = super::load_held(&held_path) else {
+        return false;
+    };
+    if held.remove(&issue).is_none() {
+        return false;
+    }
+    let mut out = String::new();
+    for record in held.values() {
+        out.push_str(&serde_json::to_string(record).expect("HoldRecord serializes"));
+        out.push('\n');
+    }
+    if let Some(parent) = held_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&held_path, out).is_ok()
+}
+
 use super::{
     buffer_from_candidates, Attempt, ApplyResult, ConvertPlan, ConversionBuffer, apply_one,
     gate_source, infer_repo, report_outcome,
@@ -68,6 +99,7 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     };
     // Patches archived this run (superseded by the base): they leave the
     // buffer entirely — no patch on disk, so no queue entry held.
@@ -86,6 +118,21 @@ pub(super) fn run_apply(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             archived += 1;
         }
         counters.delivered += 1;
+    }
+    // The closed-issue residue (#4626): the issue is over, so there is no
+    // pending work — re-gating the hold is the measured waste. Archive the
+    // patch (the queue entry releases with it), release the hold record,
+    // never gate, never open a PR.
+    for c in &selection.closed {
+        let Some(patch) = plan.examined.iter().find(|p| p.issue == c.issue) else {
+            continue;
+        };
+        progress::closed(c.issue);
+        if super::delivered::archive_patch(&patch.path) {
+            archived += 1;
+        }
+        release_hold(plan, c.issue);
+        counters.closed += 1;
     }
     // The pass sizes its batch to its own deadline (#4607): it stops
     // *starting* new patches when the remaining time is less than what a

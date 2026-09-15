@@ -184,6 +184,7 @@ fn an_idle_plan_is_distinct_from_a_broken_one() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     });
     // The pass was handed no candidates: it did no work, and its line must
     // not look like the idle one.
@@ -420,6 +421,7 @@ fn an_unfed_pass_and_an_idle_pass_print_different_lines() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
         deferred: 0,
     })
     .line(tool, script, selector);
@@ -438,6 +440,7 @@ fn an_unfed_pass_and_an_idle_pass_print_different_lines() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     })
     .line(tool, script, selector);
     assert!(partial.contains("deferred=11"), "{partial}");
@@ -458,6 +461,7 @@ fn an_unfed_outcome_carries_no_counters() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     });
     assert_eq!(examined.counters().unwrap().examined, 3);
 }
@@ -474,6 +478,7 @@ fn the_outcome_reconciles_its_counters() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     });
     assert!(ok.reconciles());
     let impossible = PassOutcome::Examined(PassCounters {
@@ -485,6 +490,7 @@ fn the_outcome_reconciles_its_counters() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     });
     assert!(
         !impossible.reconciles(),
@@ -501,6 +507,78 @@ fn the_outcome_reconciles_its_counters() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     });
     assert!(!deferred_impossible.reconciles());
+}
+
+// --- closed issues (#4626) ------------------------------------------------
+
+/// The incident: a hold on a closed issue was re-gated forever because
+/// nothing ever asked the tracker. The fact of closure routes the candidate
+/// to the closed bucket — not the hold's, not the fresh's.
+#[test]
+fn a_held_candidate_on_a_closed_issue_is_closed() {
+    let selection = select_fresh(&[with(fresh(305), |c| {
+        c.held_recorded = true;
+        c.closed = true;
+    })]);
+    assert_eq!(selection.closed_count(), 1);
+    assert_eq!(
+        selection.closed.first().map(|c| c.issue),
+        Some(305),
+        "the closed bucket names the issue"
+    );
+    assert!(
+        selection.disqualified.is_empty(),
+        "closure is not a disqualification: {selection:?}"
+    );
+    assert!(selection.fresh.is_empty());
+}
+
+/// Closure wins over a live attempt: a merged PR on a closed issue is
+/// residue to archive, not work to keep alive.
+#[test]
+fn closure_wins_over_a_live_attempt() {
+    let selection = select_fresh(&[with(fresh(305), |c| {
+        c.attempt = Attempt::Live;
+        c.held_recorded = true;
+        c.closed = true;
+    })]);
+    assert_eq!(selection.closed_count(), 1);
+    assert!(
+        selection.fresh.is_empty() && selection.interrupted.is_empty(),
+        "a closed issue is never offered: {selection:?}"
+    );
+}
+
+/// Delivered still wins over closure: the work is in the base, and that is
+/// the stronger fact.
+#[test]
+fn delivered_wins_over_closure() {
+    let selection = select_fresh(&[with(fresh(305), |c| {
+        c.delivered = true;
+        c.held_recorded = true;
+        c.closed = true;
+    })]);
+    assert_eq!(selection.delivered.len(), 1);
+    assert_eq!(selection.closed_count(), 0);
+}
+
+/// The line counts closures alongside everything else.
+#[test]
+fn the_line_counts_closed_alongside_fresh_and_held() {
+    let selection = select_fresh(&[
+        fresh(1),
+        with(fresh(2), |c| c.held_recorded = true),
+        with(fresh(3), |c| {
+            c.held_recorded = true;
+            c.closed = true;
+        }),
+    ]);
+    let line = selection.line(3);
+    assert!(line.contains("fresh=1"), "{line}");
+    assert!(line.contains("closed=1"), "{line}");
+    // The hold sits in the attempt clause, as it always has.
+    assert!(line.contains("1 held"), "{line}");
 }

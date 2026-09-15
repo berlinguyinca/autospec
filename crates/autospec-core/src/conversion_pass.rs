@@ -149,6 +149,13 @@ pub struct PatchCandidate {
     /// The patch's changes are already in the base: the work is delivered,
     /// the patch is residue (#4501). Never offered, never gated.
     pub delivered: bool,
+    /// The issue is closed: there is no pending work, so the patch is
+    /// residue — archived and its hold released, never re-gated forever
+    /// (#4626). Checked before the attempt state, because a merged-PR branch
+    /// on a closed issue is residue too, and `Live` would hide it behind a
+    /// disqualifier instead of letting the pass archive it. `false` when the
+    /// state could not be read: unknown never authorises acting.
+    pub closed: bool,
     /// The patch's language class ([`crate::patch_language::classify`])
     /// from its file list. Only [`PatchLanguage::RustGo`] is offerable: the
     /// Rust gate cannot fail on a shell-only or a neither patch, so a green
@@ -203,6 +210,12 @@ pub struct Selection {
     /// reported as their own category so a pending backlog and a delivered
     /// one read differently.
     pub delivered: Vec<Candidate>,
+    /// The patches whose issue is closed (issue #4626): a hold is a claim
+    /// that work is pending; a closed issue has no pending work, so the patch
+    /// is residue — archived and its hold released under `--apply`, never
+    /// re-gated forever. Reported as their own category so a pending backlog
+    /// and a closed-issue one read differently.
+    pub closed: Vec<Candidate>,
 }
 
 /// The "11, not 121" selection (step 2 of the pass).
@@ -219,6 +232,19 @@ pub fn select_fresh(candidates: &[PatchCandidate]) -> Selection {
         // say about the patch (#4501). It is reported, not offered.
         if candidate.delivered {
             selection.delivered.push(Candidate {
+                issue: candidate.issue,
+                patch_key: candidate.patch_key.clone(),
+            });
+            continue;
+        }
+        // A closed issue owns its patch next: the work it claimed is over,
+        // so neither the attempt state (a merged PR is residue, not a live
+        // attempt) nor a recorded hold (re-gating it is the waste #4626
+        // measured) has anything left to say about it. Delivered is checked
+        // first: for a closed issue whose changes are in the base, "the work
+        // is in the base" is the more specific fact.
+        if candidate.closed {
+            selection.closed.push(Candidate {
                 issue: candidate.issue,
                 patch_key: candidate.patch_key.clone(),
             });
@@ -268,6 +294,12 @@ impl Selection {
         self.delivered.len()
     }
 
+    /// The patches whose issue is closed: residue to be archived, not work
+    /// to be re-gated (#4626).
+    pub fn closed_count(&self) -> usize {
+        self.closed.len()
+    }
+
     /// The not-offered patches grouped by disqualifier, in attempted → held
     /// order. The counts reconcile against the number examined:
     /// `fresh + disqualified == examined`.
@@ -311,16 +343,19 @@ impl Selection {
     /// the size of the input the pass was handed — a zero fresh count read
     /// against it is what keeps an idle pass distinct from a broken one, and
     /// a pass that held everything must not print the idle counters
-    /// (issue #4559).
+    /// (issue #4559). `delivered` and `closed` name the two residue
+    /// categories on their own: a backlog of finished work and a backlog of
+    /// closed issues must not read as pending work.
     pub fn line(&self, examined: usize) -> String {
         let [(attempted, attempted_n), (held, held_n)] = self.disqualified_counts();
         let [(shell, shell_n), (mixed, mixed_n), (neither, neither_n)] = self.language_counts();
         format!(
-            "conversion pass: examined={examined} fresh={} interrupted={} delivered={} \
+            "conversion pass: examined={examined} fresh={} interrupted={} delivered={} closed={} \
              ({} {} {} {}; language: {} {} {} {} {} {})",
             self.fresh.len(),
             self.interrupted.len(),
             self.delivered.len(),
+            self.closed.len(),
             attempted_n,
             attempted.as_str(),
             held_n,

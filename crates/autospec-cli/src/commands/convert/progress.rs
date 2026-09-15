@@ -75,6 +75,14 @@ pub(super) fn delivered(issue: u64) {
     ));
 }
 
+/// The issue is closed: there is no pending work, so the patch is residue —
+/// archived and its hold released, never re-gated forever (#4626).
+pub(super) fn closed(issue: u64) {
+    report_line(&format!(
+        "  CLOSED #{issue} (issue is closed: the patch is archived, its hold released)"
+    ));
+}
+
 /// A patch is conflict-bound against the base in a shape the pass will
 /// never merge: it is invalidated — recorded, archived, and its issue
 /// returned to dispatch for regeneration (#4637). Its own line, like
