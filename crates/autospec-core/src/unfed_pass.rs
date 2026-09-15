@@ -69,6 +69,11 @@ pub struct PassCounters {
     /// forever (#4637). A pending backlog and a conflict-bound one must not
     /// print the same line.
     pub invalidated: usize,
+    /// Candidates whose issue is closed: there is no pending work, so the
+    /// patch is residue — archived and its hold released, never re-gated
+    /// forever (#4626). A pending backlog and a closed-issue one must not
+    /// print the same line.
+    pub closed: usize,
 }
 
 impl PassCounters {
@@ -86,6 +91,7 @@ impl PassCounters {
             + self.deferred
             + self.delivered
             + self.invalidated
+            + self.closed
             <= self.examined
     }
 }
@@ -112,14 +118,15 @@ pub fn unfed_line(tool: &str, script: &str, selector: &str) -> String {
 /// the line that prints it is a different line (invariant 1).
 pub fn examined_line(tool: &str, counters: &PassCounters) -> String {
     format!(
-        "######## {tool}: examined={} converted={} held={} skipped={} deferred={} delivered={} invalidated={} ########",
+        "######## {tool}: examined={} converted={} held={} skipped={} deferred={} delivered={} invalidated={} closed={} ########",
         counters.examined,
         counters.converted,
         counters.held,
         counters.skipped,
         counters.deferred,
         counters.delivered,
-        counters.invalidated
+        counters.invalidated,
+        counters.closed
     )
 }
 

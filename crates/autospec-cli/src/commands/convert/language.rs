@@ -43,6 +43,7 @@ pub(crate) fn plan_outcome(candidates: &[PatchCandidate]) -> PassOutcome {
         deferred: 0,
         delivered: selection.delivered.len(),
         invalidated: 0,
+        closed: selection.closed.len(),
     })
 }
 

@@ -12,6 +12,7 @@
 //! are both facts about a pair.
 
 use std::collections::BTreeSet;
+use std::process::Command;
 
 use autospec_core::conversion_pass::{select_fresh, Attempt, PatchCandidate};
 use autospec_core::hold_memo::HoldRecord;
@@ -21,6 +22,36 @@ use super::git::run_git_capture;
 use super::language;
 use super::{base_changed_files, attempt_state, prefetch_attempt_index, PatchLocation, ConvertPlan};
 use autospec_core::hold_memo::re_gate;
+
+/// Whether the issue is closed, asked of the tracker (issue #4626).
+///
+/// `None` when the state could not be read — no repo, no `gh`, or a failed
+/// call — and the caller treats the candidate as not closed: a hold is a
+/// claim that work is pending, and a claim is only lifted by the fact, never
+/// by the absence of one (unknown never authorises acting).
+///
+/// Only the two states the tracker has are acted on; anything else is
+/// `None`.
+pub(super) fn issue_is_closed(repo: Option<&str>, issue: u64) -> Option<bool> {
+    let repo = repo?;
+    let output = Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{repo}/issues/{issue}"),
+            "--jq",
+            ".state",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "closed" => Some(true),
+        "open" => Some(false),
+        _ => None,
+    }
+}
 
 /// The base the classification was derived against: the tip of `base_ref`.
 /// `None` when the ref cannot be resolved (the caller reports what it can).
@@ -119,12 +150,23 @@ pub(super) fn classify(
             }
             None => false,
         };
+        // Issue state is checked before the patch is selected (#4626): a
+        // hold on a closed issue is a claim of pending work that does not
+        // exist, and re-gating it forever is the measured waste. Asked only
+        // for candidates with a recorded hold — the ledger is small, the
+        // fresh backlog is not, and a fresh patch for a closed issue comes
+        // from a closed queue entry, which the dispatch side evicts.
+        let closed = held_recorded
+            .then(|| issue_is_closed(repo, patch.issue))
+            .flatten()
+            .unwrap_or(false);
         candidates.push(PatchCandidate {
             issue: patch.issue,
             patch_key: patch.patch_key.clone(),
             attempt,
             held_recorded,
             delivered: delivered_issues.contains(&patch.issue),
+            closed,
             language: language::candidate_language(patch),
         });
     }
@@ -186,6 +228,7 @@ mod tests {
             attempt,
             held_recorded: held,
             delivered,
+            closed: false,
             language: Default::default(),
         }
     }

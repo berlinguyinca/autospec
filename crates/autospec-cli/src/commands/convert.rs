@@ -1127,6 +1127,7 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
             "fresh": fresh,
             "interrupted": interrupted,
             "delivered": delivered,
+            "closed": selection.closed.iter().map(to_value).collect::<Vec<_>>(),
             "disqualified": disqualified,
             "language_held": language_held,
             "buffer": json!({
@@ -1173,6 +1174,10 @@ fn render_plan(plan: &ConvertPlan) -> Result<(), CommandFailure> {
     // patch is what the backlog must stop counting as pending.
     for c in &selection.delivered {
         progress::delivered(c.issue);
+    }
+    // The closed-issue residue, named (#4626): the backlog must stop re-gating it.
+    for c in &selection.closed {
+        progress::closed(c.issue);
     }
     for (c, reason) in &selection.disqualified {
         progress::report_line(&format!(
@@ -1784,16 +1789,8 @@ mod tests {
         let unfed = unfed();
         assert_eq!(unfed.exit_code, 2);
         assert!(unfed.message.contains("no issues given"), "{}", unfed.message);
-        let idle = PassOutcome::Examined(PassCounters {
-            examined: 0,
-            delivered: 0,
-            invalidated: 0,
-            converted: 0,
-            held: 0,
-            skipped: 0,
-            deferred: 0,
-        })
-        .line("convert", "autospec convert", "enumerate $LLM");
+        let idle = PassOutcome::Examined(PassCounters { examined: 0, ..Default::default() })
+            .line("convert", "autospec convert", "enumerate $LLM");
         assert_ne!(unfed.message, idle);
     }
 
@@ -2059,6 +2056,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             attempt,
             held_recorded: held,
             delivered: false,
+            closed: false,
             language: autospec_core::patch_language::PatchLanguage::default(),
         }
     }
@@ -2297,8 +2295,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             held: 2,
             skipped: 1,
             deferred: 4,
-    delivered: 0,
-    invalidated: 0,
+            ..Default::default()
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(line.contains("examined"), "the line still carries the counts");
@@ -2321,6 +2318,7 @@ test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; 
             deferred: 0,
     delivered: 0,
     invalidated: 0,
+    closed: 0,
         });
         let (line, alarm) = outcome_report(&outcome);
         assert!(

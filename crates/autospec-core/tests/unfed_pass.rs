@@ -6,6 +6,7 @@
 //! line was byte-identical to a healthy idle run's, and the exit trap
 //! re-stated counters the run never populated.
 
+use autospec_core::conversion_pass::PassOutcome;
 use autospec_core::unfed_pass::bare_invocation_finding;
 use autospec_core::unfed_pass::{
     examined_line, identical_summary_finding, missing_examined_finding, plan_invocation,
@@ -196,6 +197,7 @@ fn completed_trap_line_carries_populated_counters() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     };
     let line = trap_line(TOOL, 0, &ExitPath::Completed(counters));
     assert!(line.contains("examined=4"));
@@ -228,6 +230,7 @@ fn counters_must_reconcile() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     }
     .reconciles());
     assert!(!PassCounters {
@@ -239,6 +242,7 @@ fn counters_must_reconcile() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     }
     .reconciles());
     // Deferral is accounted work: more deferred than examined is impossible
@@ -253,6 +257,7 @@ fn counters_must_reconcile() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     }
     .reconciles());
     assert!(PassCounters {
@@ -264,6 +269,7 @@ fn counters_must_reconcile() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     }
     .reconciles());
     assert!(PassCounters {
@@ -275,6 +281,7 @@ fn counters_must_reconcile() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     }
     .reconciles());
     assert!(zero().reconciles());
@@ -309,6 +316,7 @@ fn fixed_pass_end_to_end() {
         delivered: 0,
 
         invalidated: 0,
+        closed: 0,
     };
     assert!(counters.reconciles());
     let summary = examined_line(TOOL, &counters);
@@ -324,4 +332,34 @@ fn fixed_pass_end_to_end() {
     assert!(
         trap_line_findings(&ExitPath::Guarded, &trap_line(TOOL, 0, &ExitPath::Guarded)).is_empty()
     );
+}
+
+// --- closed issues (#4626) ------------------------------------------------
+
+/// The accounting reconciles closures: acting on a closed candidate counts
+/// as examined, and a pass cannot close more issues than it examined.
+#[test]
+fn counters_reconcile_closures() {
+    let ok = PassOutcome::Examined(PassCounters {
+        examined: 2,
+        converted: 0,
+        held: 0,
+        skipped: 0,
+        deferred: 0,
+        delivered: 1,
+        invalidated: 0,
+        closed: 1,
+    });
+    assert!(ok.reconciles());
+    let impossible = PassOutcome::Examined(PassCounters {
+        examined: 1,
+        converted: 0,
+        held: 0,
+        skipped: 0,
+        deferred: 0,
+        delivered: 0,
+        invalidated: 0,
+        closed: 2,
+    });
+    assert!(!impossible.reconciles());
 }
