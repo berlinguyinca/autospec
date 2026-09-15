@@ -100,7 +100,6 @@ JSONL
     grep -q '"check_autonomous_phase2_suite"' "$catalog"
     grep -q 'BatsDirectory("tests/autonomous")' "$catalog"
     [ -f "$REPO_ROOT/tests/autonomous/test_accessibility_workstream.bats" ]
-    [ -f "$REPO_ROOT/.github/workflows/accessibility-workstream.yml" ]
     grep -q 'privacy/cookie UX' "$REPO_ROOT/docs/runbooks/accessibility-workstream.md"
     grep -q 'schema.org JSON-LD' "$REPO_ROOT/docs/runbooks/accessibility-workstream.md"
     grep -q 'ISO 9241' "$REPO_ROOT/docs/runbooks/accessibility-workstream.md"

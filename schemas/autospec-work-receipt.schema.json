@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-work-receipt.schema.json",
+  "title": "autospec work receipt",
+  "description": "A durable acknowledgement receipt (autospec.work-receipt.v1) attributable to an attempt and consumer, with an idempotency key so duplicate delivery is safe.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "receipt_id", "idempotency_key", "work_id", "attempt_id",
+    "consumer", "stage", "at"
+  ],
+  "properties": {
+    "schema": { "const": "autospec.work-receipt.v1" },
+    "receipt_id": { "type": "string", "pattern": "^receipt-" },
+    "idempotency_key": { "type": "string", "pattern": "^idem-" },
+    "work_id": { "type": "string", "pattern": "^work-" },
+    "attempt_id": { "type": "string", "pattern": "^attempt-" },
+    "consumer": { "type": "string", "minLength": 1 },
+    "stage": { "type": "string", "enum": ["sent", "delivered", "claimed", "handled"] },
+    "at": { "type": "integer", "minimum": 0 }
+  }
+}

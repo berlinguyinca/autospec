@@ -141,6 +141,7 @@ pub mod prose_closure;
 pub mod queue_gap;
 pub mod rag;
 pub mod ranking_evidence;
+pub mod resilience;
 pub mod reader_fidelity;
 pub mod rebase_review;
 pub mod rebaseline;

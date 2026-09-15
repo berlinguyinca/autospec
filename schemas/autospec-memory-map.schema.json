@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-memory-map.schema.json",
+  "title": "autospec dynamic memory map",
+  "description": "A bounded, task-specific memory map (autospec.memory-map.v1) over the shared-memory provider contract. Holds references, not payloads; carries provenance; marks explicit degraded mode.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "task", "domains", "recent_decisions", "validated_procedures", "warnings", "suggested_queries", "degraded"],
+  "properties": {
+    "schema": { "const": "autospec.memory-map.v1" },
+    "task": { "type": "string", "minLength": 1 },
+    "repository": { "type": "string" },
+    "role": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "domains": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "reason", "relevance", "refs"],
+        "properties": {
+          "key": { "type": "string" },
+          "reason": { "type": "string" },
+          "relevance": { "type": "string", "enum": ["high", "medium", "low"] },
+          "refs": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "recent_decisions": { "type": "array", "items": { "$ref": "#/definitions/entry" } },
+    "validated_procedures": { "type": "array", "items": { "$ref": "#/definitions/entry" } },
+    "warnings": { "type": "array", "items": { "$ref": "#/definitions/entry" } },
+    "suggested_queries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["query", "reason"],
+        "properties": { "query": { "type": "string" }, "reason": { "type": "string" } }
+      }
+    },
+    "degraded": { "type": "boolean" }
+  },
+  "definitions": {
+    "entry": {
+      "type": "object",
+      "required": ["summary", "kind", "confidence", "status", "provenance"],
+      "properties": {
+        "summary": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "enum": ["fact", "decision", "procedure", "candidate", "superseded", "warning"]
+        },
+        "scope": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "status": { "type": "string" },
+        "provenance": { "type": "string" },
+        "supersedes": { "type": "string" }
+      }
+    }
+  }
+}

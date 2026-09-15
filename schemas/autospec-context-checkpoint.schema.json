@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-context-checkpoint.schema.json",
+  "title": "autospec context checkpoint",
+  "description": "A structured continuation checkpoint (autospec.context-checkpoint.v1) produced by the Context Guardian so a long-running Pi/agent session can resume without replaying the full conversation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "checkpoint_id", "created_at", "execution_id", "attempt_id",
+    "session_id", "work_id", "objective", "acceptance_criteria"
+  ],
+  "properties": {
+    "schema": { "const": "autospec.context-checkpoint.v1" },
+    "checkpoint_id": { "type": "string", "pattern": "^checkpoint-" },
+    "created_at": { "type": "string" },
+    "execution_id": { "type": "string", "pattern": "^exec-" },
+    "attempt_id": { "type": "string", "pattern": "^attempt-" },
+    "session_id": { "type": "string", "pattern": "^session-" },
+    "work_id": { "type": "string", "pattern": "^work-" },
+    "repository": { "type": "string" },
+    "worktree": { "type": "string" },
+    "branch": { "type": "string" },
+    "issue": { "type": "string" },
+    "pull_request": { "type": "string" },
+    "objective": { "type": "string", "minLength": 1 },
+    "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
+    "completed": { "type": "array", "items": { "type": "string" } },
+    "in_progress": { "type": "array", "items": { "type": "string" } },
+    "next_actions": { "type": "array", "items": { "type": "string" } },
+    "changed_files": { "type": "array", "items": { "type": "string" } },
+    "important_code_refs": { "type": "array", "items": { "type": "string" } },
+    "evidence_refs": { "type": "array", "items": { "type": "string" } },
+    "decisions": { "type": "array", "items": { "type": "string" } },
+    "known_failures": { "type": "array", "items": { "type": "string" } },
+    "blockers": { "type": "array", "items": { "type": "string" } },
+    "unresolved_questions": { "type": "array", "items": { "type": "string" } },
+    "memory_refs": { "type": "array", "items": { "type": "string" } },
+    "attention_stream_refs": { "type": "array", "items": { "type": "string" } },
+    "artifact_refs": { "type": "array", "items": { "type": "string" } },
+    "context": {
+      "type": "object",
+      "required": ["window_tokens", "estimated_used_tokens", "source"],
+      "properties": {
+        "window_tokens": { "type": "integer" },
+        "estimated_used_tokens": { "type": "integer" },
+        "source": {
+          "type": "string",
+          "enum": ["exact", "estimated", "conservative-estimate", "unknown"]
+        }
+      }
+    },
+    "validation": { "type": "object", "additionalProperties": { "type": "string" } },
+    "review": { "type": "array", "items": { "type": "string" } },
+    "redacted": { "type": "array", "items": { "type": "string" } }
+  }
+}
