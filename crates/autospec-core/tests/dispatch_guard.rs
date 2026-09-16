@@ -405,3 +405,93 @@ fn artifact_outcome_round_trips_through_json() {
         assert_eq!(back, outcome);
     }
 }
+
+// ---------------------------------------------------------------------------
+// A signalled run is a failed run whatever its label claims (#4651).
+// ---------------------------------------------------------------------------
+
+use autospec_core::dispatch_guard::classify_report;
+use autospec_core::execution::status_triage::AgentReport;
+
+fn record(status: Option<&str>, agent_rc: Option<i32>, signal: Option<&str>) -> AgentReport {
+    AgentReport {
+        status: status.map(String::from),
+        agent_rc,
+        signal: signal.map(String::from),
+        ..AgentReport::default()
+    }
+}
+
+#[test]
+fn a_killed_agent_is_a_failed_run_under_a_healthy_label() {
+    // iw-87: `UNKNOWN-NO-BASELINE` with agent_rc=143. Read as a label alone,
+    // the guard held the artifact as convertible while the conversion pass
+    // refused it, so the dispatch slot never freed (#4651).
+    assert_eq!(
+        classify_report(&record(Some("UNKNOWN-NO-BASELINE"), Some(143), None)),
+        ArtifactOutcome::FailedRun {
+            status: "SIGNALLED".to_string()
+        }
+    );
+}
+
+#[test]
+fn a_signal_with_no_label_at_all_is_still_a_failed_run() {
+    // A runner killed before it wrote its verdict leaves only the signal.
+    assert_eq!(
+        classify_report(&record(None, None, Some("SIGKILL"))),
+        ArtifactOutcome::FailedRun {
+            status: "SIGNALLED".to_string()
+        }
+    );
+}
+
+#[test]
+fn the_runners_own_timeout_is_its_own_failure_not_an_unattributed_kill() {
+    // 124 is a known sender: the artifact archives as the timeout it is,
+    // because conflating the two would hide every limit expiry inside
+    // "something killed it".
+    assert_eq!(
+        classify_report(&record(Some("TIMEOUT"), Some(124), None)),
+        ArtifactOutcome::FailedRun {
+            status: "TIMEOUT".to_string()
+        }
+    );
+    // A runner that asserts its own limit fired keeps that name even over an
+    // ambiguous code, so the archived artifact is not mislabelled as an
+    // unattributed kill.
+    assert_eq!(
+        classify_report(&record(Some("TIMEOUT"), Some(143), None)),
+        ArtifactOutcome::FailedRun {
+            status: "TIMEOUT".to_string()
+        }
+    );
+}
+
+#[test]
+fn an_ordinary_record_classifies_exactly_as_the_label_alone_did() {
+    // The gate must not start seeing kills where it saw none: for any report
+    // that names no termination, the report classifier agrees with the status
+    // classifier it replaced.
+    for status in [
+        None,
+        Some("VERIFIED"),
+        Some("NO-OUTPUT"),
+        Some("UNKNOWN-NO-BASELINE"),
+        Some("BUILD-FAIL"),
+        Some("TIMEOUT-NO-OUTPUT"),
+        Some("FMT-DIRTY"),
+    ] {
+        let report = record(status, Some(0), None);
+        assert_eq!(
+            classify_report(&report),
+            classify_artifact_outcome(report.status.as_deref()),
+            "{status:?} changed classification"
+        );
+    }
+}
+
+#[test]
+fn signalled_is_a_terminal_failure_the_guard_archives() {
+    assert!(FAILED_RUN_STATUSES.contains(&"SIGNALLED"));
+}

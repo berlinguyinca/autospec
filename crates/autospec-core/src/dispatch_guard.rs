@@ -26,6 +26,7 @@
 //! The caller runs its checks, reports each as a [`CheckReport`], and
 //! [`decide`] renders the verdict.
 
+use crate::execution::status_triage::AgentReport;
 use crate::run_status::Status;
 use serde::{Deserialize, Serialize};
 
@@ -138,6 +139,11 @@ pub const FAILED_RUN_STATUSES: &[&str] = &[
     Status::Timeout.as_str(),
     Status::TimeoutNoOutput.as_str(),
     Status::TestTimeout.as_str(),
+    // A signalled agent reached no stage, so the patch it left is a
+    // half-finished edit no re-dispatch of the same run can complete: the
+    // pass refuses it on the status alone (#4651). Held rather than
+    // archived it would block the dispatch slot forever.
+    Status::Signalled.as_str(),
 ];
 
 /// The classified outcome of an unconverted artifact.
@@ -174,6 +180,7 @@ pub enum ArtifactOutcome {
 /// can still act on the patch, so the guard holds with the status named.
 /// This is the tolerant-to-growth default: an unknown status is held, never
 /// destroyed.
+
 pub fn classify_artifact_outcome(status: Option<&str>) -> ArtifactOutcome {
     match status {
         None => ArtifactOutcome::Unrecorded {
@@ -188,6 +195,46 @@ pub fn classify_artifact_outcome(status: Option<&str>) -> ArtifactOutcome {
             },
         },
     }
+}
+
+/// Classify an unconverted artifact from the whole agent report rather than
+/// from its label alone (#4651).
+///
+/// The label is not enough. A run killed by a signal writes the status a
+/// finished run would have written — `UNKNOWN-NO-BASELINE`, or `NO-OUTPUT`
+/// — and only its exit code says it was terminated: `124` is the runner's
+/// own bounding `timeout`, `128 + N` is somebody else. Reading the label
+/// alone left the guard holding a half-applied patch as
+/// [`ArtifactOutcome::Convertible`] while the conversion pass refused it, so
+/// the dispatch slot stayed blocked on a run that could never produce a
+/// verdict.
+///
+/// A signalled run is therefore a failed run whatever its label claims, and
+/// the artifact is archived — preserved under `archive/`, never deleted — so
+/// the slot frees and the operator reads the terminal status. A label that
+/// already declares a failed run keeps its own name: see
+/// [`triage`](crate::execution::status_triage::triage)'s precedence, where an
+/// assertion by the runner outranks an inference from its exit code.
+pub fn classify_report(report: &AgentReport) -> ArtifactOutcome {
+    let by_label = classify_artifact_outcome(report.status.as_deref());
+    // A label that already names a failed run is the runner's own assertion
+    // about how the run ended, and an assertion outranks an inference — the
+    // same precedence `triage` gives its timeout rule. `timeout` exits `124`
+    // while a harness that reports the child's death-signal writes `143`, so
+    // the code cannot settle which happened.
+    if matches!(by_label, ArtifactOutcome::FailedRun { .. }) {
+        return by_label;
+    }
+    if crate::execution::status_triage::signal::is_signalled(
+        report.status.as_deref(),
+        report.signal.as_deref(),
+        report.agent_rc,
+    ) {
+        return ArtifactOutcome::FailedRun {
+            status: Status::Signalled.as_str().to_string(),
+        };
+    }
+    by_label
 }
 
 /// Why dispatch must not proceed.

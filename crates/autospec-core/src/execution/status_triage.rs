@@ -94,6 +94,16 @@
 
 use crate::run_status::Status;
 
+/// How a decision is written out, separated from the policy that makes it:
+/// the rendering grows every time the vocabulary gains a case, the
+/// precedence rules rarely move (#4651).
+mod render;
+/// The termination a recorded exit code describes — the runner's own
+/// bounding `timeout`, or a signal from somewhere that has not said who it
+/// is (#4651).
+pub mod signal;
+pub use render::{decision_line, held_line};
+
 /// One agent run's gate report, as read from the patch's `status.txt`.
 ///
 /// Every field is `Option` because the file is written by a process
@@ -113,6 +123,15 @@ pub struct AgentReport {
     /// The number of files the fmt stage listed, if recorded
     /// (`fmt-files.txt: 32 entries`).
     pub fmt_files: Option<usize>,
+    /// The signal the runner says ended the agent, if it named one
+    /// (`signal=SIGTERM`). A killed run reached no stage, so this outranks
+    /// the status label (#4651).
+    pub signal: Option<String>,
+    /// The agent process's own exit code, if recorded (`agent_rc=143`).
+    /// This is the only field that separates the runner's own `timeout`
+    /// (124) from a signal sent by something else (128 + N) — the
+    /// distinction #4651 lost three runs over.
+    pub agent_rc: Option<i32>,
 }
 
 impl AgentReport {
@@ -124,6 +143,8 @@ impl AgentReport {
             && self.test_rc.is_none()
             && self.fmt_rc.is_none()
             && self.fmt_files.is_none()
+            && self.signal.is_none()
+            && self.agent_rc.is_none()
     }
 }
 
@@ -191,6 +212,11 @@ fn set(report: &mut AgentReport, key: &str, value: &str) -> Result<(), String> {
         // The fmt stage lists the files it touched in a sidecar file
         // and reports the count here.
         "fmt-files.txt" => report.fmt_files = Some(parse_fmt_files(value)?),
+        // Both of these are written by the runner today and dropped by the
+        // reader today (#4651): the fleet record is
+        // `status=NO-OUTPUT agent_rc=143 agent_secs=2761 changed_files=0`.
+        "signal" => report.signal = Some(value.to_string()),
+        "agent_rc" => report.agent_rc = Some(parse_rc("agent_rc", value)?),
         _ => {}
     }
     Ok(())
@@ -213,7 +239,7 @@ fn parse_fmt_files(value: &str) -> Result<usize, String> {
         .map_err(|_| format!("fmt-files.txt expects a file count, got {value}"))
 }
 
-/// The five responses the pass can make to an agent report (#3715).
+/// The responses the pass can make to an agent report (#3715, #4651).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriageDecision {
     /// Re-dispatch the issue; do not gate locally (rule 1).
@@ -226,6 +252,19 @@ pub enum TriageDecision {
         /// The status that triggered the review (`TIMEOUT-NO-OUTPUT`): the
         /// run timed out with no output, so re-dispatch would reproduce the
         /// same emptiness (#3936).
+        status: String,
+    },
+    /// Refuse the patch: the agent was terminated by a signal (rule 1b).
+    ///
+    /// Not a `Hold`, which asserts a deterministic property of the
+    /// submission a killed agent never established; not a `Redispatch`,
+    /// which walks into the same supervisor; not a `GateLocally`, which
+    /// spends a full gate on a tree whose agent is gone. No verdict about
+    /// the patch exists and none can be derived from the record (#4651).
+    Signalled {
+        /// The signal the run recorded, if it named one.
+        signal: Option<String>,
+        /// The status the refusal is recorded on (`SIGNALLED`).
         status: String,
     },
     /// Hold the patch on the agent's own deterministic negative (rule 2).
@@ -323,6 +362,22 @@ pub enum GateBasis {
 ///    reproduces the same emptiness, so the run is raised for review
 ///    rather than re-queued. It outranks every other signal just as the
 ///    plain timeout does.
+/// 1b. A **signalled agent** → [`TriageDecision::Signalled`] (#4651). The
+///    label `SIGNALLED`, a recorded `signal=`, or an `agent_rc` that decodes
+///    to `128 + N` all mean the process was killed rather than finished, and
+///    the exit code outranks the label for the same reason `test_rc` does
+///    (#4206): a runner that dies before writing its verdict leaves only the
+///    code. It outranks the stage fields because a killed run reached no
+///    stage. `UNKNOWN-NO-BASELINE` is not a substitute: it is a claim about
+///    the *baseline*, and a killed agent never had one.
+///
+///    Rule 1 still outranks this one, and that is the same principle rather
+///    than an exception: a `TIMEOUT` label is the runner *asserting* its own
+///    limit fired, and an assertion outranks an inference. The exit code
+///    cannot settle it either way — a harness that reports the child's
+///    death-signal records `143` where `timeout` itself would exit `124` —
+///    which is why #4651 asks the runner to say whether its own timeout
+///    fired instead of leaving the reader to guess from `128 + N`.
 /// 2. `fmt_rc != 0` or `FMT-DIRTY`, with no build failure in the same
 ///    report → [`TriageDecision::FormatAndRecheck`]. The recorded
 ///    verdict does not short-circuit the local check: the pass formats
@@ -392,6 +447,19 @@ pub fn triage(report: &AgentReport) -> TriageDecision {
             status: Status::TimeoutNoOutput.as_str().to_string(),
         };
     }
+    // 1b. A killed agent outranks every stage field in the same record,
+    //     exactly as a timeout does: the process was terminated, so an
+    //     `fmt_rc` beside it is debris from a half-finished edit, not a
+    //     verdict. `iw-87` died mid-edit with `agent_rc=143 fmt_rc=1
+    //     test_rc=101` and triaged as a repairable fmt failure — the pass
+    //     formatted 2000 lines of half-applied change and offered it to the
+    //     conversion queue (#4651).
+    if signal::is_signalled(recorded, report.signal.as_deref(), report.agent_rc) {
+        return TriageDecision::Signalled {
+            signal: report.signal.clone(),
+            status: Status::Signalled.as_str().to_string(),
+        };
+    }
     // 2. fmt: a deterministic negative the pass can repair. Trust the
     //    agent's exit code, and trust the name when the run recorded
     //    only the name. The recorded verdict does not short-circuit the
@@ -433,8 +501,14 @@ pub fn triage(report: &AgentReport) -> TriageDecision {
         // 1-3. Unreachable by construction: the same `canonical` value was
         //      matched by the early returns above. The arm exists so this
         //      match stays exhaustive over `Status`.
-        Some(Status::Timeout | Status::TimeoutNoOutput | Status::FmtDirty | Status::BuildFail) => {
-            unreachable!("the timeout, fmt and build rules above return first")
+        Some(
+            Status::Timeout
+            | Status::TimeoutNoOutput
+            | Status::Signalled
+            | Status::FmtDirty
+            | Status::BuildFail,
+        ) => {
+            unreachable!("the timeout, signal, fmt and build rules above return first")
         }
         // 4. Nothing was measured: no gate, local or remote, has evidence
         //    to work with, and re-dispatch reproduces the emptiness.
@@ -474,93 +548,6 @@ pub fn triage_report(content: &str) -> TriageDecision {
         Err(detail) => TriageDecision::GateLocally {
             basis: GateBasis::ReportUnreadable { detail },
         },
-    }
-}
-
-/// The hold line the pass prints for an agent-reported hold (rule 7):
-/// the agent's own evidence, not just the hold's reason.
-///
-/// `held_line(&report, AgentHoldReason::Unformatted)` for a report with
-/// `fmt_rc=1`, `fmt_files=Some(32)`, `status=TIMEOUT` prints
-/// `HELD: agent reported fmt_rc=1 (32 files), status=TIMEOUT`.
-pub fn held_line(report: &AgentReport, reason: AgentHoldReason) -> String {
-    let evidence = match reason {
-        AgentHoldReason::Unformatted => fmt_evidence(report),
-        AgentHoldReason::Unbuilt => match report.build_rc {
-            Some(rc) => format!("build_rc={rc}"),
-            None => "build failure".to_string(),
-        },
-    };
-    match report.status.as_deref() {
-        Some(status) => format!("HELD: agent reported {evidence}, status={status}"),
-        None => format!("HELD: agent reported {evidence}"),
-    }
-}
-
-/// The fmt evidence the agent's report carries, for a hold or a
-/// format-and-recheck line: `fmt_rc` with the file count when both are
-/// recorded, either alone when only one is, and the bare name when the
-/// run recorded neither.
-fn fmt_evidence(report: &AgentReport) -> String {
-    match (report.fmt_rc, report.fmt_files) {
-        (Some(rc), Some(files)) => format!("fmt_rc={rc} ({files} files)"),
-        (Some(rc), None) => format!("fmt_rc={rc}"),
-        (None, Some(files)) => format!("fmt_files={files}"),
-        (None, None) => "fmt failure".to_string(),
-    }
-}
-
-/// The one line the pass prints for any triage decision (rule 7): what
-/// the pass is doing, and the report evidence it is acting on.
-pub fn decision_line(decision: &TriageDecision, report: &AgentReport) -> String {
-    match decision {
-        TriageDecision::Redispatch { status } => {
-            format!("RE-DISPATCH: agent reported status={status}; the run never reached the gate")
-        }
-        TriageDecision::RaiseForReview { status } => {
-            format!(
-                "RAISE-FOR-REVIEW: agent reported status={status}; the run produced no output, so re-dispatch would reproduce the same emptiness (#3936)"
-            )
-        }
-        TriageDecision::Hold { reason } => held_line(report, *reason),
-        TriageDecision::FormatAndRecheck => match report.status.as_deref() {
-            Some(status) => format!(
-                "FORMAT-AND-RECHECK: agent reported {}, status={status}; formatting and re-checking locally before judging",
-                fmt_evidence(report)
-            ),
-            None => format!(
-                "FORMAT-AND-RECHECK: agent reported {}; formatting and re-checking locally before judging",
-                fmt_evidence(report)
-            ),
-        },
-        TriageDecision::GateLocally { basis } => {
-            format!("GATE-LOCALLY: {}", basis_line(basis, report))
-        }
-    }
-}
-
-fn basis_line(basis: &GateBasis, report: &AgentReport) -> String {
-    match basis {
-        GateBasis::AgentReportedTestFailure { status } => match status {
-            Some(status) => format!(
-                "agent reported test failure (status={status}); re-verifying against current main"
-            ),
-            None => match report.test_rc {
-                Some(rc) => format!(
-                    "agent reported test failure (test_rc={rc}); re-verifying against current main"
-                ),
-                None => "agent reported test failure; re-verifying against current main"
-                    .to_string(),
-            },
-        },
-        GateBasis::NoBaseline => {
-            "status=UNKNOWN-NO-BASELINE; no baseline to attribute the failures — gating against current main"
-                .to_string()
-        }
-        GateBasis::AgentGreen => "agent reported green; confirming against current main".to_string(),
-        GateBasis::ReportUnreadable { detail } => {
-            format!("status file unreadable ({detail}); gating against current main")
-        }
     }
 }
 
@@ -650,6 +637,7 @@ mod tests {
             test_rc,
             fmt_rc,
             fmt_files,
+            ..AgentReport::default()
         }
     }
 

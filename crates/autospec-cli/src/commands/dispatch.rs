@@ -568,7 +568,7 @@ fn classify_run_outcome(issue_dir: &Path) -> dispatch_guard::ArtifactOutcome {
             }
         }
     };
-    dispatch_guard::classify_artifact_outcome(report.status.as_deref())
+    dispatch_guard::classify_report(&report)
 }
 
 /// Move the entire `issue_dir` to an archive location under `out_dir` so the
