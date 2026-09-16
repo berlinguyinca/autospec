@@ -618,6 +618,17 @@ a value captured at launch. Checkable in `autospec_core::service_address`:
   `AssertedWrongThing`, never `Up`). Container or job liveness is not service
   health, and reachability of an address some third party recorded is not
   either.
+- A timed-out request cancels nothing: it is still running and still holds a
+  slot on the server. When a probe times out against a capacity-limited
+  backend, account for the in-flight request as capacity still being consumed
+  — cancel it or treat it as occupied — and never retry with a generation
+  request where a cheaper one answers the question. Health and capacity
+  endpoints (`/health`, `/slots`) are the first probe for "is this thing
+  serving", ahead of any request that consumes a slot. Repeated expensive
+  probes against one endpoint are themselves load: the retry loop measures the
+  queue it is creating, and a saturated service looks worse the harder you
+  check it. Read capacity before interpreting latency (implementer contract
+  `PROBE_CONTRACT`, #4650).
 - A reconciler over a pool reports the pool **size** on the same line as its
   verdict (`PoolMonitor::reconcile_line`) and flags `decline_window` consecutive
   declines as `PoolTrend::Draining` — slow drain must be visible before it
