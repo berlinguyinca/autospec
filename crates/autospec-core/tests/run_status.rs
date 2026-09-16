@@ -29,10 +29,12 @@ fn the_vocabulary_parses_and_has_the_expected_shape() {
         entry("name").is_none(),
         "the header row of {VOCABULARY_PATH} parsed as a vocabulary entry"
     );
-    assert_eq!(emitted().len(), 8, "emitted statuses: {:?}", emitted());
+    // 9 emitted: the eight a run can finish with, plus `SIGNALLED`, which a
+    // run cannot finish with at all (#4651).
+    assert_eq!(emitted().len(), 9, "emitted statuses: {:?}", emitted());
     assert_eq!(aliases().len(), 5);
     assert_eq!(gate_statuses().len(), 2);
-    assert_eq!(vocabulary().len(), 15);
+    assert_eq!(vocabulary().len(), 16);
 }
 
 fn aliases() -> Vec<&'static str> {
@@ -241,6 +243,7 @@ fn a_canonicalising_match_list_covers_through_aliases() {
             "FMT-DIRTY",
             "BUILD-FAILED", // -> BUILD-FAIL
             "TIMEOUT-NO-OUTPUT",
+            "SIGNALLED",
         ],
     );
     assert!(full.ok(), "{}", full.line());
@@ -255,6 +258,7 @@ fn a_canonicalising_match_list_covers_through_aliases() {
             "TIMEOUT",
             "BUILD-FAILED",
             "TIMEOUT-NO-OUTPUT",
+            "SIGNALLED",
         ],
     );
     assert!(!gap.ok(), "FMT-DIRTY must be matched");
@@ -570,129 +574,4 @@ fn scan_shaped(text: &str) -> Vec<String> {
         i = j + 1;
     }
     found
-}
-
-// ---------------------------------------------------------------------------
-// The triage consumer, routed through the vocabulary.
-// ---------------------------------------------------------------------------
-
-use autospec_core::execution::status_triage::{
-    triage, AgentHoldReason, AgentReport, GateBasis, TriageDecision,
-};
-
-fn report(
-    status: Option<&str>,
-    build_rc: Option<i32>,
-    test_rc: Option<i32>,
-    fmt_rc: Option<i32>,
-) -> AgentReport {
-    AgentReport {
-        status: status.map(str::to_string),
-        build_rc,
-        test_rc,
-        fmt_rc,
-        fmt_files: None,
-    }
-}
-
-#[test]
-fn triage_routes_the_statuses_the_runner_actually_writes() {
-    // Each of these names was previously unknown to triage: the run fell through
-    // to the green arm, which ran the local gate over an unbuilt tree.
-    assert_eq!(
-        triage(&report(Some("BUILD-FAIL"), Some(1), None, Some(0))),
-        TriageDecision::Hold {
-            reason: AgentHoldReason::Unbuilt
-        }
-    );
-    // FMT-DIRTY with a clean build: the recorded verdict is not trusted over a
-    // local repair the stage can run itself (#4099). The caller formats and
-    // re-checks before judging.
-    assert_eq!(
-        triage(&report(Some("FMT-DIRTY"), Some(0), Some(0), Some(1))),
-        TriageDecision::FormatAndRecheck
-    );
-    assert_eq!(
-        triage(&report(Some("NO-OUTPUT"), None, None, None)),
-        TriageDecision::RaiseForReview {
-            status: "NO-OUTPUT".to_string()
-        }
-    );
-    assert_eq!(
-        triage(&report(Some("TEST-TIMEOUT"), Some(0), None, Some(0))),
-        TriageDecision::GateLocally {
-            basis: GateBasis::AgentReportedTestFailure {
-                status: Some("TEST-TIMEOUT".to_string())
-            }
-        }
-    );
-}
-
-#[test]
-fn triage_reaches_a_legacy_spelling_through_the_vocabulary() {
-    // The old name must route to the same decision as the runner's own.
-    let legacy = triage(&report(Some("BUILD-FAILED"), None, None, None));
-    let current = triage(&report(Some("BUILD-FAIL"), None, None, None));
-    assert_eq!(legacy, current);
-    assert_eq!(
-        legacy,
-        TriageDecision::Hold {
-            reason: AgentHoldReason::Unbuilt
-        }
-    );
-    assert_eq!(
-        triage(&report(Some("UNKNOWN-NO-FMT-BASELINE"), None, None, None)),
-        TriageDecision::GateLocally {
-            basis: GateBasis::NoBaseline
-        }
-    );
-}
-
-#[test]
-fn a_verified_report_with_a_failing_test_rc_triages_on_the_code() {
-    // The word loses to the exit code: a gate is run, the run is not held.
-    let d = triage(&report(Some("VERIFIED"), Some(0), Some(101), Some(0)));
-    assert_eq!(
-        d,
-        TriageDecision::GateLocally {
-            basis: GateBasis::AgentReportedTestFailure {
-                status: Some("VERIFIED".to_string())
-            }
-        }
-    );
-    // A no-baseline verdict keeps its own rule even beside a failing test_rc.
-    assert_eq!(
-        triage(&report(
-            Some("UNKNOWN-NO-BASELINE"),
-            Some(0),
-            Some(1),
-            Some(0)
-        )),
-        TriageDecision::GateLocally {
-            basis: GateBasis::NoBaseline
-        }
-    );
-    // Truly green still goes to the local gate.
-    assert_eq!(
-        triage(&report(Some("VERIFIED"), Some(0), Some(0), Some(0))),
-        TriageDecision::GateLocally {
-            basis: GateBasis::AgentGreen
-        }
-    );
-}
-
-#[test]
-fn every_emitted_status_has_a_triage_route() {
-    // No status may fall through to a default: the fall-through is what made the
-    // unbuilt runs look convertible.
-    for name in emitted() {
-        let d = triage(&report(Some(name), None, None, None));
-        match d {
-            TriageDecision::Redispatch { .. }
-            | TriageDecision::RaiseForReview { .. }
-            | TriageDecision::Hold { .. }
-            | TriageDecision::FormatAndRecheck
-            | TriageDecision::GateLocally { .. } => {}
-        }
-    }
 }

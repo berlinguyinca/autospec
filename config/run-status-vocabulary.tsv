@@ -20,6 +20,7 @@ TIMEOUT	emitted	-	the run hit its wall clock before the gate
 FMT-DIRTY	emitted	-	cargo fmt --check reported unformatted files
 BUILD-FAIL	emitted	-	cargo build did not return 0
 TIMEOUT-NO-OUTPUT	emitted	-	timed out and produced no artifact either
+SIGNALLED	emitted	-	the agent was terminated by a signal the runner did not send itself
 BUILD-FAILED	alias	BUILD-FAIL	legacy spelling of BUILD-FAIL; the runner's own name carries no D
 TESTS-DO-NOT-COMPILE	alias	BUILD-FAIL	the build stage failed inside the test targets
 UNKNOWN-NO-FMT-BASELINE	alias	UNKNOWN-NO-BASELINE	legacy spelling of UNKNOWN-NO-BASELINE
