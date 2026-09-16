@@ -70,6 +70,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use autospec_core::conversion_gate::{test_count_contradiction, tests_added_by_patch};
+use autospec_core::conversion_own_tests::{added_test_names, own_test_failure_reason};
 use autospec_core::conversion_pass::{select_fresh, Attempt, PassOutcome, PatchCandidate};
 use autospec_core::failure_attribution::attribute;
 use autospec_core::gate_registry;
@@ -1264,10 +1265,9 @@ fn apply_one(
     let patch_text = fs::read_to_string(&patch.path).unwrap_or_default();
     let packages = gate_packages(&patch_files(&patch_text));
 
-    // The unchanged-count contradiction (issue #4532) is only possible when
-    // the patch adds test functions. For those, the baseline test count is
-    // measured at the base — at the same scope the gate will use — before
-    // the patch is applied. Being slow is recoverable; being narrow is not.
+    // The unchanged-count contradiction (#4532) needs a baseline: for a patch
+    // that adds test functions, it is measured at the base, at the gate's
+    // scope, before the patch applies. Slow is recoverable; narrow is not.
     let tests_added = tests_added_by_patch(&patch_text);
     let baseline_tests = if tests_added > 0 {
         match run_test_count(&worktree, gate_set, &packages) {
@@ -1383,10 +1383,10 @@ fn apply_one(
                 GateResult::Fail(output) => {
                     // Step 6: record a HELD line with the failing-test set from
                     // the authoritative failures: block, never the progress
-                    // stream (behavior 2).
+                    // stream (behavior 2). Own-new-test failures are #4470.
                     let failure_note = failing_tests_note(&output);
                     teardown_worktree(&worktree);
-                    record_held_and_result(plan, base_sha, patch, &format!("gate failed: {failure_note}"))
+                    record_held_and_result(plan, base_sha, patch, &own_test_failure_reason(&failure_note, &attribute(&output).names(), &added_test_names(&patch_text)))
                 }
                 GateResult::Contradiction(reason) => {
                     // The stages were green but the evidence contradicts the

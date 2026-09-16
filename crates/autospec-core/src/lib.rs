@@ -43,6 +43,7 @@ pub mod construction_sites;
 pub mod context;
 pub mod control_file;
 pub mod conversion_gate;
+pub mod conversion_own_tests;
 pub mod conversion_pass;
 pub mod convert_pass;
 pub mod coordination;
