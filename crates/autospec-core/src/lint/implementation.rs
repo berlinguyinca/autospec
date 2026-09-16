@@ -1,5 +1,6 @@
 //! Deterministic implementation-policy lint rules, independent of processes and I/O.
 
+mod binary_committed;
 mod severity;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,6 +50,11 @@ pub enum ImplementationLintRule {
     /// name its own call site is likely under-scoped: there are other call
     /// sites, and the reviewer must be asked for the enumeration (#4125).
     UnderScopedRule,
+    /// A commit adds an unreviewable blob: a binary file, or an executable
+    /// (mode 100755) that is not a text script. A build artefact is never
+    /// source — an 8 MB ELF was committed and merged because `go build`
+    /// wrote into the tree and `git add -A` swept it in (#4645).
+    BinaryCommitted,
 }
 
 impl ImplementationLintRule {
@@ -76,6 +82,7 @@ impl ImplementationLintRule {
             Self::UnperformedDocClaim => "UNPERFORMED_DOC_CLAIM",
             Self::MissingCallsiteEnumeration => "MISSING_CALLSITE_ENUMERATION",
             Self::UnderScopedRule => "UNDER_SCOPED_RULE",
+            Self::BinaryCommitted => "BINARY_COMMITTED",
         }
     }
 
@@ -103,6 +110,7 @@ impl ImplementationLintRule {
             "UNPERFORMED_DOC_CLAIM" => Self::UnperformedDocClaim,
             "MISSING_CALLSITE_ENUMERATION" => Self::MissingCallsiteEnumeration,
             "UNDER_SCOPED_RULE" => Self::UnderScopedRule,
+            "BINARY_COMMITTED" => Self::BinaryCommitted,
             _ => return None,
         })
     }
@@ -268,6 +276,7 @@ pub fn lint_implementation(
     collect_issue_implementation_contract(diff, context.issue_body, false, &mut collector);
     detect_complexity(diff, context.repository, &context.options, &mut collector);
     detect_security(diff, &mut collector);
+    binary_committed::detect(diff, &mut collector);
     detect_todo_left(diff, &mut collector);
     detect_mock_db(diff, &mut collector);
     detect_doc_out_of_sync(diff, &mut collector);
@@ -374,6 +383,9 @@ pub fn directive_for(rule: ImplementationLintRule) -> &'static str {
         ImplementationLintRule::UnderScopedRule => {
             "Name the specific tool or file the rule was applied to in the `Rule fix:` statement — a path, a backtick-quoted command, or an UPPER_SNAKE constant — and provide the `## Call-site enumeration` for every other place that makes the same decision. A rule statement that does not name its own call site is under-scoped."
         }
+        ImplementationLintRule::BinaryCommitted => {
+            "Remove the committed binary or executable. A build artefact is never source: stage the files you changed, by name (never `git add -A`), and add a `.gitignore` entry for the build output (e.g. a Go module's `cmd/<name>` basename, or `target/`) so the artefact can never be swept in again."
+        }
     }
 }
 
@@ -388,20 +400,13 @@ pub struct CommitBlockingRule {
     pub acceptance: &'static str,
 }
 
-/// The core deterministic commit-blocking rules an implementation must satisfy,
-/// expressed as acceptance criteria a spec or executor prompt can state up front
-/// so the pre-commit gate is not a surprise at commit time (#3603).
-///
-/// The set is the commit contract that runs in every [`lint_implementation`]
-/// pass and blocks by default. `COMPLEXITY` is excluded because it is advisory
-/// by default, and the
-/// vacuous-assertion and reuse lenses are excluded because they are opt-in test
-/// quality and code reuse gates, not the baseline commit contract.
-///
-/// The acceptance text is sourced from [`directive_for`], the single source of
-/// truth for the corrective directive, so the stated criteria cannot drift from
-/// the enforced gate. If a new core blocking rule is added, extend this list and
-/// the pinned test below.
+/// The core deterministic commit-blocking rules, as acceptance criteria a spec
+/// or executor prompt can state up front so the pre-commit gate is not a
+/// surprise (#3603). This set runs in every [`lint_implementation`] pass and
+/// blocks by default; `COMPLEXITY` is advisory, and the vacuous/reuse lenses
+/// are opt-in. The text is sourced from [`directive_for`] so the stated
+/// criteria cannot drift from the enforced gate; a new blocking rule extends
+/// this list and the pinned test below.
 pub fn commit_blocking_rules() -> Vec<CommitBlockingRule> {
     const RULES: &[ImplementationLintRule] = &[
         ImplementationLintRule::PrSize,
@@ -411,6 +416,7 @@ pub fn commit_blocking_rules() -> Vec<CommitBlockingRule> {
         ImplementationLintRule::TodoLeft,
         ImplementationLintRule::MockDb,
         ImplementationLintRule::DocOutOfSync,
+        ImplementationLintRule::BinaryCommitted,
     ];
     RULES
         .iter()
@@ -439,6 +445,7 @@ mod commit_blocking_rule_tests {
                 "TODO_LEFT",
                 "MOCK_DB",
                 "DOC_OUT_OF_SYNC",
+                "BINARY_COMMITTED",
             ]
         );
     }
@@ -1266,13 +1273,10 @@ fn detect_doc_out_of_sync(diff: &UnifiedDiff, collector: &mut FindingCollector) 
 const UNPERFORMED_CLAIM_PHRASES: [&str; 4] =
     ["is written", "is updated", "is refreshed", "is pruned"];
 
-/// A doc comment that claims runtime behaviour about an exported identifier is a
-/// claim, not documentation: the identifier must be assigned somewhere in the
-/// post-change file, or the comment is a defect (implement the behaviour or
-/// delete the claim). Deliberately cheap and heuristic — a capitalized field in
-/// Go, a `pub` field in Rust, an `export`ed binding in JS; `# linter:allow-
-/// UNPERFORMED_DOC_CLAIM <reason>` is the escape hatch for a genuine false
-/// positive.
+/// A doc comment claiming runtime behaviour about an exported identifier must
+/// be backed by an assignment in the post-change file, or it is a defect.
+/// Cheap and heuristic — a capitalized field in Go, a `pub`/`export` binding in
+/// Rust/JS; `# linter:allow-UNPERFORMED_DOC_CLAIM <reason>` is the escape hatch.
 fn detect_unperformed_doc_claims(
     diff: &UnifiedDiff,
     repository: &dyn RepositoryIndex,
@@ -1325,12 +1329,9 @@ fn detect_unperformed_doc_claims(
     }
 }
 
-/// The identifier declared on the first code line after the comment at
-/// `comment_line` (0-based), with a flag for whether it is exported —
-/// capitalized (Go convention) or preceded by a `pub`/`export` token (Rust/JS).
-/// Returns `None` when the documented line is not a plain field/const
-/// declaration (methods, calls, prose), in which case the claim is left to a
-/// human reviewer.
+/// The identifier on the first code line after `comment_line` (0-based), with a
+/// flag for whether it is exported — capitalized (Go) or `pub`/`export`
+/// (Rust/JS). `None` for a non-declaration line, left to a human reviewer.
 fn documented_identifier(lines: &[&str], comment_line: usize) -> Option<(String, bool)> {
     let mut index = comment_line + 1;
     loop {
@@ -1417,16 +1418,12 @@ fn has_assignment(contents: &str, identifier: &str) -> bool {
     false
 }
 
-/// A decision-rule fix must not stop at its own call site (#4125).
-///
-/// When the change under review declares that it fixes a decision rule (gate
-/// policy, guard, attribution) with a `Rule fix: <sentence>` line, review
-/// rejects the patch unless the body also carries a `## Call-site enumeration`
-/// section: one bullet per other place that makes the same decision, each
-/// recording its state — `fixed`, `checked-and-correct`, or
-/// `out-of-scope: <reason>`. A rule statement that does not name the specific
-/// tool or file it was applied to is additionally flagged as under-scoped.
-/// Bodies without a `Rule fix:` line (single-site fixes) are unaffected.
+/// A decision-rule fix must not stop at its own call site (#4125). A
+/// `Rule fix:` line requires a `## Call-site enumeration` section — one bullet
+/// per other place making the same decision, each `fixed`,
+/// `checked-and-correct`, or `out-of-scope: <reason>`. A rule that does not
+/// name the tool or file it was applied to is under-scoped. Bodies without a
+/// `Rule fix:` line are unaffected.
 fn detect_rule_fix_enumeration(issue_body: Option<&str>, collector: &mut FindingCollector) {
     let Some(body) = issue_body else {
         return;
@@ -2589,6 +2586,7 @@ mod tests {
             path: path.to_string(),
             is_new: false,
             is_binary: false,
+            mode: None,
             hunks: vec![DiffHunk {
                 old_start: 1,
                 new_start: 1,
@@ -2638,6 +2636,7 @@ mod tests {
             path: path.to_string(),
             is_new: true,
             is_binary: false,
+            mode: None,
             hunks: vec![DiffHunk {
                 old_start: 0,
                 new_start: 1,

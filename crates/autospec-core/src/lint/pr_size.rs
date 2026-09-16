@@ -322,6 +322,7 @@ mod tests {
             path: path.to_string(),
             is_new: false,
             is_binary: false,
+            mode: None,
             hunks: Vec::new(),
         }
     }

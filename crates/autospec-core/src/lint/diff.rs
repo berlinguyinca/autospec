@@ -10,6 +10,11 @@ pub struct DiffFile {
     pub path: String,
     pub is_new: bool,
     pub is_binary: bool,
+    /// The file mode as declared by `new file mode <octal>` / `old mode
+    /// <octal>` / `new mode <octal>` in the diff header, when present. This is
+    /// what lets a policy tell a 100755 executable from a 100644 source file
+    /// without inspecting the host checkout (#4645).
+    pub mode: Option<u32>,
     pub hunks: Vec<DiffHunk>,
 }
 
@@ -36,6 +41,10 @@ impl DiffFile {
     pub fn changed_line_count(&self) -> usize {
         self.added_line_count() + self.removed_line_count()
     }
+
+    pub fn is_executable(&self) -> bool {
+        self.mode == Some(0o100755)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +67,15 @@ pub enum DiffLineKind {
     Context,
     Added,
     Removed,
+}
+
+/// Parse the octal file mode from a git diff mode line like
+/// `new file mode 100755` or `new mode 100644`. Returns `None` for a
+/// malformed or missing mode so a policy never blocks on an unparseable
+/// header (the file is simply treated as having no declared mode).
+fn parse_file_mode(raw: &str) -> Option<u32> {
+    let value = raw.rsplit(' ').next()?;
+    u32::from_str_radix(value, 8).ok()
 }
 
 /// Parse the subset of unified diff syntax consumed by the lint policy.
@@ -92,6 +110,7 @@ pub fn parse_unified_diff(source: &str) -> Result<UnifiedDiff, String> {
                 path: path.to_string(),
                 is_new: false,
                 is_binary: false,
+                mode: None,
                 hunks: Vec::new(),
             });
             continue;
@@ -101,8 +120,13 @@ pub fn parse_unified_diff(source: &str) -> Result<UnifiedDiff, String> {
             continue;
         };
 
-        if raw == "new file mode 100644" || raw.starts_with("new file mode ") {
+        if raw.starts_with("new file mode ") {
             file.is_new = true;
+            file.mode = parse_file_mode(raw);
+            continue;
+        }
+        if raw.starts_with("old mode ") || raw.starts_with("new mode ") {
+            file.mode = parse_file_mode(raw);
             continue;
         }
         if raw.starts_with("Binary files ") || raw == "GIT binary patch" {

@@ -368,16 +368,14 @@ fn admit_expected_implementation_contract(
     target_path: &str,
     test_path: &str,
 ) -> Result<(), String> {
-    let paths = [target_path, test_path]
-        .into_iter()
-        .collect::<BTreeSet<_>>();
     let expected = UnifiedDiff {
-        files: paths
+        files: [target_path, test_path]
             .into_iter()
             .map(|path| DiffFile {
                 path: path.to_string(),
                 is_new: false,
                 is_binary: false,
+                mode: None,
                 hunks: Vec::new(),
             })
             .collect(),
