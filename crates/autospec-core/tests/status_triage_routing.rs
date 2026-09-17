@@ -9,7 +9,8 @@
 //! agent is identified by its exit code, and the code outranks the label.
 
 use autospec_core::execution::status_triage::{
-    decision_line, triage, AgentHoldReason, AgentReport, GateBasis, TriageDecision,
+    coverage::Coverage, decision_line, triage, AgentHoldReason, AgentReport, GateBasis,
+    TriageDecision,
 };
 use autospec_core::run_status::emitted;
 
@@ -290,4 +291,119 @@ fn signalling_a_run_changes_nothing_about_an_ordinary_record() {
             "{name} must not read as a kill"
         );
     }
+}
+
+/// The #4665 record shape: a graded run that carries its own counters.
+fn graded(passed: Option<u64>, failed: Option<u64>, total: Option<u64>) -> AgentReport {
+    AgentReport {
+        status: Some("VERIFIED".to_string()),
+        test_passed: passed,
+        test_failed: failed,
+        tests_total: total,
+        ..AgentReport::default()
+    }
+}
+
+#[test]
+fn a_verified_written_over_a_prefix_of_the_suite_is_not_green() {
+    // The incident: `cargo test` aborts at the first failing test binary, so
+    // 1120 + 30 of a 10 073-test suite was graded as `VERIFIED` and
+    // `new_failing_tests=0` was read as "breaks nothing".
+    let report = graded(Some(1120), Some(30), Some(10073));
+    let shortfall = GateBasis::PartialCoverage {
+        coverage: Coverage::Partial {
+            ran: 1150,
+            total: 10073,
+        },
+    };
+    assert_eq!(
+        triage(&report),
+        TriageDecision::GateLocally { basis: shortfall }
+    );
+    // The shortfall is stated where the operator reads it, not left as
+    // arithmetic on two numbers in a file.
+    let line = decision_line(&triage(&report), &report);
+    assert!(line.contains("1150 of 10073"), "{line}");
+    assert!(line.contains("4665"), "{line}");
+}
+
+#[test]
+fn a_run_that_finished_the_suite_keeps_its_green() {
+    // The downgrade must not become a tax on every green run.
+    assert_eq!(
+        triage(&graded(Some(10073), Some(0), Some(10073))),
+        TriageDecision::GateLocally {
+            basis: GateBasis::AgentGreen
+        }
+    );
+    assert_eq!(
+        triage(&graded(Some(10072), Some(1), Some(10073))),
+        TriageDecision::GateLocally {
+            basis: GateBasis::AgentGreen
+        }
+    );
+}
+
+#[test]
+fn a_record_with_no_declared_suite_size_is_not_read_as_a_shortfall() {
+    // Every record written before the total existed would otherwise become
+    // ungradeable: a missing fact is not a negative finding.
+    assert_eq!(
+        triage(&graded(Some(1120), Some(30), None)),
+        TriageDecision::GateLocally {
+            basis: GateBasis::AgentGreen
+        }
+    );
+}
+
+#[test]
+fn a_short_run_still_proves_its_own_failure() {
+    // Only a claim of passing is downgraded. A test that failed, failed —
+    // however little of the suite the run reached — and the observed failure
+    // still decides, rather than being rewritten into a coverage note.
+    let mut report = graded(Some(1120), Some(30), Some(10073));
+    report.status = Some("NEW-TEST-FAILURES".to_string());
+    assert_eq!(
+        triage(&report),
+        triage(&{
+            let mut full = graded(Some(9000), Some(30), Some(9030));
+            full.status = Some("NEW-TEST-FAILURES".to_string());
+            full
+        })
+    );
+    // A failing test rc outranks the coverage note too: the failure is the
+    // finding, and both routes ask for the local gate.
+    let mut failing = graded(Some(1120), Some(30), Some(10073));
+    failing.test_rc = Some(101);
+    assert!(matches!(
+        triage(&failing),
+        TriageDecision::GateLocally {
+            basis: GateBasis::AgentReportedTestFailure { .. }
+        }
+    ));
+}
+
+#[test]
+fn a_label_that_declares_partial_coverage_is_never_read_as_green() {
+    // The runner may report the shortfall itself without carrying counters.
+    // The claim is the finding; the missing counts are detail on top of it.
+    let mut report = graded(None, None, None);
+    report.status = Some("PARTIAL-COVERAGE".to_string());
+    match triage(&report) {
+        TriageDecision::GateLocally {
+            basis: GateBasis::PartialCoverage { .. },
+        } => {}
+        other => panic!("a self-declared partial run must not read as green: {other:?}"),
+    }
+}
+
+#[test]
+fn partial_coverage_is_declared_and_routed_not_invented() {
+    // The name must exist in the vocabulary: an undeclared name resolves to
+    // `None`, and `None` falls through to the green arm (#4206's defect).
+    let names = emitted();
+    assert!(
+        names.contains(&"PARTIAL-COVERAGE"),
+        "declared emitted statuses: {names:?}"
+    );
 }

@@ -31,10 +31,10 @@ fn the_vocabulary_parses_and_has_the_expected_shape() {
     );
     // 9 emitted: the eight a run can finish with, plus `SIGNALLED`, which a
     // run cannot finish with at all (#4651).
-    assert_eq!(emitted().len(), 9, "emitted statuses: {:?}", emitted());
+    assert_eq!(emitted().len(), 10, "emitted statuses: {:?}", emitted());
     assert_eq!(aliases().len(), 5);
     assert_eq!(gate_statuses().len(), 2);
-    assert_eq!(vocabulary().len(), 16);
+    assert_eq!(vocabulary().len(), 17);
 }
 
 fn aliases() -> Vec<&'static str> {
@@ -244,6 +244,7 @@ fn a_canonicalising_match_list_covers_through_aliases() {
             "BUILD-FAILED", // -> BUILD-FAIL
             "TIMEOUT-NO-OUTPUT",
             "SIGNALLED",
+            "PARTIAL-COVERAGE",
         ],
     );
     assert!(full.ok(), "{}", full.line());
@@ -259,6 +260,7 @@ fn a_canonicalising_match_list_covers_through_aliases() {
             "BUILD-FAILED",
             "TIMEOUT-NO-OUTPUT",
             "SIGNALLED",
+            "PARTIAL-COVERAGE",
         ],
     );
     assert!(!gap.ok(), "FMT-DIRTY must be matched");

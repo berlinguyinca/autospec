@@ -94,6 +94,15 @@
 
 use crate::run_status::Status;
 
+/// Reading the record the runner left behind: the `key=value` / `key: value`
+/// parsing that turns a `status.txt` into an [`AgentReport`], separated from the
+/// policy that consumes one (#4665).
+pub mod record;
+pub use record::parse_agent_report;
+/// How much of the suite a run actually executed, and what its counters are
+/// therefore entitled to claim (#4665).
+pub mod coverage;
+
 /// How a decision is written out, separated from the policy that makes it:
 /// the rendering grows every time the vocabulary gains a case, the
 /// precedence rules rarely move (#4651).
@@ -132,6 +141,14 @@ pub struct AgentReport {
     /// (124) from a signal sent by something else (128 + N) — the
     /// distinction #4651 lost three runs over.
     pub agent_rc: Option<i32>,
+    /// `test_passed`: tests the run saw pass (#4665).
+    pub test_passed: Option<u64>,
+    /// `test_failed`: tests the run saw fail (#4665).
+    pub test_failed: Option<u64>,
+    /// The size of the suite the run was measured against, if declared
+    /// (`tests_total=10073`). Its absence does not imply a shortfall — it
+    /// means coverage cannot be judged (#4665 invariant 4).
+    pub tests_total: Option<u64>,
 }
 
 impl AgentReport {
@@ -145,98 +162,15 @@ impl AgentReport {
             && self.fmt_files.is_none()
             && self.signal.is_none()
             && self.agent_rc.is_none()
+            && self.test_passed.is_none()
+            && self.test_failed.is_none()
+            && self.tests_total.is_none()
     }
-}
 
-/// Parse a `status.txt` body into an [`AgentReport`].
-///
-/// The reader is lenient in one direction and strict in the other, the
-/// same way the fleet cost reader (`autospec_core::cost::record`)
-/// behaves:
-///
-/// - **Lenient to growth**: unknown keys are ignored, blank lines and
-///   `#` comments are skipped, and a duplicate key takes its last
-///   value. The harness can add lines without breaking the pass.
-/// - **Strict about what it reads**: a known key with an unreadable
-///   value (a non-integer rc, an empty value, a line with no
-///   separator) fails the whole file, naming the offending line. A
-///   silently dropped rc would turn a hold into a gate.
-///
-/// Two on-disk shapes are accepted, and they may be mixed:
-///
-/// - the gate shape: whitespace-separated `key=value` tokens, one line
-///   (`status=PASS build_rc=0 test_rc=0 fmt_rc=0`);
-/// - the fleet shape: one `key: value` per line, including the
-///   `fmt-files.txt: 32 entries` line that records how many files the
-///   fmt stage listed.
-pub fn parse_agent_report(content: &str) -> Result<AgentReport, String> {
-    let mut report = AgentReport::default();
-    for (index, raw) in content.lines().enumerate() {
-        let line_number = index + 1;
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line.contains('=') {
-            // Gate shape: every token on the line is `key=value`.
-            for token in line.split_whitespace() {
-                let (key, value) = token
-                    .split_once('=')
-                    .ok_or_else(|| format!("line {line_number}: not 'key=value': {token}"))?;
-                set(&mut report, key.trim(), value.trim())
-                    .map_err(|error| format!("line {line_number}: {error}"))?;
-            }
-        } else {
-            // Fleet shape: one `key: value` per line.
-            let (key, value) = line.split_once(':').ok_or_else(|| {
-                format!("line {line_number}: not 'key=value' or 'key: value': {line}")
-            })?;
-            set(&mut report, key.trim(), value.trim())
-                .map_err(|error| format!("line {line_number}: {error}"))?;
-        }
+    /// How much of the suite this run accounted for (#4665).
+    pub fn coverage(&self) -> coverage::Coverage {
+        coverage::Coverage::from_counts(self.test_passed, self.test_failed, self.tests_total)
     }
-    Ok(report)
-}
-
-/// Record one `key=value` pair. Unknown keys are ignored (the harness
-/// may grow the file); known keys are parsed strictly.
-fn set(report: &mut AgentReport, key: &str, value: &str) -> Result<(), String> {
-    if value.is_empty() {
-        return Err(format!("value for `{key}` is empty"));
-    }
-    match key {
-        "status" => report.status = Some(value.to_string()),
-        "build_rc" => report.build_rc = Some(parse_rc("build_rc", value)?),
-        "test_rc" => report.test_rc = Some(parse_rc("test_rc", value)?),
-        "fmt_rc" => report.fmt_rc = Some(parse_rc("fmt_rc", value)?),
-        // The fmt stage lists the files it touched in a sidecar file
-        // and reports the count here.
-        "fmt-files.txt" => report.fmt_files = Some(parse_fmt_files(value)?),
-        // Both of these are written by the runner today and dropped by the
-        // reader today (#4651): the fleet record is
-        // `status=NO-OUTPUT agent_rc=143 agent_secs=2761 changed_files=0`.
-        "signal" => report.signal = Some(value.to_string()),
-        "agent_rc" => report.agent_rc = Some(parse_rc("agent_rc", value)?),
-        _ => {}
-    }
-    Ok(())
-}
-
-fn parse_rc(key: &str, value: &str) -> Result<i32, String> {
-    value
-        .parse::<i32>()
-        .map_err(|_| format!("{key} expects an integer exit code, got {value}"))
-}
-
-fn parse_fmt_files(value: &str) -> Result<usize, String> {
-    // The recorded shape is "32 entries"; a bare count is accepted.
-    let count = value
-        .strip_suffix("entries")
-        .map(str::trim)
-        .unwrap_or(value);
-    count
-        .parse::<usize>()
-        .map_err(|_| format!("fmt-files.txt expects a file count, got {value}"))
 }
 
 /// The responses the pass can make to an agent report (#3715, #4651).
@@ -333,6 +267,14 @@ pub enum GateBasis {
     /// The agent reported everything green (rule 5): the gate confirms
     /// the result against a main that may have moved since the run.
     AgentGreen,
+    /// The run's own counters show it never reached the whole suite, so a
+    /// green label beside them is not evidence (#4665). This is not a
+    /// duplicated gate: the local run *is* the measurement the agent's run
+    /// skipped when it stopped at the first failing test binary.
+    PartialCoverage {
+        /// what the run's counters say it covered.
+        coverage: coverage::Coverage,
+    },
     /// The report was empty or unparseable (rule 6): the gate runs
     /// because there is no evidence to act on.
     ReportUnreadable {
@@ -406,6 +348,14 @@ pub enum GateBasis {
 ///    agent ran against its own base; re-verify, never hold. The exit
 ///    code outranks the label: a report that says `VERIFIED` and carries
 ///    `test_rc=101` is triaged on the code, not the word (#4206).
+/// 6b. A green label over a run that did not finish the suite →
+///    [`TriageDecision::GateLocally`] as
+///    [`GateBasis::PartialCoverage`] (#4665). `test_passed + test_failed`
+///    short of the declared suite size means the run covered a prefix of it,
+///    and a prefix cannot certify the whole: `cargo test` aborts at the first
+///    failing test binary, so the label is computed from whatever ran before
+///    the abort. Only a claim of *passing* is downgraded — an observed failure
+///    is still an observed failure.
 /// 7. Everything else — green, or a status this triage does not
 ///    consume — → [`TriageDecision::GateLocally`] as
 ///    [`GateBasis::AgentGreen`]. The agent's result was against the
@@ -531,11 +481,33 @@ pub fn triage(report: &AgentReport) -> TriageDecision {
                 status: report.status.clone(),
             },
         },
-        // 7. Green, or a status this triage does not consume: confirm
-        //    against the current main.
-        Some(Status::Verified) | None => TriageDecision::GateLocally {
-            basis: GateBasis::AgentGreen,
+        // 7. Green, or a status this triage does not consume: confirm against
+        //    the current main — unless the run's own counters show it stopped
+        //    short of the suite, which the basis states rather than leaving the
+        //    reader to divide out of two numbers (#4665: `test_passed=1120
+        //    test_failed=30` of 10 073, labelled `VERIFIED`). A short run can
+        //    prove a failure and cannot prove a pass, so this routes to the
+        //    local gate rather than to a hold or a rejection.
+        Some(Status::Verified | Status::PartialCoverage) | None => TriageDecision::GateLocally {
+            basis: green_basis(report, canonical),
         },
+    }
+}
+
+/// The basis reported for a run that reached its gate and claims it passed.
+///
+/// A green claim over a prefix of the suite is not green (#4665), and a record
+/// that *declares* partial coverage without carrying counters still disclaims
+/// its own pass: the claim is the finding, and the missing counts are detail on
+/// top of it.
+fn green_basis(report: &AgentReport, canonical: Option<Status>) -> GateBasis {
+    let coverage = report.coverage();
+    match coverage {
+        coverage::Coverage::Partial { .. } => GateBasis::PartialCoverage { coverage },
+        other if canonical == Some(Status::PartialCoverage) => {
+            GateBasis::PartialCoverage { coverage: other }
+        }
+        _ => GateBasis::AgentGreen,
     }
 }
 

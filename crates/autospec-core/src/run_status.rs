@@ -93,6 +93,10 @@ pub enum Status {
     /// itself: no stage verdict exists, whatever the record's label claims
     /// (#4651).
     Signalled,
+    /// the run executed fewer tests than the suite holds, so its pass/fail
+    /// counters cover only a prefix of the suite and cannot carry a verdict
+    /// (#4665).
+    PartialCoverage,
 }
 
 impl Status {
@@ -112,6 +116,7 @@ impl Status {
             Status::UnknownNoBaseline => "UNKNOWN-NO-BASELINE",
             Status::NoTestDb => "NO-TEST-DB",
             Status::Signalled => "SIGNALLED",
+            Status::PartialCoverage => "PARTIAL-COVERAGE",
         }
     }
 }
@@ -247,6 +252,7 @@ fn status_named(name: &str) -> Option<Status> {
         Status::UnknownNoBaseline,
         Status::NoTestDb,
         Status::Signalled,
+        Status::PartialCoverage,
     ]
     .into_iter()
     .find(|s| s.as_str() == name)

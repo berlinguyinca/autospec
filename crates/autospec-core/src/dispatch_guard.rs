@@ -234,6 +234,24 @@ pub fn classify_report(report: &AgentReport) -> ArtifactOutcome {
             status: Status::Signalled.as_str().to_string(),
         };
     }
+    // The counters decide what a label may claim (#4665). A `VERIFIED` written
+    // over 1150 of 10 073 tests is reported as `PARTIAL-COVERAGE`: the artifact
+    // stays convertible, because a run that stopped short is not a run that
+    // failed and the pass's own gate is the measurement the run skipped — but
+    // the status the guard reports must not read as a green verdict to whoever
+    // reads it next.
+    let recorded = report
+        .status
+        .as_deref()
+        .and_then(crate::run_status::canonical_status);
+    match crate::execution::status_triage::coverage::entitled(recorded, report.coverage()) {
+        Some(entitled) if Some(entitled) != recorded => {
+            return ArtifactOutcome::Convertible {
+                status: entitled.as_str().to_string(),
+            }
+        }
+        _ => {}
+    }
     by_label
 }
 
