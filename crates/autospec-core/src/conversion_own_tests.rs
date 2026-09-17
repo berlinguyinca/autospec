@@ -151,7 +151,10 @@ mod tests {
         let added = vec!["b".to_string(), "d".to_string()];
         assert_eq!(own_failing_tests(&failing, &added), vec!["b".to_string()]);
         // None of the patch's own tests failed: empty, never a fabrication.
-        assert_eq!(own_failing_tests(&failing, &vec!["d".to_string()]), Vec::<String>::new());
+        assert_eq!(
+            own_failing_tests(&failing, &vec!["d".to_string()]),
+            Vec::<String>::new()
+        );
         // Duplicate names in the failing set are deduplicated.
         let dup = vec!["b".to_string(), "b".to_string()];
         assert_eq!(own_failing_tests(&dup, &added), vec!["b".to_string()]);
@@ -162,11 +165,17 @@ mod tests {
         let failing = vec!["a".to_string(), "own_test".to_string()];
         let added = vec!["own_test".to_string()];
         let reason = own_test_failure_reason("1 failing test(s)", &failing, &added);
-        assert!(reason.contains("fails its own newly-added test(s)"), "{reason}");
+        assert!(
+            reason.contains("fails its own newly-added test(s)"),
+            "{reason}"
+        );
         assert!(reason.contains("own_test"), "{reason}");
         // A regression of existing tests keeps the generic note.
         let regressed = own_test_failure_reason("1 failing test(s)", &failing, &[]);
         assert!(!regressed.contains("fails its own"), "{regressed}");
-        assert!(regressed.contains("gate failed: 1 failing test(s)"), "{regressed}");
+        assert!(
+            regressed.contains("gate failed: 1 failing test(s)"),
+            "{regressed}"
+        );
     }
 }

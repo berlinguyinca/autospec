@@ -31,7 +31,7 @@ pub mod memory_map;
 pub mod work_protocol;
 
 pub use attention_stream::{
-    AttentionStream, ChunkOutput, Finding, MutationVerdict, SourceRef, StreamStatus, resume_verdict,
+    resume_verdict, AttentionStream, ChunkOutput, Finding, MutationVerdict, SourceRef, StreamStatus,
 };
 pub use context_guardian::{
     contains_secret_like, evaluate_threshold, may_begin_substantial_phase, validate_checkpoint,
@@ -44,12 +44,12 @@ pub use ids::{
 };
 pub use learning::{
     is_authoritative, is_unsafe_lesson, promote_verdict, set_status, supersede,
-    touches_immutable_policy, Evidence, LessonCandidate, LessonKind, LessonStatus, PromotionVerdict,
-    LESSON_CANDIDATE_SCHEMA,
+    touches_immutable_policy, Evidence, LessonCandidate, LessonKind, LessonStatus,
+    PromotionVerdict, LESSON_CANDIDATE_SCHEMA,
 };
 pub use memory_map::{
     generate_map, resolve_conflict, MemoryDomainRef, MemoryEntryRef, MemoryKind, MemoryMap,
-    MemoryProvider, Suggestion, StaticMemoryProvider, MEMORY_MAP_SCHEMA,
+    MemoryProvider, StaticMemoryProvider, Suggestion, MEMORY_MAP_SCHEMA,
 };
 pub use work_protocol::{
     acquire_lease, can_transition, heartbeat, reclaim_expired, reconcile, record_delivery,

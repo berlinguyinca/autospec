@@ -50,6 +50,7 @@ pub mod coordination;
 pub mod cost;
 pub mod cron_log_contract;
 pub mod deadline_ratchet;
+pub mod declaration_conflict;
 pub mod declaration_ownership;
 pub mod dependency_gates;
 pub mod deploy_drift;

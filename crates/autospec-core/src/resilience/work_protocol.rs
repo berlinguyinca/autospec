@@ -16,9 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use super::ids::{
-    AttemptId, ClaimId, IdempotencyKey, ReceiptId, SessionId, WorkId,
-};
+use super::ids::{AttemptId, ClaimId, IdempotencyKey, ReceiptId, SessionId, WorkId};
 
 /// Versioned receipt schema identity.
 pub const WORK_RECEIPT_SCHEMA: &str = "autospec.work-receipt.v1";
@@ -261,10 +259,7 @@ pub fn acquire_lease(
     let work = store.load_work(work_id);
     let terminal = work
         .as_ref()
-        .map(|w| {
-            matches!(w.state, WorkState::Merged)
-                || matches!(w.state, WorkState::Completed)
-        })
+        .map(|w| matches!(w.state, WorkState::Merged) || matches!(w.state, WorkState::Completed))
         .unwrap_or(false);
     if terminal {
         return AcquireResult::Terminal;
@@ -346,11 +341,7 @@ pub fn heartbeat(
 
 /// Reclaim an expired lease so a new worker can take over. Fencing generation
 /// is incremented so the old worker can no longer finalize.
-pub fn reclaim_expired(
-    store: &mut dyn WorkStore,
-    work_id: &WorkId,
-    now: u64,
-) -> bool {
+pub fn reclaim_expired(store: &mut dyn WorkStore, work_id: &WorkId, now: u64) -> bool {
     let Some(lease) = store.load_lease(work_id) else {
         return false;
     };
@@ -393,10 +384,7 @@ pub fn try_finalize(
 
 /// Idempotent duplicate delivery: record a receipt; if the idempotency key was
 /// already seen, treat it as a duplicate and do not double-apply.
-pub fn record_delivery(
-    store: &mut dyn WorkStore,
-    receipt: &WorkReceipt,
-) -> bool {
+pub fn record_delivery(store: &mut dyn WorkStore, receipt: &WorkReceipt) -> bool {
     store.record_receipt(receipt)
 }
 
@@ -411,11 +399,7 @@ pub enum RecoveryAction {
 }
 
 /// Deterministic recovery decision for a work item's lease.
-pub fn reconcile(
-    store: &dyn WorkStore,
-    work_id: &WorkId,
-    now: u64,
-) -> RecoveryAction {
+pub fn reconcile(store: &dyn WorkStore, work_id: &WorkId, now: u64) -> RecoveryAction {
     let Some(lease) = store.load_lease(work_id) else {
         // No lease: work may not be started.
         return RecoveryAction::Block;
@@ -480,7 +464,6 @@ impl Clock for FixedClock {
 
 /// Default lease length.
 pub const DEFAULT_LEASE_SECONDS: u64 = 300;
-
 
 #[cfg(test)]
 mod tests;

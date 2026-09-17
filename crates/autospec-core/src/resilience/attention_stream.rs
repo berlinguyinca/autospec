@@ -111,10 +111,12 @@ impl AttentionStream {
     /// The caller must persist `stream` **after** this returns so the durable
     /// cursor never advances without the findings that justify it.
     pub fn apply_chunk(&mut self, output: &ChunkOutput) {
-        self.accumulated_findings.extend(output.new_findings.clone());
+        self.accumulated_findings
+            .extend(output.new_findings.clone());
         self.unresolved_questions
             .extend(output.unresolved_questions.clone());
-        self.follow_up_queries.extend(output.follow_up_queries.clone());
+        self.follow_up_queries
+            .extend(output.follow_up_queries.clone());
         self.cursor = output.chunk_index;
         self.chunks_completed += 1;
         self.status = StreamStatus::Active;
@@ -151,7 +153,10 @@ pub enum MutationVerdict {
 }
 
 /// Classify a source mutation against the digests recorded in a stream.
-pub fn classify_mutation(stream: &AttentionStream, current: &BTreeMap<String, String>) -> MutationVerdict {
+pub fn classify_mutation(
+    stream: &AttentionStream,
+    current: &BTreeMap<String, String>,
+) -> MutationVerdict {
     let mut any_change = false;
     let mut any_material = false;
     for src in &stream.source_set {
@@ -179,7 +184,10 @@ pub fn classify_mutation(stream: &AttentionStream, current: &BTreeMap<String, St
 
 /// Resume decision: a stream may only resume from its durable cursor when its
 /// sources are unchanged. Otherwise it must be reconciled first.
-pub fn resume_verdict(stream: &AttentionStream, current: &BTreeMap<String, String>) -> (StreamStatus, MutationVerdict) {
+pub fn resume_verdict(
+    stream: &AttentionStream,
+    current: &BTreeMap<String, String>,
+) -> (StreamStatus, MutationVerdict) {
     let m = classify_mutation(stream, current);
     match m {
         MutationVerdict::Unchanged => (StreamStatus::Active, m),
@@ -247,10 +255,7 @@ mod tests {
         let mut current = BTreeMap::new();
         current.insert("src/router.rs".to_string(), "digest-a".to_string());
         current.insert("src/handler.rs".to_string(), "digest-b".to_string());
-        assert_eq!(
-            resume_verdict(&s, &current).0,
-            StreamStatus::Active
-        );
+        assert_eq!(resume_verdict(&s, &current).0, StreamStatus::Active);
     }
 
     #[test]
