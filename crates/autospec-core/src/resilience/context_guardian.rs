@@ -276,7 +276,10 @@ pub fn contains_secret_like(text: &str) -> Option<&'static str> {
 /// Checks, in order: schema identity, identifiers match the active execution/
 /// attempt/session, the checkpoint is bounded, and no secret-like value is
 /// present in the free-text fields (or in a caller-provided artifact check).
-pub fn validate_checkpoint(cp: &ContextCheckpoint, config: &ContextGuardianConfig) -> CheckpointValidation {
+pub fn validate_checkpoint(
+    cp: &ContextCheckpoint,
+    config: &ContextGuardianConfig,
+) -> CheckpointValidation {
     let mut errors = Vec::new();
 
     if cp.schema != CONTEXT_CHECKPOINT_SCHEMA {
@@ -422,15 +425,30 @@ mod tests {
         );
         // Even at Required with no checkpoint we allow Unknown to proceed via
         // milestone fallback; but a known Required blocks.
-        assert!(may_begin_substantial_phase(ThresholdVerdict::Unknown, false));
-        assert!(!may_begin_substantial_phase(ThresholdVerdict::Required, false));
-        assert!(may_begin_substantial_phase(ThresholdVerdict::Required, true));
+        assert!(may_begin_substantial_phase(
+            ThresholdVerdict::Unknown,
+            false
+        ));
+        assert!(!may_begin_substantial_phase(
+            ThresholdVerdict::Required,
+            false
+        ));
+        assert!(may_begin_substantial_phase(
+            ThresholdVerdict::Required,
+            true
+        ));
     }
 
     #[test]
     fn utilization_percent_is_capped() {
-        assert_eq!(obs(200, 100, EstimateSource::Exact).utilization_percent(), Some(100));
-        assert_eq!(obs(0, 0, EstimateSource::Unknown).utilization_percent(), None);
+        assert_eq!(
+            obs(200, 100, EstimateSource::Exact).utilization_percent(),
+            Some(100)
+        );
+        assert_eq!(
+            obs(0, 0, EstimateSource::Unknown).utilization_percent(),
+            None
+        );
     }
 
     fn base_checkpoint() -> ContextCheckpoint {
@@ -458,7 +476,8 @@ mod tests {
     fn checkpoint_rejects_secrets() {
         let cfg = ContextGuardianConfig::default();
         let mut cp = base_checkpoint();
-        cp.decisions.push("use token ghp_1234567890abcdef for deploys".to_string());
+        cp.decisions
+            .push("use token ghp_1234567890abcdef for deploys".to_string());
         let v = validate_checkpoint(&cp, &cfg);
         assert!(!v.valid);
         assert!(v.errors.iter().any(|e| e.contains("secret-like")));

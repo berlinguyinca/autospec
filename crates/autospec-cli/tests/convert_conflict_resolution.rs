@@ -476,3 +476,118 @@ fn a_structurally_unconvertible_patch_is_invalidated_and_archived() {
     );
     let _ = fs::remove_dir_all(&work);
 }
+
+/// A module list in a file the path classifier does not recognise (not
+/// `mod.rs`/`lib.rs`): before #4463 a conflict here was `Unknown` and held;
+/// a declaration-only conflict now resolves by canonical union.
+#[test]
+fn a_declaration_only_conflict_in_a_non_index_file_is_resolved_not_held() {
+    let work =
+        std::env::temp_dir().join(format!("autospec-conv-declaration-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
+    let repo = work.join("repo");
+    let origin = work.join("origin.git");
+    let llm_root = work.join("llm");
+    let gh_log = work.join("gh.log");
+
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    // `index.rs` lists modules; its declarations resolve under `src/index/`.
+    fs::write(repo.join("src/lib.rs"), "mod index;\n").unwrap();
+    fs::write(repo.join("src/index.rs"), "pub mod alpha;\n").unwrap();
+    fs::create_dir_all(repo.join("src/index")).unwrap();
+    fs::write(
+        repo.join("src/index/alpha.rs"),
+        "pub fn alpha() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    run_git(&repo, &["init", "-q", "-b", "main"]);
+    run_git(&repo, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "base"]);
+    run_git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    run_git(&repo, &["push", "-q", "origin", "main"]);
+    let index_blob = run_git_output(&repo, &["rev-parse", "main:src/index.rs"]);
+    record_gate(&repo);
+
+    // Main appends its own module to the index after the agent's base.
+    fs::write(
+        repo.join("src/index.rs"),
+        "pub mod alpha;\npub mod gamma;\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/index/gamma.rs"),
+        "pub fn gamma() -> u32 {\n    3\n}\n",
+    )
+    .unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "main moves"]);
+    run_git(&repo, &["push", "-q", "origin", "main"]);
+
+    // The agent's patch appends its own module to the same index, plus its
+    // file. Both sides add a `pub mod` to the one shared list.
+    write_patch(
+        &llm_root,
+        401,
+        &format!(
+            "diff --git a/src/index.rs b/src/index.rs\nindex {index_blob}..0000000\n\
+             --- a/src/index.rs\n+++ b/src/index.rs\n\
+             @@ -1 +1,2 @@\n pub mod alpha;\n+pub mod beta;\n\
+             diff --git a/src/index/beta.rs b/src/index/beta.rs\nnew file mode 100644\n\
+             --- /dev/null\n+++ b/src/index/beta.rs\n\
+             @@ -0,0 +1,3 @@\n+pub fn beta() -> u32 {{\n+    2\n+}}\n"
+        ),
+    );
+
+    let bin_dir = install_fake_gh(&work);
+    let (code, stdout, stderr) = run_convert(
+        &repo,
+        &[
+            "--apply",
+            "--llm-root",
+            llm_root.to_str().unwrap(),
+            "--base",
+            "main",
+            "--repo",
+            "test/fake",
+        ],
+        Some(&bin_dir),
+        Some(&gh_log),
+    );
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    // Converted, not held: the conflict was confined to declarations and the
+    // pass resolved it by canonical union.
+    let outcome = stdout
+        .lines()
+        .find(|l| l.contains("convert: examined=1"))
+        .unwrap_or(&stdout);
+    assert!(outcome.contains("converted=1"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("  HELD  #401"), "stdout:\n{stdout}");
+
+    // The merged index is the sorted union: both additions survive, and the
+    // order is canonical (alpha, beta, gamma) rather than merge order.
+    let merged = origin_show(&origin, "conv-401:src/index.rs");
+    assert!(merged.contains("pub mod alpha;"), "merged:\n{merged}");
+    assert!(merged.contains("pub mod beta;"), "merged:\n{merged}");
+    assert!(merged.contains("pub mod gamma;"), "merged:\n{merged}");
+    assert!(
+        merged.find("pub mod alpha;").unwrap() < merged.find("pub mod beta;").unwrap(),
+        "index is not canonically sorted:\n{merged}"
+    );
+    assert!(
+        merged.find("pub mod beta;").unwrap() < merged.find("pub mod gamma;").unwrap(),
+        "index is not canonically sorted:\n{merged}"
+    );
+
+    let _ = fs::remove_dir_all(&work);
+}

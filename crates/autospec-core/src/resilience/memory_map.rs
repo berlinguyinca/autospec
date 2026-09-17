@@ -246,8 +246,18 @@ mod tests {
     fn map_is_bounded_to_token_budget() {
         let provider = StaticMemoryProvider {
             entries: vec![
-                entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", MemoryKind::Fact, 0.9, "validated"),
-                entry("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", MemoryKind::Warning, 0.5, "validated"),
+                entry(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    MemoryKind::Fact,
+                    0.9,
+                    "validated",
+                ),
+                entry(
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    MemoryKind::Warning,
+                    0.5,
+                    "validated",
+                ),
             ],
             available: true,
         };

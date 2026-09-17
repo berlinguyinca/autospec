@@ -14,9 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::ids::{
-    AttemptId, CandidateId, WorkId,
-};
+use super::ids::{AttemptId, CandidateId, WorkId};
 
 /// Versioned lesson-candidate schema identity.
 pub const LESSON_CANDIDATE_SCHEMA: &str = "autospec.lesson-candidate.v1";
@@ -209,10 +207,7 @@ pub fn is_authoritative(candidate: &LessonCandidate) -> bool {
 /// A candidate supersedes another: the old one becomes superseded and the new
 /// one carries the `supersedes` reference. The old lesson is no longer
 /// authoritative.
-pub fn supersede(
-    old: &mut LessonCandidate,
-    new: &mut LessonCandidate,
-) {
+pub fn supersede(old: &mut LessonCandidate, new: &mut LessonCandidate) {
     old.status = LessonStatus::Superseded;
     new.supersedes = Some(old.candidate_id.clone());
 }
@@ -255,8 +250,12 @@ mod tests {
     }
 
     fn with_evidence(mut c: LessonCandidate) -> LessonCandidate {
-        c.evidence.validation_results.push("validation passed".to_string());
-        c.evidence.review_results.push("independent review OK".to_string());
+        c.evidence
+            .validation_results
+            .push("validation passed".to_string());
+        c.evidence
+            .review_results
+            .push("independent review OK".to_string());
         c.confidence = 0.9;
         c
     }
@@ -286,7 +285,10 @@ mod tests {
 
     #[test]
     fn secret_containing_lesson_is_rejected() {
-        let mut c = with_evidence(base(LessonKind::Warning, "use token ghp_abcdefghijklmnopqrstuvwxyz"));
+        let mut c = with_evidence(base(
+            LessonKind::Warning,
+            "use token ghp_abcdefghijklmnopqrstuvwxyz",
+        ));
         assert_eq!(promote_verdict(&c), PromotionVerdict::Reject);
     }
 
@@ -304,7 +306,9 @@ mod tests {
     #[test]
     fn policy_cannot_be_weakened_by_lesson() {
         assert!(touches_immutable_policy("relax the merge gate"));
-        assert!(touches_immutable_policy("weaken security review requirements"));
+        assert!(touches_immutable_policy(
+            "weaken security review requirements"
+        ));
         assert!(!touches_immutable_policy("use cargo test for validation"));
         let c = base(LessonKind::Procedure, "weaken the security gate");
         assert!(is_unsafe_lesson(&c));
@@ -318,9 +322,16 @@ mod tests {
 
     #[test]
     fn failure_patterns_are_valid_lessons() {
-        let mut c = base(LessonKind::FailurePattern, "CI file-size-ratchet fails on main");
-        c.evidence.validation_results.push("baseline confirmed".to_string());
-        c.evidence.review_results.push("review confirmed".to_string());
+        let mut c = base(
+            LessonKind::FailurePattern,
+            "CI file-size-ratchet fails on main",
+        );
+        c.evidence
+            .validation_results
+            .push("baseline confirmed".to_string());
+        c.evidence
+            .review_results
+            .push("review confirmed".to_string());
         c.confidence = 0.7;
         assert_eq!(promote_verdict(&c), PromotionVerdict::Promote);
     }
