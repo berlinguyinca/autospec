@@ -102,6 +102,10 @@ fn basis_line(basis: &GateBasis, report: &AgentReport) -> String {
             "status=UNKNOWN-NO-BASELINE; no baseline to attribute the failures — gating against current main"
                 .to_string()
         }
+        GateBasis::PartialCoverage { coverage } => format!(
+            "{}; the run stopped short of the suite, so its verdict covers a prefix of it — running the full gate locally (#4665)",
+            coverage.line()
+        ),
         GateBasis::AgentGreen => "agent reported green; confirming against current main".to_string(),
         GateBasis::ReportUnreadable { detail } => {
             format!("status file unreadable ({detail}); gating against current main")

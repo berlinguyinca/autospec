@@ -495,3 +495,79 @@ fn an_ordinary_record_classifies_exactly_as_the_label_alone_did() {
 fn signalled_is_a_terminal_failure_the_guard_archives() {
     assert!(FAILED_RUN_STATUSES.contains(&"SIGNALLED"));
 }
+
+/// A graded record that carries its own coverage counters (#4665).
+fn graded(status: &str, passed: u64, failed: u64, total: Option<u64>) -> AgentReport {
+    AgentReport {
+        status: Some(status.to_string()),
+        test_passed: Some(passed),
+        test_failed: Some(failed),
+        tests_total: total,
+        ..AgentReport::default()
+    }
+}
+
+#[test]
+fn a_verified_over_a_prefix_of_the_suite_is_not_reported_as_verified() {
+    // The guard's `status` exists for operator visibility, so it must say what
+    // the record's own counters support: 1150 of 10 073 tests is not a verdict
+    // on a 10 073-test suite (#4665).
+    assert_eq!(
+        classify_report(&graded("VERIFIED", 1120, 30, Some(10073))),
+        ArtifactOutcome::Convertible {
+            status: "PARTIAL-COVERAGE".to_string()
+        }
+    );
+}
+
+#[test]
+fn a_run_that_finished_the_suite_is_reported_as_it_claims() {
+    assert_eq!(
+        classify_report(&graded("VERIFIED", 10073, 0, Some(10073))),
+        ArtifactOutcome::Convertible {
+            status: "VERIFIED".to_string()
+        }
+    );
+    // No declared total: the shortfall cannot be established, so the record is
+    // reported as written rather than demoted on a guess.
+    assert_eq!(
+        classify_report(&graded("VERIFIED", 1120, 30, None)),
+        ArtifactOutcome::Convertible {
+            status: "VERIFIED".to_string()
+        }
+    );
+}
+
+#[test]
+fn a_short_run_is_not_a_failed_run() {
+    // The distinction matters operationally: a failed run is archived and its
+    // dispatch slot frees, while a run that never graded the suite has said
+    // nothing about the patch at all. Its artifact stays for the pass, which
+    // is the measurement the run skipped.
+    let outcome = classify_report(&graded("VERIFIED", 1120, 30, Some(10073)));
+    assert!(
+        !matches!(outcome, ArtifactOutcome::FailedRun { .. }),
+        "{outcome:?}"
+    );
+    // And the label on its own is not one of the failures either.
+    assert_eq!(
+        classify_artifact_outcome(Some("PARTIAL-COVERAGE")),
+        ArtifactOutcome::Convertible {
+            status: "PARTIAL-COVERAGE".to_string()
+        }
+    );
+}
+
+#[test]
+fn a_kill_still_outranks_a_short_run() {
+    // Precedence: #4651's signal wins over #4665's coverage, because a killed
+    // process left no graded record at all — there is nothing to measure.
+    let mut report = graded("VERIFIED", 1120, 30, Some(10073));
+    report.agent_rc = Some(143);
+    assert_eq!(
+        classify_report(&report),
+        ArtifactOutcome::FailedRun {
+            status: "SIGNALLED".to_string()
+        }
+    );
+}

@@ -116,6 +116,13 @@ pub const NEW_FAILURES_FILE: &str = "new-failures.txt";
 /// - [`Status::UnknownNoBaseline`] and [`Status::NoTestDb`] are gate-only
 ///   names: the gate could not measure (no baseline, no test database), so
 ///   they say nothing about the patch either.
+/// - [`Status::Signalled`] and [`Status::PartialCoverage`] belong to the same
+///   class (#4651, #4665): a killed process reached no gate, and a run that
+///   stopped at the first failing test binary graded a prefix of the suite. A
+///   record in this class is not evidence the patch is broken, so it is not
+///   routed to the rejected path — and it is not evidence the patch is sound
+///   either, which is why the consumer that reads it must refuse on the status
+///   rather than infer a pass from the absence of a rejection.
 /// - [`Status::Verified`] is the green verdict.
 ///
 /// The match is exhaustive over the vocabulary: a status added to
