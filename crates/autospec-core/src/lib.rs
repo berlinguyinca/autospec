@@ -99,6 +99,11 @@ pub mod host_set;
 // reference it, so the Windows CLI check loses nothing.
 #[cfg(unix)]
 pub mod immutable_base;
+// Unix-only by design: it shells out to the POSIX `tar` to pack a published
+// generation into a single file (issue #4577), the same base domain as
+// `immutable_base`.
+#[cfg(unix)]
+pub mod base_archive;
 pub mod initiative;
 pub mod insights;
 pub mod integration;
