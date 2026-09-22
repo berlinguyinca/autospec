@@ -1,0 +1,122 @@
+# Woodpecker CI (ci.metabolomics.us) -- the autospec gate.
+#
+# This replaces seven separate TeamCity build configurations, each of which
+# published its own commit status onto every pull request:
+#
+#   Autospec_AccessibilityWorkstream  Autospec_ArchitectureFitness
+#   Autospec_FileSizeRatchet          Autospec_PythonSuites
+#   Autospec_SecurityWorkstream       Autospec_StackGuard
+#   Autospec_UxUiWorkstream
+#
+# They are steps of one pipeline here, so the repository has ONE check.
+# The step logic is in ops/ci/woodpecker-gates.sh, in this repository, so a
+# gate changes in the same commit as the code it covers and so the whole run
+# is reproducible by hand: `bash ops/ci/woodpecker-gates.sh`.
+#
+# An exec host is a Slurm job on a Rocky 9 node, but the agent execs itself
+# into an Apptainer image (woodpecker/images/ci.sif) and runs steps as child
+# processes, so:
+#
+#  * `image:` is a HOST executable, not a container image: `bash` runs the
+#    job's own shell. There is no docker, no apt and no sudo.
+#  * A step sees Debian 13 (trixie) with python3 3.13.5, git, jq, node and
+#    cargo. It does NOT see gh, shellcheck or python3.12. Two gates are
+#    affected; both say so at the point of use and in the PR that added this.
+#  * The clone plugin fails invisibly on this backend (no step logs for
+#    plugins), so skip_clone + a plain git checkout step, with the forge
+#    credential staged at /etc/woodpecker-git-credentials.
+#  * The agent reproducibly drops a step's final log chunk, so the gate
+#    script prints its journal path FIRST and tees everything to it.
+
+# Pull requests, and pushes to the default branch only.
+#
+# Woodpecker runs the push and the pull_request pipeline for the same commit
+# concurrently, on whatever agents are free. Two full gate runs sharing one
+# repository's Slurm capacity is contention for no added coverage -- the same
+# SHA can then pass on one and time out on the other, which reads as flake.
+# Every TeamCity config here was PR-driven (the pullRequests build feature);
+# only architecture-fitness, python-suites and security-workstream also ran
+# on main, and the push rule below keeps that.
+when:
+  - event: [pull_request, manual]
+  - event: push
+    branch: ${CI_REPO_DEFAULT_BRANCH}
+
+skip_clone: true
+
+steps:
+  - name: checkout
+    image: bash
+    commands:
+      - 'set -eu'
+      - 'test -r /etc/woodpecker-git-credentials || { echo "the job staged no forge credential" >&2; exit 1; }'
+      - 'git init -q -b "${CI_COMMIT_BRANCH:-main}" .'
+      - 'git remote add origin "https://github.com/${CI_REPO}.git"'
+      # NOT --depth=1, unlike the inferweave-slurm reference this is copied
+      # from. Three gates here (file-size-ratchet, stack-guard, and
+      # security-workstream in PR mode) compute `git merge-base origin/<base>
+      # HEAD`, and a shallow fetch of a single sha shares no history with the
+      # base branch: merge-base finds nothing and the gate dies unreadably.
+      - 'git fetch --no-tags origin "$CI_COMMIT_SHA"'
+      - 'git checkout -q FETCH_HEAD'
+      # The base branch, by an EXPLICIT refspec.
+      #
+      # `git fetch origin main` writes FETCH_HEAD and updates
+      # refs/remotes/origin/main only opportunistically, through the remote's
+      # configured refspec -- which an `init` + `remote add` checkout does not
+      # have. The retired .github/workflows/security-workstream.yml carried
+      # this same note: without the refspec, origin/main never exists and
+      # every PR scan died on `merge-base origin/main HEAD`.
+      #
+      # Not shallow either: merge-base needs the history the two refs share.
+      - 'target="${CI_COMMIT_TARGET_BRANCH:-$CI_REPO_DEFAULT_BRANCH}"'
+      - 'git fetch --no-tags origin "+refs/heads/${target}:refs/remotes/origin/${target}"'
+      - 'git --no-pager log --oneline -1'
+
+  # The six gates below are independent of each other and depend only on the
+  # checkout, so they are declared as a fan-out rather than a chain: a red
+  # gate no longer hides the result of the five behind it, which is what the
+  # seven separate TeamCity configurations got right and a naive single
+  # sequence would lose.
+  - name: accessibility-workstream
+    image: bash
+    depends_on: [checkout]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh accessibility'
+
+  - name: ux-ui-workstream
+    image: bash
+    depends_on: [checkout]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh ux-ui-workstream'
+
+  - name: file-size-ratchet
+    image: bash
+    depends_on: [checkout]
+    environment:
+      # TeamCity carried these as build parameters on Autospec_FileSizeRatchet.
+      MAX_LOC: "600"
+      HARD_LOC: "2000"
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh file-size-ratchet'
+
+  - name: stack-guard
+    image: bash
+    depends_on: [checkout]
+    environment:
+      # Advisory, as on Autospec_StackGuard. Set to "1" to make findings block.
+      AUTOSPEC_PR_SIZE_STRICT: "0"
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh stack-guard'
+
+  - name: python-suites
+    image: bash
+    depends_on: [checkout]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh python-suites'
+
+  - name: security-workstream
+    image: bash
+    depends_on: [checkout]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh security-workstream'
