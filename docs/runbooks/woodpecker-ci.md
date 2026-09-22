@@ -20,6 +20,22 @@ has one check.
 | `Autospec_StackGuard`              | `stack-guard`          | `stack-guard`                  |
 | `Autospec_UxUiWorkstream`          | `ux-ui-workstream`     | `ux-ui-workstream`             |
 
+The pipeline also reproduces one **GitHub Actions** job, which is a separate
+matter from the TeamCity migration and the reason the pipeline is now minutes
+rather than seconds:
+
+| GitHub Actions job (`.github/workflows/rust.yml`) | Woodpecker steps | `woodpecker-gates.sh` arguments |
+| --- | --- | --- |
+| `build-test` | `rust-tools` → `rust-clippy` → `rust-ownership-contracts` → `rust-workspace-test` → `rust-catalog-parity` → `rust-validate` → `rust-build` → `rust-behaviour-probes` | the same eight names |
+
+`build-test` is the check `main`'s branch protection requires. Its last GitHub
+run was 2026-09-17 and it failed; nothing has produced the status since, so
+every pull request has been blocked on a check that is neither passing nor
+being recomputed. The eight steps above are that job, split by its own step
+names so a failure is attributable, and running in sequence because they share
+one cargo target directory. See **The `build-test` job** below for the parts
+of it that do not run here.
+
 Configuration lives in two files:
 
 - `.woodpecker.yml` — when the pipeline runs, the checkout, and the step fan-out.
@@ -36,11 +52,17 @@ bash ops/ci/woodpecker-gates.sh file-size-ratchet stack-guard # a subset
 bash ops/ci/woodpecker-gates.sh architecture-fitness          # not in the pipeline; red today
 ```
 
-A bare invocation runs the **six** gates the pipeline runs, so it passes on a
-clean checkout. `architecture-fitness` is implemented in the same script but
-is not in that list and runs only when named — it fails on `main` today, and a
-bare run that inherited that failure would make the documented
-reproduce-it-locally command useless.
+A bare invocation runs the **fourteen** gates the pipeline runs — the six
+workstream gates plus the eight `rust-*` gates — so it passes on a clean
+checkout, and takes the same time the pipeline does.
+`architecture-fitness` is implemented in the same script but is not in that
+list and runs only when named — it fails on `main` today, and a bare run that
+inherited that failure would make the documented reproduce-it-locally command
+useless.
+
+Every gate prints `ELAPSED <gate>: <n>s` when it finishes, so the cost of a
+change to one of them is visible in its own log rather than only as a wall
+clock number on the server.
 
 Outside CI the `CI_*` variables are unset and each gate falls back to the
 defaults the TeamCity steps used: base branch `main`, and `HEAD`'s own sha in
@@ -84,6 +106,80 @@ journal: /home/wohlgemuth/woodpecker/logs/autospec-gates-<sha>-<ts>-<gate>.log
 
 That path is on the cluster; read it from `whiteale`. The Woodpecker server's
 sqlite `log_entries` table holds the same output when the step log survived.
+
+## The `build-test` job
+
+### The tools it pins, and where each one comes from here
+
+`build-test` installs its own tools rather than trusting the runner image,
+verifying each archive's sha256 before unpacking it. That pattern transfers
+unchanged; the versions and digests in `ops/ci/woodpecker-gates.sh` are copied
+from `.github/workflows/rust.yml` and must be changed in both places at once,
+or the two CIs test different software while both report green.
+
+| Tool | On GitHub | Here |
+| --- | --- | --- |
+| `codex` + `bwrap` | sha256-pinned musl tarball | same |
+| `gitleaks` | sha256-pinned tarball | same |
+| `trivy` | sha256-pinned tarball | same |
+| `semgrep` | **docker image digest** | **not installed — see below** |
+| `gh` | preinstalled on the runner | sha256-pinned tarball |
+| `ripgrep` | `sudo apt-get install ripgrep` | sha256-pinned tarball |
+| `bats` | `sudo apt-get install bats` | cloned at its tag, verified by commit |
+| `ajv`, `license-checker` | npm, via `dev-bootstrap.sh` | npm, version-pinned |
+| `pytest`, `pyyaml` | `sudo apt-get install python3-…` | already in the image |
+
+`bats-core` publishes no binary asset, and a GitHub source-archive tarball is
+regenerated on demand so its sha256 is not a stable pin. The tag's commit is,
+and it is the stronger pin: a moved tag changes it and the gate stops.
+
+`scripts/dev-bootstrap.sh` still runs, after those installs rather than
+instead of them. It prefers `apt` whenever `apt-get` exists — which it does in
+this image — and then calls `sudo apt-get`, and there is no `sudo`. Every
+`install_*` function in it is idempotent, so pre-installing is what lets it
+reach `check_tools`, which is the part worth having: the repository's own
+statement of what a working checkout needs.
+
+### Environment the image forces
+
+- `CARGO_HOME` defaults to `/usr/local/cargo`, which is on the **read-only**
+  SIF. The first `cargo fetch` dies with `could not create temp file …:
+  Read-only file system`, which names the filesystem and not the cause.
+  `CARGO_HOME` and `CARGO_TARGET_DIR` therefore move into the workspace.
+  `RUSTUP_HOME` is left alone: the pinned 1.91.0 toolchain is baked into the
+  image, and re-downloading it per pipeline would be pure cost.
+- npm's global prefix is `/usr/local`, on the same read-only SIF, so the npm
+  tools install with `--prefix` into the workspace and are symlinked onto the
+  one PATH entry the gates add.
+- `CARGO_BUILD_JOBS` is capped at 4, below the 8 CPUs an agent asks Slurm for.
+  An agent gets `--mem=18G` and rustc's peak is per codegen unit; an
+  OOM-killed run is *unverified*, not red, and reports a signal rather than a
+  test result.
+- There is **no cargo cache between pipelines.** The workspace is a fresh
+  `mktemp -d` per workflow, so every run compiles the dependency graph from
+  scratch. GitHub's `build-test` has `actions/cache` and does not. This is the
+  single largest component of the pipeline's duration, and the first thing to
+  change if it needs to come down.
+
+### Not reproduced: `semgrep`
+
+`build-test` pins semgrep as a **docker image digest**
+(`semgrep/semgrep@sha256:44dd022c…`) and puts a `docker run` wrapper on PATH.
+There is no docker in this image — `ci.def` refuses it deliberately — and a
+container runtime is the only way to run that exact artifact. Two alternatives
+were considered and rejected:
+
+- `pip install semgrep==1.173.0` is a different artifact with no digest pin.
+  Substituting it silently would mean the two CIs scan with different software
+  while both say "semgrep".
+- A shim on PATH satisfying `command -v semgrep` would turn the tests that
+  require it green by fabrication.
+
+`install.sh` declares `AUTOSPEC_EXECUTOR_SCANNERS="gitleaks semgrep trivy
+license-checker"` `readonly`, so the install suites that assert the scanner
+set cannot pass with semgrep absent. What that costs, exactly, is in the issue
+linked from the pull request that added these steps. GitHub Actions keeps
+asserting `build-test`, semgrep included, until it is resolved.
 
 ## Not reproduced from TeamCity
 

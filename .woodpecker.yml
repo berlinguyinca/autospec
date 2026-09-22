@@ -152,3 +152,76 @@ steps:
     depends_on: [checkout]
     commands:
       - 'bash ops/ci/woodpecker-gates.sh security-workstream'
+
+  # ── The GitHub Actions `build-test` job ──────────────────────────────────
+  #
+  # The eight steps below are NOT from TeamCity. They reproduce `build-test`
+  # in .github/workflows/rust.yml, which is the check main's branch
+  # protection requires and whose last GitHub run was 2026-09-17. Everything
+  # above this comment could be green and a pull request still could not
+  # merge, because that one required check was neither passing nor being
+  # produced any more.
+  #
+  # A CHAIN, not a fan-out, unlike the six gates above. They all share one
+  # cargo target directory, so running them concurrently would only make them
+  # queue on cargo's build lock -- with the wait hidden inside a step instead
+  # of shown in the pipeline. Chained, each step's duration is its own.
+  #
+  # Split by GitHub step name rather than run as one, for the reason the job's
+  # own --no-fail-fast comment gives: when clippy, the tests, catalog parity,
+  # validate and build are one step, a single long-standing failure hides all
+  # of them -- on main, `Validate repository` and `Build` had not executed in
+  # CI for as long as one test had been failing. Here a red `rust-workspace-
+  # test` still leaves the four behind it to report for themselves.
+  #
+  # semgrep is NOT installed: `build-test` pins it as a docker image digest
+  # and there is no docker in this image. See gate_rust_tools in
+  # ops/ci/woodpecker-gates.sh for what was rejected and why, and the PR that
+  # added these steps for what it costs.
+  - name: rust-tools
+    image: bash
+    depends_on: [checkout]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh rust-tools'
+
+  - name: rust-clippy
+    image: bash
+    depends_on: [rust-tools]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh rust-clippy'
+
+  - name: rust-ownership-contracts
+    image: bash
+    depends_on: [rust-clippy]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh rust-ownership-contracts'
+
+  - name: rust-workspace-test
+    image: bash
+    depends_on: [rust-ownership-contracts]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh rust-workspace-test'
+
+  - name: rust-catalog-parity
+    image: bash
+    depends_on: [rust-workspace-test]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh rust-catalog-parity'
+
+  - name: rust-validate
+    image: bash
+    depends_on: [rust-catalog-parity]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh rust-validate'
+
+  - name: rust-build
+    image: bash
+    depends_on: [rust-validate]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh rust-build'
+
+  - name: rust-behaviour-probes
+    image: bash
+    depends_on: [rust-build]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh rust-behaviour-probes'

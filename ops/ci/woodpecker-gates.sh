@@ -22,9 +22,15 @@
 #   bash ops/ci/woodpecker-gates.sh              # every gate the pipeline runs
 #   bash ops/ci/woodpecker-gates.sh file-size-ratchet stack-guard
 #
-# "every gate the pipeline runs" is six of the seven: architecture-fitness is
-# implemented here but is not wired in, and runs only when named. See the
-# PIPELINE_GATES comment at the bottom for why.
+# "every gate the pipeline runs" is six of those seven plus the eight rust-*
+# gates: architecture-fitness is implemented here but is not wired in, and
+# runs only when named. See the PIPELINE_GATES comment at the bottom for why.
+#
+# The rust-* gates are NOT from TeamCity. They reproduce the GitHub Actions
+# job `build-test` (.github/workflows/rust.yml), which is the check main's
+# branch protection requires and which last ran on GitHub on 2026-09-17:
+#
+#   bash ops/ci/woodpecker-gates.sh rust-clippy rust-workspace-test
 #
 # It takes no Woodpecker-specific input that it cannot default. Outside CI
 # the CI_* variables are unset and every gate falls back to the same
@@ -114,6 +120,330 @@ require_base() {
         echo "       The checkout step fetches it with an explicit refspec -- if it is missing, that step is wrong." >&2
         exit 1
     fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# THE RUST build-test JOB
+#
+# Everything from here to the next banner reproduces ONE GitHub Actions job,
+# `build-test` in .github/workflows/rust.yml -- not a TeamCity configuration.
+# It is here because `build-test` is the check `main`'s branch protection
+# requires, its last GitHub run was 2026-09-17, and it is what blocks every
+# pull request that TeamCity and Woodpecker both pass.
+#
+# Its nine GitHub steps become nine gates rather than one, for the reason the
+# job's own comment on --no-fail-fast gives: when a single step covers clippy,
+# the tests, catalog parity, validate and build, one long-standing failure
+# hides everything behind it. Here a red `rust-workspace-test` still leaves
+# `rust-catalog-parity`, `rust-validate` and `rust-build` to report for
+# themselves.
+#
+#   GitHub step                            gate
+#   Install pinned executor integration    rust-tools
+#     tools + Bootstrap repository test
+#     tools
+#   Clippy (lint)                          rust-clippy
+#   Test Linux ownership contracts         rust-ownership-contracts
+#   Test workspace                         rust-workspace-test
+#   Catalog count parity                   rust-catalog-parity
+#   Validate repository                    rust-validate
+#   Build                                  rust-build
+#   Test (behaviour probes)                rust-behaviour-probes
+#
+# The gates share a workspace and a target directory and must therefore run in
+# SEQUENCE, unlike the six workstream gates above: concurrent cargo
+# invocations serialise on the target-directory lock anyway, and doing it by
+# declaration makes the wait visible in the pipeline instead of hidden inside
+# a step.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Versions and digests, lifted from .github/workflows/rust.yml unchanged.
+# Changing one here without changing it there makes the two CIs test different
+# software while both report green.
+CODEX_VERSION=0.147.0
+CODEX_SHA256=0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36
+CODEX_BWRAP_SHA256=e73dc46e2ec7176499cb14e26c7b80b9d8e24a39cd51fe8fa0d45ddd8f6fb87c
+GITLEAKS_VERSION=8.30.1
+GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+TRIVY_VERSION=0.74.0
+TRIVY_SHA256=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+
+# Tools the GitHub job gets from `sudo apt-get install` or from the runner
+# image, and that this image does not carry. There is no apt and no sudo
+# inside ci.sif, so each one is fetched as a checksum-verified release
+# artifact instead -- the same pattern the job already uses for codex,
+# gitleaks and trivy, applied to the three it did not have to.
+#
+# gh is NOT optional: scripts/dev-bootstrap.sh's check_tools lists it and
+# exits non-zero when it is absent, so the bootstrap step cannot pass without
+# it. Installing it here also un-blinds stack-guard's linearity half (#4724)
+# whenever a token is present; with no token `gh pr list` still fails and the
+# gate stays advisory, exactly as it is today.
+GH_VERSION=2.81.0
+GH_SHA256=d507c82e3ae47af875b93472f39e01cbf9f85808ec0a69751e0932a43514d7ff
+RIPGREP_VERSION=14.1.1
+RIPGREP_SHA256=4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e
+# bats-core publishes no binary asset and a GitHub source-archive tarball is
+# regenerated on demand, so its sha256 is not a stable pin. The tag's COMMIT
+# is, and it is the stronger one: a moved tag changes it.
+BATS_TAG=v1.11.1
+BATS_COMMIT=b640ec3cf2c7c9cfc9e6351479261186f76eeec8
+# npm's own integrity hashes cover the tarball; the exact version is the pin.
+AJV_CLI_VERSION=5.0.0
+LICENSE_CHECKER_VERSION=25.0.1
+
+# ── The cargo environment, and why none of it can be left at its default ────
+#
+# CARGO_HOME defaults to /usr/local/cargo inside this image, which is on the
+# READ-ONLY SIF. The first `cargo fetch` then dies with
+#
+#   error: could not create temp file ...: Read-only file system
+#
+# which names the filesystem and not the cause -- the same trap ci.def already
+# documents for RUSTUP_HOME. Both move into the workspace, which is node-local
+# ext4 on nvme and dies with the allocation. RUSTUP_HOME is deliberately left
+# alone: the pinned 1.91.0 toolchain is baked into the image and re-downloading
+# it per pipeline would be pure cost.
+#
+# CARGO_BUILD_JOBS is capped BELOW the 8 CPUs the agent asks Slurm for. An
+# agent gets --mem=18G, and rustc's peak is per-codegen-unit: eight parallel
+# codegen jobs over a 531k-line workspace is an OOM-kill candidate, and an
+# OOM-killed run is unverified rather than red -- it reports a signal, not a
+# test result. Four is the number that has held elsewhere on this cluster.
+rust_env() {
+    local root
+    root="$(pwd)"
+    CI_TOOLS="$root/.ci-tools"
+    CARGO_HOME="$root/.ci-cargo"
+    CARGO_TARGET_DIR="$root/target"
+    export CI_TOOLS CARGO_HOME CARGO_TARGET_DIR
+    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+    export CARGO_TERM_COLOR=never
+    export CARGO_NET_RETRY=3
+    export PATH="$CI_TOOLS/bin:$PATH"
+    mkdir -p "$CARGO_HOME" "$CI_TOOLS/bin"
+}
+
+# Fetch one archive, verify its sha256, and unpack the named members.
+fetch_verified() {
+    local url="$1" sha="$2" archive="$3"
+    shift 3
+    curl --fail --location --silent --show-error "$url" --output "$archive"
+    printf '%s  %s\n' "$sha" "$archive" | sha256sum --check
+    tar -xzf "$archive" -C "$CI_TOOLS/bin" "$@"
+}
+
+# ── build-test: "Install pinned executor integration tools" + "Bootstrap" ───
+gate_rust_tools() {
+    step "pinned executor integration tools"
+    rust_env
+
+    local tmp
+    tmp="$(mktemp -d)"
+
+    echo "-- codex ${CODEX_VERSION} (+ bwrap)"
+    fetch_verified \
+        "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz" \
+        "$CODEX_SHA256" "$tmp/codex.tar.gz"
+    fetch_verified \
+        "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/bwrap-x86_64-unknown-linux-musl.tar.gz" \
+        "$CODEX_BWRAP_SHA256" "$tmp/codex-bwrap.tar.gz"
+    mv -f "$CI_TOOLS/bin/codex-x86_64-unknown-linux-musl" "$CI_TOOLS/bin/codex"
+    mv -f "$CI_TOOLS/bin/bwrap-x86_64-unknown-linux-musl" "$CI_TOOLS/bin/bwrap"
+
+    echo "-- gitleaks ${GITLEAKS_VERSION}"
+    fetch_verified \
+        "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+        "$GITLEAKS_SHA256" "$tmp/gitleaks.tar.gz" gitleaks
+
+    # trivy is not in Debian's repositories either, so the workflow's note --
+    # that ensure-tool.sh's `apt-get install trivy` never resolves and
+    # install.sh hard-verifies AUTOSPEC_EXECUTOR_SCANNERS -- holds here
+    # unchanged.
+    echo "-- trivy ${TRIVY_VERSION}"
+    fetch_verified \
+        "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+        "$TRIVY_SHA256" "$tmp/trivy.tar.gz" trivy
+
+    echo "-- gh ${GH_VERSION}"
+    curl --fail --location --silent --show-error \
+        "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+        --output "$tmp/gh.tar.gz"
+    printf '%s  %s\n' "$GH_SHA256" "$tmp/gh.tar.gz" | sha256sum --check
+    tar -xzf "$tmp/gh.tar.gz" -C "$tmp" "gh_${GH_VERSION}_linux_amd64/bin/gh"
+    mv -f "$tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" "$CI_TOOLS/bin/gh"
+
+    echo "-- ripgrep ${RIPGREP_VERSION}"
+    curl --fail --location --silent --show-error \
+        "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+        --output "$tmp/rg.tar.gz"
+    printf '%s  %s\n' "$RIPGREP_SHA256" "$tmp/rg.tar.gz" | sha256sum --check
+    tar -xzf "$tmp/rg.tar.gz" -C "$tmp" "ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl/rg"
+    mv -f "$tmp/ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl/rg" "$CI_TOOLS/bin/rg"
+
+    # SEMGREP IS NOT INSTALLED, AND NOTHING HERE PRETENDS IT IS.
+    #
+    # build-test pins semgrep as a DOCKER IMAGE DIGEST
+    # (semgrep/semgrep@sha256:44dd022c...) and puts a `docker run` wrapper on
+    # PATH. There is no docker in this image -- ci.def refuses it deliberately
+    # -- and a container runtime is the only way to run that exact artifact.
+    #
+    # The alternatives were considered and rejected, not overlooked:
+    #   * `pip install semgrep==1.173.0` is a DIFFERENT artifact with no
+    #     digest pin. Substituting it silently would mean the two CIs scan
+    #     with different software while both say semgrep.
+    #   * A shim on PATH that satisfies `command -v semgrep` would turn the
+    #     tests that require it green by fabrication. That is the one thing a
+    #     migration must never do.
+    #
+    # So semgrep is absent, the gates that need it are named in the PR body
+    # and in the issue linked from it, and TeamCity is not involved either
+    # way -- this is a GitHub Actions job, and GitHub keeps asserting it.
+    echo "-- semgrep: NOT INSTALLED (pinned as a docker image; no docker here)"
+
+    echo "-- bats ${BATS_TAG}, ajv-cli ${AJV_CLI_VERSION}, license-checker ${LICENSE_CHECKER_VERSION}"
+    # The GitHub job apt-installs bats and npm-installs the other two through
+    # dev-bootstrap.sh. npm's global prefix here is /usr/local, on the
+    # read-only SIF, so the prefix moves into the workspace. The versions are
+    # pinned; dev-bootstrap.sh installs them unpinned, and CI should not be
+    # the place a tool changes without a commit.
+    #
+    # `npm install --prefix DIR` is a LOCAL install: it writes
+    # DIR/node_modules and links the executables into
+    # DIR/node_modules/.bin, not into DIR/bin the way `--global` would.
+    # Symlinking them into the one directory already on PATH keeps every
+    # later gate's environment a single entry, and keeps dev-bootstrap.sh's
+    # `command -v ajv` answering.
+    npm install --silent --no-fund --no-audit --prefix "$CI_TOOLS" \
+        "ajv-cli@${AJV_CLI_VERSION}" "license-checker@${LICENSE_CHECKER_VERSION}"
+    ln -sf "$CI_TOOLS/node_modules/.bin/ajv" "$CI_TOOLS/bin/ajv"
+    ln -sf "$CI_TOOLS/node_modules/.bin/license-checker" "$CI_TOOLS/bin/license-checker"
+
+    # bats from its tag, verified by COMMIT rather than by a tarball digest.
+    git clone --quiet --depth 1 --branch "$BATS_TAG" \
+        https://github.com/bats-core/bats-core.git "$tmp/bats-core"
+    local got
+    got="$(git -C "$tmp/bats-core" rev-parse HEAD)"
+    if [ "$got" != "$BATS_COMMIT" ]; then
+        echo "FATAL: bats-core $BATS_TAG is commit $got, expected $BATS_COMMIT" >&2
+        echo "       The tag moved. Do not update the pin without reading what changed." >&2
+        exit 1
+    fi
+    bash "$tmp/bats-core/install.sh" "$CI_TOOLS"
+
+    rm -rf "$tmp"
+
+    step "installed tool versions"
+    # Asserted, not merely printed: a half-unpacked archive still leaves a
+    # file on PATH, and the failure would otherwise surface three gates later
+    # as an unexplained test failure.
+    codex --version
+    gitleaks version
+    trivy --version | head -1
+    gh --version | head -1
+    rg --version | head -1
+    bats --version
+    # ajv and license-checker are asserted differently on purpose. Neither has
+    # a usable `--version`: `ajv --version` exits 2 with a usage message, and
+    # `license-checker --version` prints the version and then exits 1. Under
+    # `set -e` either would fail this gate for no reason. `npm ls` is the
+    # authority on what was installed anyway, and `command -v` is what
+    # dev-bootstrap.sh's check_tools actually asks.
+    command -v ajv
+    command -v license-checker
+    npm ls --prefix "$CI_TOOLS" --depth=0
+
+    step "bootstrap repository test tools"
+    # dev-bootstrap.sh is run AFTER the installs above, not instead of them.
+    # It prefers apt when apt-get exists -- which it does here -- and then
+    # calls `sudo apt-get`, and there is no sudo. Every install_* function in
+    # it is idempotent and no-ops on a tool already on PATH, so pre-installing
+    # is what makes it reach check_tools, which is the part worth having: it
+    # is the repository's own statement of what a working checkout needs.
+    bash scripts/dev-bootstrap.sh
+}
+
+# ── build-test: "Clippy (lint)" ─────────────────────────────────────────────
+gate_rust_clippy() {
+    step "clippy (workspace, all targets)"
+    rust_env
+    cargo clippy --workspace --all-targets
+}
+
+# ── build-test: "Test Linux ownership contracts" ────────────────────────────
+gate_rust_ownership_contracts() {
+    step "Linux ownership contracts"
+    rust_env
+    cargo test -p autospec-cli --bin autospec pidfd -- --nocapture
+    cargo test -p autospec-cli --bin autospec subreaper -- --nocapture
+    cargo test -p autospec-cli --bin autospec heartbeat_startup -- --nocapture
+    cargo test -p autospec-cli --test claim_commands stale_startup_recovery -- --nocapture
+    cargo test -p autospec-cli --bin autospec cleanup_restart -- --nocapture
+}
+
+# ── build-test: "Test workspace" ────────────────────────────────────────────
+gate_rust_workspace_test() {
+    step "workspace test suite"
+    rust_env
+    # --no-fail-fast, for the reason build-test states: without it cargo stops
+    # at the first failing test binary, so one long-standing failure hides
+    # every later binary. Keeping it means this gate reports the WHOLE failure
+    # set in one run, which is the difference between one investigation and
+    # seven.
+    cargo test --workspace --no-fail-fast
+}
+
+# ── build-test: "Catalog count parity" ──────────────────────────────────────
+gate_rust_catalog_parity() {
+    step "catalog count parity"
+    rust_env
+    bash scripts/check-catalog-count-parity.sh
+}
+
+# ── build-test: "Validate repository" ───────────────────────────────────────
+gate_rust_validate() {
+    step "validate repository"
+    rust_env
+    cargo run -p autospec-cli -- validate
+}
+
+# ── build-test: "Build" ─────────────────────────────────────────────────────
+gate_rust_build() {
+    step "build workspace"
+    rust_env
+    cargo build --workspace
+}
+
+# ── build-test: "Test" (the exact behaviour probes) ─────────────────────────
+#
+# Carried over whole, including the counted assertion. `cargo test <name>` is
+# a SUBSTRING filter: a probe whose test was renamed matches nothing, and a
+# run of zero tests exits 0 and reads as a pass. Counting one "... ok" line
+# is what makes a vanished test a failure instead of a silent hole -- the same
+# class of mistake as a mutant run that executed no test.
+run_exact() {
+    local behavior_test="$1" proof_marker="${2:-}" behavior_output behavior_status
+    set +e
+    behavior_output="$(cargo test -p autospec-cli --bin autospec "$behavior_test" -- --exact --nocapture 2>&1)"
+    behavior_status=$?
+    set -e
+    printf '%s\n' "$behavior_output"
+    if [ "$behavior_status" -ne 0 ]; then
+        return "$behavior_status"
+    fi
+    test "$(printf '%s\n' "$behavior_output" | grep -F -c "test $behavior_test ... ok")" -eq 1
+    if [ -n "$proof_marker" ]; then
+        test "$(printf '%s\n' "$behavior_output" | grep -F -c "$proof_marker")" -eq 1
+    fi
+}
+
+gate_rust_behaviour_probes() {
+    step "autospec-core lib tests and portable ownership probes"
+    rust_env
+    cargo test -p autospec-core --lib
+    run_exact 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
+    run_exact 'commands::autonomous::executor_bridge::tests::adoption_cleanup::autonomous_executor_bridge_pidfd_adoption_requires_full_exec_identity'
+    run_exact 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
 }
 
 # ── Autospec_AccessibilityWorkstream ────────────────────────────────────────
@@ -459,7 +789,13 @@ gate_security_workstream() {
 # covers the repo it would be a permanent red that buries the six working
 # gates. TeamCity keeps asserting it until the debt is cleared. See
 # docs/runbooks/woodpecker-ci.md.
-PIPELINE_GATES="accessibility file-size-ratchet python-suites security-workstream stack-guard ux-ui-workstream"
+#
+# The rust-* gates reproduce the GitHub Actions `build-test` job and are in
+# the list: they are the coverage main's branch protection asks for. They run
+# in sequence, in the order below, because they share one target directory.
+PIPELINE_GATES="accessibility file-size-ratchet python-suites security-workstream stack-guard ux-ui-workstream
+                rust-tools rust-clippy rust-ownership-contracts rust-workspace-test
+                rust-catalog-parity rust-validate rust-build rust-behaviour-probes"
 KNOWN_GATES="$PIPELINE_GATES architecture-fitness"
 
 run_gate() {
@@ -471,6 +807,14 @@ run_gate() {
         security-workstream)  gate_security_workstream ;;
         stack-guard)          gate_stack_guard ;;
         ux-ui-workstream)     gate_ux_ui ;;
+        rust-tools)               gate_rust_tools ;;
+        rust-clippy)              gate_rust_clippy ;;
+        rust-ownership-contracts) gate_rust_ownership_contracts ;;
+        rust-workspace-test)      gate_rust_workspace_test ;;
+        rust-catalog-parity)      gate_rust_catalog_parity ;;
+        rust-validate)            gate_rust_validate ;;
+        rust-build)               gate_rust_build ;;
+        rust-behaviour-probes)    gate_rust_behaviour_probes ;;
         *)
             echo "unknown gate: $1" >&2
             echo "known gates: $KNOWN_GATES" >&2
@@ -483,9 +827,16 @@ main() {
     echo "commit:  ${CI_COMMIT_SHA:-$(git rev-parse HEAD)}"
     echo "event:   ${CI_PIPELINE_EVENT:-<local>}"
     echo "gates:   $*"
-    local g
+    local g t0 t1
     for g in "$@"; do
+        t0=$(date +%s)
         run_gate "$g"
+        t1=$(date +%s)
+        # Printed per gate because the rust gates are minutes rather than
+        # seconds and the pipeline's cost is now a thing worth watching: a
+        # gate that doubles should be visible in its own log, not only in a
+        # wall-clock number on the server.
+        echo "ELAPSED ${g}: $((t1 - t0))s"
     done
     echo
     echo "GATES PASSED: $*"

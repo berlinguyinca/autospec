@@ -78,3 +78,11 @@ batch-donel.json
 # agent worktrees (transient) and python build artifacts
 .claude/worktrees/
 *.egg-info/
+
+# Woodpecker CI scratch (ops/ci/woodpecker-gates.sh). All three are created
+# inside the workspace because the CI image's own locations -- CARGO_HOME at
+# /usr/local/cargo, npm's prefix at /usr/local -- are on a read-only SIF.
+.ci-tools/
+.ci-cargo/
+.ci-venv/
+.af-registry-woodpecker.yml
