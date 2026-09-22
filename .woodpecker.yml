@@ -196,15 +196,9 @@ steps:
     commands:
       - 'bash ops/ci/woodpecker-gates.sh rust-ownership-contracts'
 
-  - name: rust-workspace-test
-    image: bash
-    depends_on: [rust-ownership-contracts]
-    commands:
-      - 'bash ops/ci/woodpecker-gates.sh rust-workspace-test'
-
   - name: rust-catalog-parity
     image: bash
-    depends_on: [rust-workspace-test]
+    depends_on: [rust-ownership-contracts]
     commands:
       - 'bash ops/ci/woodpecker-gates.sh rust-catalog-parity'
 
@@ -225,3 +219,18 @@ steps:
     depends_on: [rust-build]
     commands:
       - 'bash ops/ci/woodpecker-gates.sh rust-behaviour-probes'
+
+  # LAST, not fourth as in build-test's own order.
+  #
+  # Same set of gates, one different edge. This is a 19-minute step and the
+  # six before it total about eight; on GitHub its position means that when
+  # it is red -- which it was on every run from 2026-09-16 to 2026-09-17 --
+  # `Catalog count parity`, `Validate repository` and `Build` do not run at
+  # all, which is the hiding the job's own --no-fail-fast comment complains
+  # about, one level up. Putting it last means a red suite costs the report
+  # of nothing else. Nothing is reordered WITHIN it.
+  - name: rust-workspace-test
+    image: bash
+    depends_on: [rust-behaviour-probes]
+    commands:
+      - 'bash ops/ci/woodpecker-gates.sh rust-workspace-test'

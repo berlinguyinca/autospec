@@ -36,11 +36,18 @@
 #     tools
 #   Clippy (lint)                          rust-clippy
 #   Test Linux ownership contracts         rust-ownership-contracts
-#   Test workspace                         rust-workspace-test
 #   Catalog count parity                   rust-catalog-parity
 #   Validate repository                    rust-validate
 #   Build                                  rust-build
 #   Test (behaviour probes)                rust-behaviour-probes
+#   Test workspace                         rust-workspace-test
+#
+# One edge differs from build-test's own order: the workspace suite runs
+# LAST rather than fourth. It is a 19-minute step and the six before it
+# total about eight, so on GitHub a red suite means `Catalog count parity`,
+# `Validate repository` and `Build` never run -- exactly the hiding that
+# job's own --no-fail-fast comment complains about, one level up. Nothing is
+# reordered within it.
 #
 # The gates share a workspace and a target directory and must therefore run in
 # SEQUENCE, unlike the six workstream gates above: concurrent cargo
@@ -84,30 +91,106 @@ BATS_COMMIT=b640ec3cf2c7c9cfc9e6351479261186f76eeec8
 AJV_CLI_VERSION=5.0.0
 LICENSE_CHECKER_VERSION=25.0.1
 
-# ── The cargo environment, and why none of it can be left at its default ────
+# ── The environment, and why none of it can be left at its default ──────────
 #
-# CARGO_HOME defaults to /usr/local/cargo inside this image, which is on the
-# READ-ONLY SIF. The first `cargo fetch` then dies with
+# THREE THINGS THIS BACKEND GETS WRONG FOR THIS SUITE, each of which was
+# measured as a specific set of failing tests on pipeline 7 rather than
+# guessed at.
 #
-#   error: could not create temp file ...: Read-only file system
+# 1. CARGO_HOME defaults to /usr/local/cargo inside this image, which is on
+#    the READ-ONLY SIF. The first `cargo fetch` dies with
 #
-# which names the filesystem and not the cause -- the same trap ci.def already
-# documents for RUSTUP_HOME. Both move into the workspace, which is node-local
-# ext4 on nvme and dies with the allocation. RUSTUP_HOME is deliberately left
-# alone: the pinned 1.91.0 toolchain is baked into the image and re-downloading
-# it per pipeline would be pure cost.
+#      error: could not create temp file ...: Read-only file system
 #
-# CARGO_BUILD_JOBS is capped BELOW the 8 CPUs the agent asks Slurm for. An
-# agent gets --mem=18G, and rustc's peak is per-codegen-unit: eight parallel
-# codegen jobs over a 531k-line workspace is an OOM-kill candidate, and an
-# OOM-killed run is unverified rather than red -- it reports a signal, not a
-# test result. Four is the number that has held elsewhere on this cluster.
+#    which names the filesystem and not the cause -- the same trap ci.def
+#    already documents for RUSTUP_HOME. It moves to node-local scratch.
+#
+#    NOT into the workspace, which is where it was first put and where it
+#    broke three repository-scanning gates: `.ci-cargo/registry/src/...`
+#    holds the unpacked sources of 189 crates, and the shell ratchet, the
+#    deadline ratchet and the block-expansion check all walk the repository
+#    tree. They then counted crc-catalog's generate_tests.sh and flume's
+#    tests as autospec's own -- "shell ratchet DRIFTED: 228530 counted lines
+#    against an allowlist of 227120". Anything a gate writes into the
+#    checkout is repository content as far as this repository's own gates are
+#    concerned. RUSTUP_HOME is deliberately left alone: the pinned 1.91.0
+#    toolchain is baked into the image and re-downloading it per pipeline
+#    would be pure cost.
+#
+# 2. HOME IS UNDER /tmp, AND AUTOSPEC REFUSES TO RUN FROM /tmp.
+#
+#    The agent puts a whole workflow -- workspace and home -- under
+#    /tmp/woodpecker-local-<n>/. harness.rs::temporary_path() treats /tmp,
+#    /var/tmp, /private/tmp, /private/var/tmp, /var/folders and $TMPDIR as
+#    temporary storage and safe_executable() refuses an executor harness
+#    found there:
+#
+#      executor harness is configured through temporary storage:
+#      /tmp/woodpecker-local-3053957323/home/.local/share/autospec-launch-tests/...
+#
+#    That is a real security property of the product -- a harness that can be
+#    swapped between validation and exec is the whole point of the trusted-
+#    executable check -- and eleven tests assert it. It is asserted about
+#    $HOME, so a harness installed anywhere cannot rescue it: the tests build
+#    their fixtures under HOME. GitHub Actions has HOME=/home/runner and
+#    never meets the rule.
+#
+#    So CI gets a home that is not temporary. The RULE IS NOT RELAXED and no
+#    test is skipped for it; the environment is made to match what the
+#    product requires of a real one.
+#
+# 3. CARGO_BUILD_JOBS is capped BELOW the 8 CPUs the agent asks Slurm for. An
+#    agent gets --mem=18G, and rustc's peak is per-codegen-unit: eight
+#    parallel codegen jobs over a 531k-line workspace is an OOM-kill
+#    candidate, and an OOM-killed run is unverified rather than red -- it
+#    reports a signal, not a test result. Four is the number that has held
+#    elsewhere on this cluster.
+#
+# CARGO_TARGET_DIR stays `target/` inside the workspace, as it is on GitHub:
+# it is gitignored and the repository scans already skip it.
+
+# The root under which each pipeline gets its non-temporary HOME. On the
+# operator path the agent binds, beside the gate journals, and overridable so
+# this is not a hard-coded cluster path for anyone else.
+AUTOSPEC_CI_HOME_ROOT="${AUTOSPEC_CI_HOME_ROOT:-/home/wohlgemuth/woodpecker/ci-home}"
+
+# Move HOME off temporary storage, and ONLY when it is on it. A developer
+# running `bash ops/ci/woodpecker-gates.sh rust-clippy` already has a real
+# home and must keep it -- silently relocating someone's HOME would be a
+# far worse surprise than a slow gate.
+rust_home() {
+    case "${HOME:-/tmp}" in
+        /tmp|/tmp/*|/var/tmp|/var/tmp/*|/private/tmp/*|/private/var/tmp/*|/var/folders/*) ;;
+        *) return 0 ;;
+    esac
+    if ! mkdir -p "$AUTOSPEC_CI_HOME_ROOT" 2> /dev/null || [ ! -w "$AUTOSPEC_CI_HOME_ROOT" ]; then
+        echo "WARN: $AUTOSPEC_CI_HOME_ROOT is not writable; HOME stays at ${HOME:-<unset>}," >&2
+        echo "      and the eleven trusted-harness tests will fail on temporary storage." >&2
+        return 0
+    fi
+    # Pipelines are numbered monotonically, so this directory is never shared
+    # with a concurrent run. Old ones are pruned rather than left to grow:
+    # only directories this function created, under a root it owns, older
+    # than two days -- an agent's walltime is four hours, so nothing live can
+    # match.
+    find "$AUTOSPEC_CI_HOME_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'autospec-*' \
+        -mtime +2 -exec rm -rf {} + 2> /dev/null || true
+    HOME="$AUTOSPEC_CI_HOME_ROOT/autospec-${CI_PIPELINE_NUMBER:-$$}"
+    mkdir -p "$HOME"
+    export HOME
+    echo "HOME relocated off temporary storage: $HOME"
+}
+
 rust_env() {
-    local root
-    root="$(pwd)"
-    CI_TOOLS="$root/.ci-tools"
-    CARGO_HOME="$root/.ci-cargo"
-    CARGO_TARGET_DIR="$root/target"
+    rust_home
+    # $HOME/.local/bin is exactly where build-test puts its pinned tools, and
+    # it is outside the checkout, which is what keeps the repository scans
+    # measuring this repository.
+    CI_TOOLS="$HOME/.local"
+    # Node-local scratch, outside the checkout: cargo has no opinion about
+    # temporary storage, and the registry is read hard during a build.
+    CARGO_HOME="${TMPDIR:-/tmp}/autospec-ci-cargo-${CI_PIPELINE_NUMBER:-$$}"
+    CARGO_TARGET_DIR="$(pwd)/target"
     export CI_TOOLS CARGO_HOME CARGO_TARGET_DIR
     export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
     export CARGO_TERM_COLOR=never

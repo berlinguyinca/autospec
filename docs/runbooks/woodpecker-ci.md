@@ -26,7 +26,7 @@ rather than seconds:
 
 | GitHub Actions job (`.github/workflows/rust.yml`) | Woodpecker steps | `woodpecker-gates.sh` arguments |
 | --- | --- | --- |
-| `build-test` | `rust-tools` → `rust-clippy` → `rust-ownership-contracts` → `rust-workspace-test` → `rust-catalog-parity` → `rust-validate` → `rust-build` → `rust-behaviour-probes` | the same eight names |
+| `build-test` | `rust-tools` → `rust-clippy` → `rust-ownership-contracts` → `rust-catalog-parity` → `rust-validate` → `rust-build` → `rust-behaviour-probes` → `rust-workspace-test` | the same eight names |
 
 `build-test` is the check `main`'s branch protection requires. Its last GitHub
 run was 2026-09-17 and it failed; nothing has produced the status since, so
@@ -85,11 +85,21 @@ defaulted in the script:
 | `WOODPECKER_JOURNAL_DIR`   | unset   | all (log journal)  |
 | `CARGO_BUILD_JOBS`         | `4`     | every `rust-*` gate |
 
-The `rust-*` gates also set three variables themselves, in `rust_env`, and
-none of them can be left at its default in this image: `CARGO_HOME` and
-`CARGO_TARGET_DIR` move into the workspace because the image's `CARGO_HOME`
-is on the read-only SIF, and `CI_TOOLS` (`.ci-tools`) is the one PATH entry
-the pinned tools install into. All three are gitignored.
+The `rust-*` gates set four more themselves, in `rust_env`, and none of them
+can be left at its default here. `AUTOSPEC_CI_HOME_ROOT`
+(`/home/wohlgemuth/woodpecker/ci-home`) is the only one meant to be
+overridden — see **Environment the image forces** below for what each is
+working around.
+
+| Variable       | Value in CI                                  |
+| -------------- | -------------------------------------------- |
+| `HOME`         | `$AUTOSPEC_CI_HOME_ROOT/autospec-<pipeline>` |
+| `CI_TOOLS`     | `$HOME/.local` (pinned tools in `bin/`)      |
+| `CARGO_HOME`   | `${TMPDIR:-/tmp}/autospec-ci-cargo-<pipeline>` |
+| `CARGO_TARGET_DIR` | `target/` in the workspace, as on GitHub |
+
+A developer running a gate by hand keeps their own `HOME`: it is relocated
+only when it is already on temporary storage.
 
 ## What an agent actually is
 
@@ -158,9 +168,26 @@ statement of what a working checkout needs.
 - `CARGO_HOME` defaults to `/usr/local/cargo`, which is on the **read-only**
   SIF. The first `cargo fetch` dies with `could not create temp file …:
   Read-only file system`, which names the filesystem and not the cause.
-  `CARGO_HOME` and `CARGO_TARGET_DIR` therefore move into the workspace.
+  It moves to node-local scratch — **not into the workspace**, which is where
+  it went first and where it broke three gates at once: an unpacked registry
+  at `.ci-cargo/registry/src/…` made the shell ratchet, the deadline ratchet
+  and the block-expansion check count 189 crates' sources as this
+  repository's (`shell ratchet DRIFTED: 228530 counted lines against an
+  allowlist of 227120`). Anything a gate writes into the checkout is
+  repository content as far as this repository's own gates are concerned.
   `RUSTUP_HOME` is left alone: the pinned 1.91.0 toolchain is baked into the
   image, and re-downloading it per pipeline would be pure cost.
+- **`HOME` is under `/tmp`, and autospec refuses to run from `/tmp`.** The
+  agent puts a whole workflow — workspace and home — under
+  `/tmp/woodpecker-local-<n>/`. `harness.rs::temporary_path()` treats `/tmp`,
+  `/var/tmp`, `/private/tmp`, `/private/var/tmp`, `/var/folders` and
+  `$TMPDIR` as temporary storage, and `safe_executable()` refuses an executor
+  harness found there. Eleven tests assert that rule, building their fixtures
+  under `HOME`, so no choice of install directory rescues them. GitHub has
+  `HOME=/home/runner` and never meets it. CI therefore gets a home that is
+  not temporary, under `$AUTOSPEC_CI_HOME_ROOT`, one directory per pipeline,
+  pruned after two days. The rule is not relaxed and no test is skipped for
+  it.
 - npm's global prefix is `/usr/local`, on the same read-only SIF, so the npm
   tools install with `--prefix` into the workspace and are symlinked onto the
   one PATH entry the gates add.
