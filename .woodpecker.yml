@@ -176,8 +176,8 @@ steps:
   #
   # semgrep is NOT installed: `build-test` pins it as a docker image digest
   # and there is no docker in this image. See gate_rust_tools in
-  # ops/ci/woodpecker-gates.sh for what was rejected and why, and the PR that
-  # added these steps for what it costs.
+  # ops/ci/woodpecker-rust-gates.sh for what was rejected and why, and the PR
+  # that added these steps for what it costs.
   - name: rust-tools
     image: bash
     depends_on: [checkout]

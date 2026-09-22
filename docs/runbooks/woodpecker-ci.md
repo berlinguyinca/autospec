@@ -36,10 +36,16 @@ names so a failure is attributable, and running in sequence because they share
 one cargo target directory. See **The `build-test` job** below for the parts
 of it that do not run here.
 
-Configuration lives in two files:
+Configuration lives in three files:
 
 - `.woodpecker.yml` — when the pipeline runs, the checkout, and the step fan-out.
-- `ops/ci/woodpecker-gates.sh` — every gate's actual commands.
+- `ops/ci/woodpecker-gates.sh` — the TeamCity gates' actual commands, plus the
+  dispatch table and the shared helpers.
+- `ops/ci/woodpecker-rust-gates.sh` — the eight `rust-*` gates. **Sourced** by
+  the file above, never run on its own. It is a separate file because the
+  file-size ratchet this repository gates on caps a file at 600 lines, and the
+  two together would be ~875; the split follows the seam between one GitHub
+  Actions job and the TeamCity migration.
 
 ## Running a gate by hand
 
@@ -77,6 +83,13 @@ defaulted in the script:
 | `HARD_LOC`                 | `2000`  | file-size-ratchet  |
 | `AUTOSPEC_PR_SIZE_STRICT`  | `0`     | stack-guard        |
 | `WOODPECKER_JOURNAL_DIR`   | unset   | all (log journal)  |
+| `CARGO_BUILD_JOBS`         | `4`     | every `rust-*` gate |
+
+The `rust-*` gates also set three variables themselves, in `rust_env`, and
+none of them can be left at its default in this image: `CARGO_HOME` and
+`CARGO_TARGET_DIR` move into the workspace because the image's `CARGO_HOME`
+is on the read-only SIF, and `CI_TOOLS` (`.ci-tools`) is the one PATH entry
+the pinned tools install into. All three are gitignored.
 
 ## What an agent actually is
 
@@ -113,7 +126,7 @@ sqlite `log_entries` table holds the same output when the step log survived.
 
 `build-test` installs its own tools rather than trusting the runner image,
 verifying each archive's sha256 before unpacking it. That pattern transfers
-unchanged; the versions and digests in `ops/ci/woodpecker-gates.sh` are copied
+unchanged; the versions and digests in `ops/ci/woodpecker-rust-gates.sh` are copied
 from `.github/workflows/rust.yml` and must be changed in both places at once,
 or the two CIs test different software while both report green.
 
