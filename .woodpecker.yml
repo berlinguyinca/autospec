@@ -45,8 +45,8 @@
 # only architecture-fitness, python-suites and security-workstream also ran
 # on main, and the push rule below keeps that.
 #
-# The branch is the literal `main`, not ${CI_REPO_DEFAULT_BRANCH}. A `when`
-# clause is evaluated when the pipeline is MATCHED, before any step
+# The branch is the literal `main`, not a CI_REPO_DEFAULT_BRANCH reference. A
+# `when` clause is evaluated when the pipeline is MATCHED, before any step
 # environment exists; an unsubstituted variable there compares against its own
 # text, matches nothing, and the rule is silently dead. A literal that is wrong
 # the day the default branch is renamed is at least visible in this file.
@@ -83,14 +83,20 @@ steps:
       #
       # Not shallow either: merge-base needs the history the two refs share.
       #
-      # `$target`, NOT `${target}`. Woodpecker substitutes `${...}` in a
-      # command string against the PIPELINE's variables before the shell ever
-      # sees it. `target` is a shell variable set on the line below, so
-      # Woodpecker does not know it, substitutes the empty string, and hands
-      # the shell `+refs/heads/:refs/remotes/origin/`. Pipeline 1 of this repo
-      # died exactly that way, and the only clue in the log was a branch name
-      # that had vanished. Unbraced `$target` is not substitution syntax and
-      # reaches the shell intact.
+      # Write `$target` unbraced, never the dollar-brace form.
+      #
+      # Woodpecker expands a dollar-brace reference against the PIPELINE's own
+      # variables before the shell ever sees the command. `target` is a shell
+      # variable set on the line below, so Woodpecker does not know it, expands
+      # it to nothing, and hands the shell `+refs/heads/:refs/remotes/origin/`.
+      # Pipeline 1 of this repo died exactly that way, and the only clue in the
+      # log was a branch name that had silently vanished. An unbraced `$target`
+      # is not expansion syntax and reaches the shell intact.
+      #
+      # The same expansion runs over the RAW YAML, comments included -- so a
+      # dollar-brace containing anything that is not a variable name fails the
+      # whole pipeline with "unable to parse variable name" and no line number.
+      # That is how pipeline 2 died, on a comment explaining pipeline 1.
       - 'target="${CI_COMMIT_TARGET_BRANCH:-$CI_REPO_DEFAULT_BRANCH}"'
       # An empty base is a bug in this step, not a branch named "". Say so
       # here rather than letting git report an invalid refspec.
