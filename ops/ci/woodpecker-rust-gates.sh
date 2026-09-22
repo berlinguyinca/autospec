@@ -208,7 +208,27 @@ prune_ci_homes() {
     done
 }
 
+# A LOCALE THE IMAGE ACTUALLY HAS.
+#
+# The Slurm environment exports LANG=en_US.UTF-8 and the agent passes it down,
+# but that locale is not generated in this Debian image -- `locale -a` lists
+# only C, C.utf8 and POSIX. Every perl invocation then writes five lines of
+#
+#   perl: warning: Setting locale failed.
+#
+# to stderr, and that is not cosmetic here: check_block_expansion hashes with
+# `shasum`, which IS a perl script, and asserts the exact byte length of the
+# check's stderr. The warning made a 163-byte message 705 bytes long and
+# failed block_expansion_rejects_markered_member_without_golden -- in
+# rust-behaviour-probes, in the workspace suite, and inside `autospec
+# validate`. A GitHub runner has the locale it advertises and never sees it.
+rust_locale() {
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+}
+
 rust_env() {
+    rust_locale
     rust_home
     # $HOME/.local/bin is exactly where build-test puts its pinned tools, and
     # it is outside the checkout, which is what keeps the repository scans

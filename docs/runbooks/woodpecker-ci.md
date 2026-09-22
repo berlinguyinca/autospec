@@ -178,6 +178,13 @@ statement of what a working checkout needs.
   repository content as far as this repository's own gates are concerned.
   `RUSTUP_HOME` is left alone: the pinned 1.91.0 toolchain is baked into the
   image, and re-downloading it per pipeline would be pure cost.
+- **`LANG=en_US.UTF-8` is inherited but not generated.** Slurm exports it, the
+  image has only `C`, `C.utf8` and `POSIX`, and every `perl` invocation then
+  writes five `Setting locale failed` lines to stderr. That is not cosmetic:
+  `check_block_expansion` hashes with `shasum`, a perl script, and asserts the
+  exact byte length of the check's stderr — the warning turned a 163-byte
+  message into 705 and failed the check in three places at once. The rust
+  gates set `LC_ALL=C.UTF-8`.
 - **`HOME` is under `/tmp`, and autospec refuses to run from `/tmp`.** The
   agent puts a whole workflow — workspace and home — under
   `/tmp/woodpecker-local-<n>/`. `harness.rs::temporary_path()` treats `/tmp`,
