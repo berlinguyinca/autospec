@@ -26,7 +26,7 @@ rather than seconds:
 
 | GitHub Actions job (`.github/workflows/rust.yml`) | Woodpecker steps | `woodpecker-gates.sh` arguments |
 | --- | --- | --- |
-| `build-test` | `rust-tools` → `rust-clippy` → `rust-ownership-contracts` → `rust-catalog-parity` → `rust-validate` → `rust-build` → `rust-behaviour-probes` → `rust-workspace-test` | the same eight names |
+| `build-test` | `rust-tools` → `rust-clippy` → `rust-ownership-contracts` → `rust-catalog-parity` → `rust-build` → `rust-behaviour-probes` → then `rust-validate` and `rust-workspace-test` in parallel | the same eight names |
 
 `build-test` is the check `main`'s branch protection requires. Its last GitHub
 run was 2026-09-17 and it failed; nothing has produced the status since, so
@@ -148,6 +148,7 @@ or the two CIs test different software while both report green.
 | `semgrep` | **docker image digest** | **not installed — see below** |
 | `gh` | preinstalled on the runner | sha256-pinned tarball |
 | `ripgrep` | `sudo apt-get install ripgrep` | sha256-pinned tarball |
+| `yq` | preinstalled on the runner | sha256-pinned tarball |
 | `bats` | `sudo apt-get install bats` | cloned at its tag, verified by commit |
 | `ajv`, `license-checker` | npm, via `dev-bootstrap.sh` | npm, version-pinned |
 | `pytest`, `pyyaml` | `sudo apt-get install python3-…` | already in the image |

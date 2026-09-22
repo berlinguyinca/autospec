@@ -37,23 +37,24 @@
 #   Clippy (lint)                          rust-clippy
 #   Test Linux ownership contracts         rust-ownership-contracts
 #   Catalog count parity                   rust-catalog-parity
-#   Validate repository                    rust-validate
 #   Build                                  rust-build
 #   Test (behaviour probes)                rust-behaviour-probes
-#   Test workspace                         rust-workspace-test
+#   Validate repository                    rust-validate       \ parallel,
+#   Test workspace                         rust-workspace-test /  and last
 #
-# One edge differs from build-test's own order: the workspace suite runs
-# LAST rather than fourth. It is a 19-minute step and the six before it
-# total about eight, so on GitHub a red suite means `Catalog count parity`,
-# `Validate repository` and `Build` never run -- exactly the hiding that
-# job's own --no-fail-fast comment complains about, one level up. Nothing is
-# reordered within it.
+# THE ORDER IS NOT build-test's, and that is the point. On GitHub the
+# workspace suite is fourth and `Validate repository` seventh, so a red suite
+# means validate and build never run at all -- on main they had not executed
+# in CI for as long as one test had been failing, which is the job's own
+# --no-fail-fast complaint one level up. Here the six cheap gates run first
+# and the two long ones run in parallel at the end, so a red one never costs
+# the report of the other. NOTHING IS REORDERED WITHIN A GATE.
 #
-# The gates share a workspace and a target directory and must therefore run in
-# SEQUENCE, unlike the six workstream gates above: concurrent cargo
-# invocations serialise on the target-directory lock anyway, and doing it by
-# declaration makes the wait visible in the pipeline instead of hidden inside
-# a step.
+# The cheap gates are a chain rather than a fan-out because they share one
+# cargo target directory: run concurrently they would only queue on cargo's
+# build lock, with the wait hidden inside a step instead of shown in the
+# pipeline. The two leaves are safe in parallel because everything they need
+# is already compiled by the gates before them.
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Versions and digests, lifted from .github/workflows/rust.yml unchanged.
@@ -82,6 +83,13 @@ GH_VERSION=2.81.0
 GH_SHA256=d507c82e3ae47af875b93472f39e01cbf9f85808ec0a69751e0932a43514d7ff
 RIPGREP_VERSION=14.1.1
 RIPGREP_SHA256=4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e
+# yq is preinstalled on a GitHub runner and is in install.sh's
+# AUTOSPEC_SYSTEM_TOOLS. Without it `autospec validate` fails
+# check_autospec_fleet_enabled_false and check_autospec_sweep_enabled_false:
+# both bats suites drive scripts/fleet-run.sh, which reads autospec-fleet.yml
+# with yq, and the suite reports only `[ "$status" -eq 0 ]' failed.
+YQ_VERSION=4.47.1
+YQ_SHA256=7583d471d9bfe88e32005e9d287952382df0469135f691e044443f610d707f4d
 # bats-core publishes no binary asset and a GitHub source-archive tarball is
 # regenerated on demand, so its sha256 is not a stable pin. The tag's COMMIT
 # is, and it is the stronger one: a moved tag changes it.
@@ -169,16 +177,35 @@ rust_home() {
         return 0
     fi
     # Pipelines are numbered monotonically, so this directory is never shared
-    # with a concurrent run. Old ones are pruned rather than left to grow:
-    # only directories this function created, under a root it owns, older
-    # than two days -- an agent's walltime is four hours, so nothing live can
-    # match.
-    find "$AUTOSPEC_CI_HOME_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'autospec-*' \
-        -mtime +2 -exec rm -rf {} + 2> /dev/null || true
+    # with a concurrent run. Pruning old ones is a separate, announced step in
+    # gate_rust_tools -- not here, which every gate calls.
     HOME="$AUTOSPEC_CI_HOME_ROOT/autospec-${CI_PIPELINE_NUMBER:-$$}"
     mkdir -p "$HOME"
     export HOME
     echo "HOME relocated off temporary storage: $HOME"
+}
+
+# Old per-pipeline homes, pruned ONCE per pipeline and never silently.
+#
+# This deletes under a path the operator owns, so it says what it is about to
+# remove first, matches only the directories rust_home creates, and only ones
+# older than two days -- an agent's walltime is four hours, so nothing live
+# can match. Set AUTOSPEC_CI_HOME_PRUNE=0 to turn it off and prune by hand.
+prune_ci_homes() {
+    [ "${AUTOSPEC_CI_HOME_PRUNE:-1}" = "1" ] || { echo "ci-home prune: disabled"; return 0; }
+    [ -d "$AUTOSPEC_CI_HOME_ROOT" ] || return 0
+    local stale
+    stale="$(find "$AUTOSPEC_CI_HOME_ROOT" -mindepth 1 -maxdepth 1 -type d \
+        -name 'autospec-*' -mtime +2 2> /dev/null || true)"
+    if [ -z "$stale" ]; then
+        echo "ci-home prune: nothing older than 2 days under $AUTOSPEC_CI_HOME_ROOT"
+        return 0
+    fi
+    echo "ci-home prune: removing"
+    printf '%s\n' "$stale" | sed 's/^/  /'
+    printf '%s\n' "$stale" | while IFS= read -r dir; do
+        [ -n "$dir" ] && rm -rf "$dir"
+    done
 }
 
 rust_env() {
@@ -212,6 +239,7 @@ fetch_verified() {
 gate_rust_tools() {
     step "pinned executor integration tools"
     rust_env
+    prune_ci_homes
 
     local tmp
     tmp="$(mktemp -d)"
@@ -274,6 +302,14 @@ gate_rust_tools() {
     # So semgrep is absent, the gates that need it are named in the PR body
     # and in the issue linked from it, and TeamCity is not involved either
     # way -- this is a GitHub Actions job, and GitHub keeps asserting it.
+    echo "-- yq ${YQ_VERSION}"
+    curl --fail --location --silent --show-error \
+        "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64.tar.gz" \
+        --output "$tmp/yq.tar.gz"
+    printf '%s  %s\n' "$YQ_SHA256" "$tmp/yq.tar.gz" | sha256sum --check
+    tar -xzf "$tmp/yq.tar.gz" -C "$tmp" ./yq_linux_amd64
+    mv -f "$tmp/yq_linux_amd64" "$CI_TOOLS/bin/yq"
+
     echo "-- semgrep: NOT INSTALLED (pinned as a docker image; no docker here)"
 
     echo "-- bats ${BATS_TAG}, ajv-cli ${AJV_CLI_VERSION}, license-checker ${LICENSE_CHECKER_VERSION}"
@@ -317,6 +353,7 @@ gate_rust_tools() {
     trivy --version | head -1
     gh --version | head -1
     rg --version | head -1
+    yq --version
     bats --version
     # ajv and license-checker are asserted differently on purpose. Neither has
     # a usable `--version`: `ajv --version` exits 2 with a usage message, and

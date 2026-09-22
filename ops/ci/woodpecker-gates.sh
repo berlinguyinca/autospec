@@ -496,7 +496,7 @@ gate_security_workstream() {
 # in sequence, in the order below, because they share one target directory.
 PIPELINE_GATES="accessibility file-size-ratchet python-suites security-workstream stack-guard ux-ui-workstream
                 rust-tools rust-clippy rust-ownership-contracts rust-catalog-parity
-                rust-validate rust-build rust-behaviour-probes rust-workspace-test"
+                rust-build rust-behaviour-probes rust-validate rust-workspace-test"
 KNOWN_GATES="$PIPELINE_GATES architecture-fitness"
 
 run_gate() {
