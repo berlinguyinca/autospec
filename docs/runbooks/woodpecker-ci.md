@@ -62,8 +62,9 @@ A Woodpecker agent here is a Slurm job on a Rocky 9 node, but the agent execs
 itself into an Apptainer image (`woodpecker/images/ci.sif`) and runs every step
 as a child process. **A step therefore sees the image, not the node**:
 
-- Debian 13 (trixie), `python3` 3.13.5, plus `git`, `jq`, `node`, `npm`, `cargo`.
-- **Not** present: `gh`, `shellcheck`, `python3.12`.
+- Debian 13 (trixie), `python3` 3.13.5, plus `git`, `jq`, `node`, `npm`, `cargo`,
+  and `shellcheck` 0.10.0 (added by the image rebuild of 2026-09-22).
+- **Not** present: `gh`, `python3.12`.
 - No docker, no `sudo`, no `apt`. Anything a step needs is either in the image
   already or installed by the step into a temp dir (a venv is fine).
 - One container per *workflow*, not per step: all steps share a workspace.
@@ -107,6 +108,11 @@ These are deliberate gaps, not oversights. Each has an issue.
   interpreter. The assertion is kept and the number moved, so an image rebuild
   onto a different python fails loudly instead of silently changing what the
   suites exercise.
+- **No gate runs `shellcheck`.** It is in the image as of 2026-09-22, but none
+  of the seven TeamCity configurations used it — the two that lint shell run
+  `bash -n` and stop there. Adding it would be a new check arriving under cover
+  of a migration, and with 400+ tracked shell scripts the severity floor it
+  starts at is a decision of its own. `bash -n` is reproduced as-is.
 - **`latency_budget_validate_fast` is excluded**, as it was on TeamCity. It is
   `command_max_ms` against `/usr/bin/true` with a 50 ms budget: it measures
   process-spawn overhead on whichever node Slurm picked, not anything about

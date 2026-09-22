@@ -19,9 +19,16 @@
 #
 #  * `image:` is a HOST executable, not a container image: `bash` runs the
 #    job's own shell. There is no docker, no apt and no sudo.
-#  * A step sees Debian 13 (trixie) with python3 3.13.5, git, jq, node and
-#    cargo. It does NOT see gh, shellcheck or python3.12. Two gates are
-#    affected; both say so at the point of use and in the PR that added this.
+#  * A step sees Debian 13 (trixie) with python3 3.13.5, git, jq, node,
+#    cargo and (since the image rebuild of 2026-09-22) shellcheck 0.10.0.
+#    It does NOT see gh or python3.12. Two gates are affected; both say so
+#    at the point of use and in the PR that added this.
+#  * Nothing here runs shellcheck. None of the seven TeamCity configurations
+#    did -- the two that lint shell run `bash -n` and nothing more -- so
+#    adding it would be a NEW gate arriving under cover of a migration, and
+#    a repo with 400+ tracked shell scripts deserves that as its own change
+#    with its own severity floor. The tool is available when someone wants
+#    to make that call.
 #  * The clone plugin fails invisibly on this backend (no step logs for
 #    plugins), so skip_clone + a plain git checkout step, with the forge
 #    credential staged at /etc/woodpecker-git-credentials.
@@ -75,8 +82,21 @@ steps:
       # every PR scan died on `merge-base origin/main HEAD`.
       #
       # Not shallow either: merge-base needs the history the two refs share.
+      #
+      # `$target`, NOT `${target}`. Woodpecker substitutes `${...}` in a
+      # command string against the PIPELINE's variables before the shell ever
+      # sees it. `target` is a shell variable set on the line below, so
+      # Woodpecker does not know it, substitutes the empty string, and hands
+      # the shell `+refs/heads/:refs/remotes/origin/`. Pipeline 1 of this repo
+      # died exactly that way, and the only clue in the log was a branch name
+      # that had vanished. Unbraced `$target` is not substitution syntax and
+      # reaches the shell intact.
       - 'target="${CI_COMMIT_TARGET_BRANCH:-$CI_REPO_DEFAULT_BRANCH}"'
-      - 'git fetch --no-tags origin "+refs/heads/${target}:refs/remotes/origin/${target}"'
+      # An empty base is a bug in this step, not a branch named "". Say so
+      # here rather than letting git report an invalid refspec.
+      - 'test -n "$target" || { echo "no base branch: CI_COMMIT_TARGET_BRANCH and CI_REPO_DEFAULT_BRANCH are both empty" >&2; exit 1; }'
+      - 'echo "base branch: $target"'
+      - 'git fetch --no-tags origin "+refs/heads/$target:refs/remotes/origin/$target"'
       - 'git --no-pager log --oneline -1'
 
   # The six gates below are independent of each other and depend only on the

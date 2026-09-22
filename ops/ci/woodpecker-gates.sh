@@ -37,8 +37,13 @@
 # execs itself inside an Apptainer image (woodpecker/images/ci.sif) and runs
 # every step as a child process, so a step sees the IMAGE, not the node:
 #
-#   Debian 13 (trixie), python3 = 3.13.5, git, jq, node, npm, cargo
-#   NOT present: gh, shellcheck, python3.12
+#   Debian 13 (trixie), python3 = 3.13.5, git, jq, node, npm, cargo, and
+#   shellcheck 0.10.0 since the image rebuild of 2026-09-22
+#   NOT present: gh, python3.12
+#
+# No gate below runs shellcheck: none of the seven TeamCity configurations
+# did, so wiring it in here would be a new check smuggled into a migration.
+# `bash -n`, which two of them do run, is reproduced.
 #
 # There is one container per workflow, not one per step, so all the steps
 # below share a workspace and a process tree. Nothing here may assume
