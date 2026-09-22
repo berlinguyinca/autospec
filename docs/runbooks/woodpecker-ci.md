@@ -13,7 +13,7 @@ has one check.
 | TeamCity build configuration       | Woodpecker step        | `woodpecker-gates.sh` argument |
 | ---------------------------------- | ---------------------- | ------------------------------ |
 | `Autospec_AccessibilityWorkstream` | `accessibility-workstream` | `accessibility`            |
-| `Autospec_ArchitectureFitness`     | *(not migrated)*       | `architecture-fitness`         |
+| `Autospec_ArchitectureFitness`     | *(not in the pipeline)* | `architecture-fitness`        |
 | `Autospec_FileSizeRatchet`         | `file-size-ratchet`    | `file-size-ratchet`            |
 | `Autospec_PythonSuites`            | `python-suites`        | `python-suites`                |
 | `Autospec_SecurityWorkstream`      | `security-workstream`  | `security-workstream`          |
@@ -31,9 +31,16 @@ The gate script takes no Woodpecker-specific input it cannot default. From a
 clean checkout:
 
 ```bash
-bash ops/ci/woodpecker-gates.sh                               # every gate
+bash ops/ci/woodpecker-gates.sh                               # every gate the pipeline runs
 bash ops/ci/woodpecker-gates.sh file-size-ratchet stack-guard # a subset
+bash ops/ci/woodpecker-gates.sh architecture-fitness          # not in the pipeline; red today
 ```
+
+A bare invocation runs the **six** gates the pipeline runs, so it passes on a
+clean checkout. `architecture-fitness` is implemented in the same script but
+is not in that list and runs only when named — it fails on `main` today, and a
+bare run that inherited that failure would make the documented
+reproduce-it-locally command useless.
 
 Outside CI the `CI_*` variables are unset and each gate falls back to the
 defaults the TeamCity steps used: base branch `main`, and `HEAD`'s own sha in

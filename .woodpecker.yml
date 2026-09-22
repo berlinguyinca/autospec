@@ -37,10 +37,16 @@
 # Every TeamCity config here was PR-driven (the pullRequests build feature);
 # only architecture-fitness, python-suites and security-workstream also ran
 # on main, and the push rule below keeps that.
+#
+# The branch is the literal `main`, not ${CI_REPO_DEFAULT_BRANCH}. A `when`
+# clause is evaluated when the pipeline is MATCHED, before any step
+# environment exists; an unsubstituted variable there compares against its own
+# text, matches nothing, and the rule is silently dead. A literal that is wrong
+# the day the default branch is renamed is at least visible in this file.
 when:
   - event: [pull_request, manual]
   - event: push
-    branch: ${CI_REPO_DEFAULT_BRANCH}
+    branch: main
 
 skip_clone: true
 

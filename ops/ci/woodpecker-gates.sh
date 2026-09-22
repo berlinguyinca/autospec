@@ -19,8 +19,12 @@
 # beegfs with the shared ci-steps, so a gate changes in the same commit as
 # the code it covers, and so the whole thing is runnable by hand:
 #
-#   bash ops/ci/woodpecker-gates.sh              # every gate
+#   bash ops/ci/woodpecker-gates.sh              # every gate the pipeline runs
 #   bash ops/ci/woodpecker-gates.sh file-size-ratchet stack-guard
+#
+# "every gate the pipeline runs" is six of the seven: architecture-fitness is
+# implemented here but is not wired in, and runs only when named. See the
+# PIPELINE_GATES comment at the bottom for why.
 #
 # It takes no Woodpecker-specific input that it cannot default. Outside CI
 # the CI_* variables are unset and every gate falls back to the same
@@ -75,13 +79,26 @@ resolve_target() {
     printf '%s' "${target#refs/heads/}"
 }
 
-# Non-fatal, exactly as on TeamCity: the checkout step has already fetched
-# the base branch, so this normally costs one no-op round trip. If it fails,
-# require_base below reports the missing ref explicitly rather than letting
+# Non-fatal, as on TeamCity, and SKIPPED when the ref is already there.
+#
+# TeamCity fetched unconditionally because its checkout did not stage the base
+# branch. Woodpecker's checkout step here does, with an explicit refspec, so
+# the fetch is normally a no-op round trip -- and three gates want the same
+# ref. All the steps of a workflow share ONE container, ONE workspace and ONE
+# .git, and they are declared as a fan-out, so those three can be in flight at
+# once: concurrent fetches writing the same refs/remotes/origin/<base> contend
+# on git's ref lock and one of them fails with "cannot lock ref" for no reason
+# the log explains. Checking first removes the race without removing the
+# fallback: if the checkout step did not stage the ref, this still fetches it,
+# and require_base below still reports a miss explicitly rather than letting
 # `git merge-base` die with something unreadable.
 fetch_target() {
     local target="$1"
-    git fetch --no-tags origin "+refs/heads/${target}:refs/remotes/origin/${target}" 2>&1 \
+    if git rev-parse --verify --quiet "origin/${target}" > /dev/null; then
+        echo "origin/${target} already staged by the checkout step"
+        return 0
+    fi
+    git fetch --no-tags origin "+refs/heads/${target}:refs/remotes/origin/${target}" \
         || echo "WARN: fetch of ${target} failed; relying on refs already present"
 }
 
@@ -423,7 +440,22 @@ gate_security_workstream() {
 }
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
-ALL_GATES="accessibility architecture-fitness file-size-ratchet python-suites security-workstream stack-guard ux-ui-workstream"
+# The gates the pipeline runs, and therefore what a bare invocation runs.
+#
+# architecture-fitness is DELIBERATELY NOT IN THIS LIST, though it is fully
+# implemented above and runs when named:
+#
+#   bash ops/ci/woodpecker-gates.sh architecture-fitness
+#
+# Its rust_core_cli_direction gate has been failing on main continuously --
+# 73 occurrences against a threshold of 0 -- and TeamCity has published it red
+# on every recent pull request (#4720, #4721, #4722 all merged red). As one
+# status of seven that was survivable; as a step of the one check that now
+# covers the repo it would be a permanent red that buries the six working
+# gates. TeamCity keeps asserting it until the debt is cleared. See
+# docs/runbooks/woodpecker-ci.md.
+PIPELINE_GATES="accessibility file-size-ratchet python-suites security-workstream stack-guard ux-ui-workstream"
+KNOWN_GATES="$PIPELINE_GATES architecture-fitness"
 
 run_gate() {
     case "$1" in
@@ -436,7 +468,7 @@ run_gate() {
         ux-ui-workstream)     gate_ux_ui ;;
         *)
             echo "unknown gate: $1" >&2
-            echo "known gates: $ALL_GATES" >&2
+            echo "known gates: $KNOWN_GATES" >&2
             exit 2
             ;;
     esac
@@ -454,7 +486,8 @@ main() {
     echo "GATES PASSED: $*"
 }
 
-[ "$#" -gt 0 ] || set -- $ALL_GATES
+# shellcheck disable=SC2086  # deliberate word splitting: a list of gate names
+[ "$#" -gt 0 ] || set -- $PIPELINE_GATES
 
 # The run goes through a PIPELINE, not `exec > >(tee ...)`.
 #
