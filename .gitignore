@@ -78,3 +78,16 @@ batch-donel.json
 # agent worktrees (transient) and python build artifacts
 .claude/worktrees/
 *.egg-info/
+
+# Woodpecker CI scratch (ops/ci/woodpecker-gates.sh).
+#
+# The rust gates' cargo home and tool directory are deliberately NOT here:
+# anything a gate writes into the checkout is repository content as far as
+# this repository's own scanning gates are concerned, and an unpacked crate
+# registry under the workspace broke the shell ratchet, the deadline ratchet
+# and the block-expansion check at once. They live outside the checkout;
+# these entries stay as a guard against that being undone.
+.ci-tools/
+.ci-cargo/
+.ci-venv/
+.af-registry-woodpecker.yml
