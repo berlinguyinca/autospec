@@ -165,8 +165,9 @@ Each R-id lists repo, reuse, and what is new. P0 first; independent items run in
   both repos' tests. *Repo:* pi-engineering-web (+ fixture in pi-engineering).
 
 - **R-WATCH defaults (from the zip, adjustable per machine).** Test silence warning 2 min; progress
-  investigation 5 min; confirmed-stall recovery target 10 min; command wall timeout 30 min unless tagged
-  long-running with an explicit deadline. CPU use alone is not progress; detect child processes, I/O wait,
+  investigation 5 min; confirmed-stall recovery target 10 min. There is NO command wall-clock timeout: the owner
+  rejected the zip's 30-minute limit (2026-10-15) and missions are not bound by wall-clock windows
+  (pi-engineering docs/mission-time-limits.md); a command is cut off only for going silent. CPU use alone is not progress; detect child processes, I/O wait,
   blocked test cases, deadlocks, queue waits and starvation. Capture bounded evidence (process tree, last
   output) before killing an owned process group. Two identical stalls quarantine the test and block the
   merges it affects — quarantine is never a false green. Test runner: structured events, `cargo-nextest`
