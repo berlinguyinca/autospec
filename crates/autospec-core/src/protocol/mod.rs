@@ -5,6 +5,8 @@
 //! an unknown required extension, a missing envelope field or a malformed one
 //! is an error, and no part of the message is applied.
 
+pub mod codegen;
+pub mod generated;
 pub mod negotiate;
 pub mod schema_ir;
 pub mod sequence;
