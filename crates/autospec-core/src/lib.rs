@@ -129,6 +129,7 @@ pub mod post_merge;
 pub mod prefilter_scope;
 pub mod procedure;
 pub mod process_evidence;
+pub mod protocol;
 // Unix-only by design: pattern-based termination is built on `ps`, `pgrep`,
 // and `nix::sys::signal::kill` — the self-safety helper behind
 // `autospec process-kill` (issue #4448). The platform matrix for this
