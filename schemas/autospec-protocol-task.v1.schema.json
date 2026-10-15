@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-protocol-task.v1.schema.json",
+  "title": "autospec protocol task v1",
+  "description": "A unit of work in a mission DAG. Each task has exactly one executor. Built on the envelope in autospec-protocol-envelope.v1.schema.json; only the keyword subset in docs/contracts/autospec-protocol-v1.md section Schema subset is used.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol_version",
+    "idempotency_key",
+    "mission_id",
+    "sequence",
+    "required_extensions",
+    "task_id",
+    "depends_on",
+    "state",
+    "executor",
+    "affected_surfaces"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "autospec.protocol.task.v1",
+      "description": "Always autospec.protocol.task.v1."
+    },
+    "protocol_version": {
+      "$ref": "#/$defs/protocol_version"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/idempotency_key"
+    },
+    "mission_id": {
+      "$ref": "#/$defs/mission_id"
+    },
+    "sequence": {
+      "$ref": "#/$defs/sequence"
+    },
+    "required_extensions": {
+      "$ref": "#/$defs/required_extensions"
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    },
+    "task_id": {
+      "type": "string",
+      "description": "Stable task identifier."
+    },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "task_id values that must be VERIFIED before this task may start."
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "DEFINED",
+        "BLOCKED",
+        "READY",
+        "LEASED",
+        "RUNNING",
+        "AWAITING_TEST",
+        "AWAITING_REVIEW",
+        "CHANGES_REQUESTED",
+        "FAILED_RETRYABLE",
+        "FAILED_TERMINAL",
+        "SUPERSEDED",
+        "VERIFIED"
+      ],
+      "description": "Task lifecycle state; the wire names of TaskState in crates/autospec-core/src/initiative/task.rs."
+    },
+    "executor": {
+      "type": "string",
+      "enum": [
+        "pi-local",
+        "autospec-managed"
+      ],
+      "description": "Exactly one executor per task. Switching executor needs quiescence, durable reconciliation and a higher fencing generation."
+    },
+    "affected_surfaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Repository path the task changes."
+          },
+          "symbols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Symbols within the path, when known."
+          }
+        }
+      },
+      "description": "Surfaces the task changes, used for overlap and conflict checks."
+    },
+    "exclusivity": {
+      "type": "string",
+      "description": "Exclusivity key. Two live tasks may not share one. Absent when the task needs none."
+    }
+  },
+  "$defs": {
+    "protocol_version": {
+      "title": "protocol version",
+      "description": "Protocol major version this message was produced under. It must equal the version both peers negotiated (highest common supported_versions entry); otherwise the reader fails closed with PROTOCOL_VERSION_UNSUPPORTED.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "idempotency_key": {
+      "title": "idempotency key",
+      "description": "Producer-chosen key, unique within one mission_id. Redelivery of the same key with the same sequence is a duplicate and must not repeat any effect. Reusing a key at a different sequence is an error.",
+      "type": "string"
+    },
+    "mission_id": {
+      "title": "mission identifier",
+      "description": "Identifier of the mission whose ordered stream this message belongs to. Sequence numbers are scoped to this value.",
+      "type": "string"
+    },
+    "sequence": {
+      "title": "per-mission sequence",
+      "description": "Monotonic position in the mission stream. It starts at 1 and advances by exactly 1 with no gaps, as the evaluation journal does.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "required_extensions": {
+      "title": "required extensions",
+      "description": "Names of extensions keys the reader must understand. A name the reader does not understand makes the whole message UNKNOWN_REQUIRED_FIELD and no part of it is applied. Always present; an empty array means none.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extensions": {
+      "title": "optional extensions",
+      "description": "The only place optional unknown data may live. Keys not named in required_extensions are ignored by a reader that does not understand them; they never carry data a reader must act on.",
+      "type": "object",
+      "default": {}
+    }
+  }
+}

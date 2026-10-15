@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-protocol-execution.v1.schema.json",
+  "title": "autospec protocol execution v1",
+  "description": "One attempt to run a task on one worker, with the evidence that the agent actually started. Built on the envelope in autospec-protocol-envelope.v1.schema.json; only the keyword subset in docs/contracts/autospec-protocol-v1.md section Schema subset is used.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol_version",
+    "idempotency_key",
+    "mission_id",
+    "sequence",
+    "required_extensions",
+    "execution_id",
+    "attempt_id",
+    "task_id",
+    "worker_id",
+    "executor",
+    "model_policy",
+    "start_evidence",
+    "status"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "autospec.protocol.execution.v1",
+      "description": "Always autospec.protocol.execution.v1."
+    },
+    "protocol_version": {
+      "$ref": "#/$defs/protocol_version"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/idempotency_key"
+    },
+    "mission_id": {
+      "$ref": "#/$defs/mission_id"
+    },
+    "sequence": {
+      "$ref": "#/$defs/sequence"
+    },
+    "required_extensions": {
+      "$ref": "#/$defs/required_extensions"
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    },
+    "execution_id": {
+      "type": "string",
+      "description": "Stable execution identifier."
+    },
+    "attempt_id": {
+      "type": "string",
+      "description": "Attempt this execution belongs to."
+    },
+    "task_id": {
+      "type": "string",
+      "description": "Task being executed."
+    },
+    "worker_id": {
+      "type": "string",
+      "description": "Worker that ran it."
+    },
+    "executor": {
+      "type": "string",
+      "enum": [
+        "pi-local",
+        "autospec-managed"
+      ],
+      "description": "The task's single executor."
+    },
+    "model_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "provider"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Model used."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Provider serving the model."
+        }
+      }
+    },
+    "start_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "agent_rc": {
+          "type": "integer",
+          "description": "Agent process exit code, when it has exited."
+        },
+        "session_recorded": {
+          "type": "boolean",
+          "description": "Whether a session record exists."
+        },
+        "assistant_turns": {
+          "type": "integer",
+          "description": "Completed assistant turns.",
+          "minimum": 0
+        }
+      },
+      "description": "Evidence that the agent started. An exit code 0 with no session record or zero assistant turns is AGENT-NEVER-STARTED, a failure. Members are present only when observed."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "OK",
+        "NO-OUTPUT",
+        "INFRA-FAIL",
+        "LAUNCH-FAIL",
+        "AGENT-NEVER-STARTED",
+        "SIGNALLED"
+      ],
+      "description": "Terminal status as the fleet records it (RunStatus) plus SIGNALLED."
+    }
+  },
+  "$defs": {
+    "protocol_version": {
+      "title": "protocol version",
+      "description": "Protocol major version this message was produced under. It must equal the version both peers negotiated (highest common supported_versions entry); otherwise the reader fails closed with PROTOCOL_VERSION_UNSUPPORTED.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "idempotency_key": {
+      "title": "idempotency key",
+      "description": "Producer-chosen key, unique within one mission_id. Redelivery of the same key with the same sequence is a duplicate and must not repeat any effect. Reusing a key at a different sequence is an error.",
+      "type": "string"
+    },
+    "mission_id": {
+      "title": "mission identifier",
+      "description": "Identifier of the mission whose ordered stream this message belongs to. Sequence numbers are scoped to this value.",
+      "type": "string"
+    },
+    "sequence": {
+      "title": "per-mission sequence",
+      "description": "Monotonic position in the mission stream. It starts at 1 and advances by exactly 1 with no gaps, as the evaluation journal does.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "required_extensions": {
+      "title": "required extensions",
+      "description": "Names of extensions keys the reader must understand. A name the reader does not understand makes the whole message UNKNOWN_REQUIRED_FIELD and no part of it is applied. Always present; an empty array means none.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extensions": {
+      "title": "optional extensions",
+      "description": "The only place optional unknown data may live. Keys not named in required_extensions are ignored by a reader that does not understand them; they never carry data a reader must act on.",
+      "type": "object",
+      "default": {}
+    }
+  }
+}
