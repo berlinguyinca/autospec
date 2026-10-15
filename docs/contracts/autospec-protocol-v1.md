@@ -63,6 +63,13 @@ A reader never guesses at data it does not understand.
 - Error codes are stable machine strings: `PROTOCOL_VERSION_UNSUPPORTED`,
   `UNKNOWN_REQUIRED_FIELD`, `SCHEMA_VIOLATION`, `SEQUENCE_GAP`,
   `SEQUENCE_CONFLICT`, `IDEMPOTENCY_KEY_REUSED`.
+- `SCHEMA_VIOLATION` is the class of every structural refusal. Readers report it with one
+  of two specific machine codes: `MISSING_FIELD` (a required key is absent, including
+  `required_extensions`) and `INVALID_FIELD` (wrong type or value, an unknown key, a
+  non-object message, `sequence < 1`, or a `required_extensions` entry with no matching
+  `extensions` key). The Rust reader (`protocol::negotiate`) emits these two; a reader
+  that reports plain `SCHEMA_VIOLATION` is equally conforming. Golden fixtures assert the
+  class, not the specific code.
 
 ## Sequence and idempotency
 
