@@ -1,0 +1,410 @@
+[
+  {
+    "name": "missing-required-field",
+    "entity": "execution",
+    "record": {
+      "schema": "autospec.protocol.execution.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-execution-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "required_extensions": [],
+      "attempt_id": "a-1",
+      "task_id": "t-1",
+      "worker_id": "w-1",
+      "executor": "pi-local",
+      "model_policy": {
+        "model": "fixture-model",
+        "provider": "fixture-provider"
+      },
+      "start_evidence": {
+        "agent_rc": 0,
+        "session_recorded": true,
+        "assistant_turns": 3
+      },
+      "status": "OK"
+    },
+    "expect": "violation"
+  },
+  {
+    "name": "unknown-top-level-field",
+    "entity": "task",
+    "record": {
+      "schema": "autospec.protocol.task.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-task-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "required_extensions": [],
+      "task_id": "t-1",
+      "depends_on": [],
+      "state": "READY",
+      "executor": "pi-local",
+      "affected_surfaces": [
+        {
+          "path": "crates/autospec-core/src/protocol/mod.rs"
+        }
+      ],
+      "surprise": true
+    },
+    "expect": "violation"
+  },
+  {
+    "name": "unknown-nested-field",
+    "entity": "execution",
+    "record": {
+      "schema": "autospec.protocol.execution.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-execution-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "required_extensions": [],
+      "execution_id": "e-1",
+      "attempt_id": "a-1",
+      "task_id": "t-1",
+      "worker_id": "w-1",
+      "executor": "pi-local",
+      "model_policy": {
+        "model": "m",
+        "provider": "p",
+        "extra": 1
+      },
+      "start_evidence": {
+        "agent_rc": 0,
+        "session_recorded": true,
+        "assistant_turns": 3
+      },
+      "status": "OK"
+    },
+    "expect": "violation"
+  },
+  {
+    "name": "wrong-enum-value",
+    "entity": "worker",
+    "record": {
+      "schema": "autospec.protocol.worker.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-worker-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "required_extensions": [],
+      "worker_id": "w-1",
+      "host_id": "h-1",
+      "arch": "x86_64",
+      "toolchains": {
+        "rustc": "1.90.0",
+        "node": "22.1.0"
+      },
+      "executor": "remote-guess",
+      "model_slots": 2
+    },
+    "expect": "violation"
+  },
+  {
+    "name": "wrong-type",
+    "entity": "budget",
+    "record": {
+      "schema": "autospec.protocol.budget.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-budget-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "required_extensions": [],
+      "scope": "mission",
+      "disk_bytes_limit": "10GiB",
+      "inode_limit": 500000,
+      "free_space_reserve_bytes": 1073741824,
+      "warn_used_pct": 80,
+      "admit_stop_used_pct": 95,
+      "retention": {
+        "failure_artifacts_hours": 48,
+        "logs_days": 14
+      }
+    },
+    "expect": "violation"
+  },
+  {
+    "name": "wrong-const",
+    "entity": "mission",
+    "record": {
+      "schema": "autospec.protocol.mission.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-mission-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "required_extensions": [],
+      "state": "RUNNING",
+      "authority": "autospec-managed",
+      "generation": 2,
+      "last_transition": {
+        "from": "READY",
+        "to": "RUNNING",
+        "reason": "worker leased the first task",
+        "at": "2026-10-15T12:00:00Z",
+        "owner": "pi-engineering",
+        "attempt": 1
+      }
+    },
+    "expect": "violation"
+  },
+  {
+    "name": "below-minimum",
+    "entity": "checkpoint",
+    "record": {
+      "schema": "autospec.protocol.checkpoint.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-checkpoint-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "required_extensions": [],
+      "checkpoint_id": "c-1",
+      "last_applied_sequence": 0,
+      "state_digest": "sha256:0000",
+      "context_checkpoint_id": "ctx-1"
+    },
+    "expect": "violation"
+  },
+  {
+    "name": "unknown-required-extension",
+    "entity": "event",
+    "record": {
+      "schema": "autospec.protocol.event.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-event-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "required_extensions": [
+        "x-future"
+      ],
+      "event_id": "ev-1",
+      "trace_id": "tr-1",
+      "event_type": "task.progress",
+      "timestamp": "2026-10-15T12:00:00Z",
+      "human_summary": "progress 1",
+      "extensions": {
+        "x-future": {
+          "v": 1
+        }
+      }
+    },
+    "expect": "UNKNOWN_REQUIRED_FIELD"
+  },
+  {
+    "name": "required-extension-without-key",
+    "entity": "event",
+    "record": {
+      "schema": "autospec.protocol.event.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-event-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "required_extensions": [
+        "x-known"
+      ],
+      "event_id": "ev-1",
+      "trace_id": "tr-1",
+      "event_type": "task.progress",
+      "timestamp": "2026-10-15T12:00:00Z",
+      "human_summary": "progress 1"
+    },
+    "expect": "SCHEMA_VIOLATION"
+  },
+  {
+    "name": "missing-required-extensions-list",
+    "entity": "event",
+    "record": {
+      "schema": "autospec.protocol.event.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-event-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "event_id": "ev-1",
+      "trace_id": "tr-1",
+      "event_type": "task.progress",
+      "timestamp": "2026-10-15T12:00:00Z",
+      "human_summary": "progress 1"
+    },
+    "expect": "SCHEMA_VIOLATION"
+  },
+  {
+    "name": "sequence-below-one",
+    "entity": "event",
+    "record": {
+      "schema": "autospec.protocol.event.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-event-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 0,
+      "required_extensions": [],
+      "event_id": "ev-1",
+      "trace_id": "tr-1",
+      "event_type": "task.progress",
+      "timestamp": "2026-10-15T12:00:00Z",
+      "human_summary": "progress 1"
+    },
+    "expect": "SCHEMA_VIOLATION"
+  },
+  {
+    "name": "unsupported-version",
+    "entity": "event",
+    "record": {
+      "schema": "autospec.protocol.event.v1",
+      "protocol_version": 2,
+      "idempotency_key": "idem-event-1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "required_extensions": [],
+      "event_id": "ev-1",
+      "trace_id": "tr-1",
+      "event_type": "task.progress",
+      "timestamp": "2026-10-15T12:00:00Z",
+      "human_summary": "progress 1"
+    },
+    "expect": "PROTOCOL_VERSION_UNSUPPORTED"
+  },
+  {
+    "name": "sequence-gap",
+    "entity": "event",
+    "record": {
+      "schema": "autospec.protocol.event.v1",
+      "protocol_version": 1,
+      "idempotency_key": "k3",
+      "mission_id": "m-fixture-1",
+      "sequence": 3,
+      "required_extensions": [],
+      "event_id": "ev-k3",
+      "trace_id": "tr-1",
+      "event_type": "task.progress",
+      "timestamp": "2026-10-15T12:00:00Z",
+      "human_summary": "progress"
+    },
+    "expect": "SEQUENCE_GAP",
+    "after": [
+      {
+        "schema": "autospec.protocol.event.v1",
+        "protocol_version": 1,
+        "idempotency_key": "k1",
+        "mission_id": "m-fixture-1",
+        "sequence": 1,
+        "required_extensions": [],
+        "event_id": "ev-k1",
+        "trace_id": "tr-1",
+        "event_type": "task.progress",
+        "timestamp": "2026-10-15T12:00:00Z",
+        "human_summary": "progress"
+      }
+    ]
+  },
+  {
+    "name": "sequence-conflict",
+    "entity": "event",
+    "record": {
+      "schema": "autospec.protocol.event.v1",
+      "protocol_version": 1,
+      "idempotency_key": "k2b",
+      "mission_id": "m-fixture-1",
+      "sequence": 2,
+      "required_extensions": [],
+      "event_id": "ev-k2b",
+      "trace_id": "tr-1",
+      "event_type": "task.progress",
+      "timestamp": "2026-10-15T12:00:00Z",
+      "human_summary": "progress"
+    },
+    "expect": "SEQUENCE_CONFLICT",
+    "after": [
+      {
+        "schema": "autospec.protocol.event.v1",
+        "protocol_version": 1,
+        "idempotency_key": "k1",
+        "mission_id": "m-fixture-1",
+        "sequence": 1,
+        "required_extensions": [],
+        "event_id": "ev-k1",
+        "trace_id": "tr-1",
+        "event_type": "task.progress",
+        "timestamp": "2026-10-15T12:00:00Z",
+        "human_summary": "progress"
+      },
+      {
+        "schema": "autospec.protocol.event.v1",
+        "protocol_version": 1,
+        "idempotency_key": "k2",
+        "mission_id": "m-fixture-1",
+        "sequence": 2,
+        "required_extensions": [],
+        "event_id": "ev-k2",
+        "trace_id": "tr-1",
+        "event_type": "task.progress",
+        "timestamp": "2026-10-15T12:00:00Z",
+        "human_summary": "progress"
+      }
+    ]
+  },
+  {
+    "name": "idempotency-conflict",
+    "entity": "event",
+    "record": {
+      "schema": "autospec.protocol.event.v1",
+      "protocol_version": 1,
+      "idempotency_key": "k1",
+      "mission_id": "m-fixture-1",
+      "sequence": 1,
+      "required_extensions": [],
+      "event_id": "ev-k1",
+      "trace_id": "tr-1",
+      "event_type": "task.progress",
+      "timestamp": "2026-10-15T12:00:00Z",
+      "human_summary": "a different payload"
+    },
+    "expect": "IDEMPOTENCY_CONFLICT",
+    "after": [
+      {
+        "schema": "autospec.protocol.event.v1",
+        "protocol_version": 1,
+        "idempotency_key": "k1",
+        "mission_id": "m-fixture-1",
+        "sequence": 1,
+        "required_extensions": [],
+        "event_id": "ev-k1",
+        "trace_id": "tr-1",
+        "event_type": "task.progress",
+        "timestamp": "2026-10-15T12:00:00Z",
+        "human_summary": "progress"
+      }
+    ]
+  },
+  {
+    "name": "idempotency-key-reused",
+    "entity": "event",
+    "record": {
+      "schema": "autospec.protocol.event.v1",
+      "protocol_version": 1,
+      "idempotency_key": "k1",
+      "mission_id": "m-fixture-1",
+      "sequence": 2,
+      "required_extensions": [],
+      "event_id": "ev-k1",
+      "trace_id": "tr-1",
+      "event_type": "task.progress",
+      "timestamp": "2026-10-15T12:00:00Z",
+      "human_summary": "progress"
+    },
+    "expect": "IDEMPOTENCY_KEY_REUSED",
+    "after": [
+      {
+        "schema": "autospec.protocol.event.v1",
+        "protocol_version": 1,
+        "idempotency_key": "k1",
+        "mission_id": "m-fixture-1",
+        "sequence": 1,
+        "required_extensions": [],
+        "event_id": "ev-k1",
+        "trace_id": "tr-1",
+        "event_type": "task.progress",
+        "timestamp": "2026-10-15T12:00:00Z",
+        "human_summary": "progress"
+      }
+    ]
+  }
+]
