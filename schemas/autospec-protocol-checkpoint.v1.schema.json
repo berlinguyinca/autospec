@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-protocol-checkpoint.v1.schema.json",
+  "title": "autospec protocol checkpoint v1",
+  "description": "A replay checkpoint for one mission stream: how far events were applied and a digest of the resulting state. It points at the context-checkpoint record instead of duplicating it. Built on the envelope in autospec-protocol-envelope.v1.schema.json; only the keyword subset in docs/contracts/autospec-protocol-v1.md section Schema subset is used.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol_version",
+    "idempotency_key",
+    "mission_id",
+    "sequence",
+    "required_extensions",
+    "checkpoint_id",
+    "last_applied_sequence",
+    "state_digest",
+    "context_checkpoint_id"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "autospec.protocol.checkpoint.v1",
+      "description": "Always autospec.protocol.checkpoint.v1."
+    },
+    "protocol_version": {
+      "$ref": "#/$defs/protocol_version"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/idempotency_key"
+    },
+    "mission_id": {
+      "$ref": "#/$defs/mission_id"
+    },
+    "sequence": {
+      "$ref": "#/$defs/sequence"
+    },
+    "required_extensions": {
+      "$ref": "#/$defs/required_extensions"
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    },
+    "checkpoint_id": {
+      "type": "string",
+      "description": "Stable checkpoint identifier."
+    },
+    "last_applied_sequence": {
+      "type": "integer",
+      "description": "Sequence of the last message applied before this checkpoint. The envelope sequence is this message's own position, so the last-applied value needs its own name. Replay resumes at the next sequence.",
+      "minimum": 1
+    },
+    "state_digest": {
+      "type": "string",
+      "description": "Digest of the state after applying everything up to last_applied_sequence."
+    },
+    "context_checkpoint_id": {
+      "type": "string",
+      "description": "checkpoint_id of an autospec.context-checkpoint.v1 record (schemas/autospec-context-checkpoint.schema.json). Referenced, not copied."
+    }
+  },
+  "$defs": {
+    "protocol_version": {
+      "title": "protocol version",
+      "description": "Protocol major version this message was produced under. It must equal the version both peers negotiated (highest common supported_versions entry); otherwise the reader fails closed with PROTOCOL_VERSION_UNSUPPORTED.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "idempotency_key": {
+      "title": "idempotency key",
+      "description": "Producer-chosen key, unique within one mission_id. Redelivery of the same key with the same sequence is a duplicate and must not repeat any effect. Reusing a key at a different sequence is an error.",
+      "type": "string"
+    },
+    "mission_id": {
+      "title": "mission identifier",
+      "description": "Identifier of the mission whose ordered stream this message belongs to. Sequence numbers are scoped to this value.",
+      "type": "string"
+    },
+    "sequence": {
+      "title": "per-mission sequence",
+      "description": "Monotonic position in the mission stream. It starts at 1 and advances by exactly 1 with no gaps, as the evaluation journal does.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "required_extensions": {
+      "title": "required extensions",
+      "description": "Names of extensions keys the reader must understand. A name the reader does not understand makes the whole message UNKNOWN_REQUIRED_FIELD and no part of it is applied. Always present; an empty array means none.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extensions": {
+      "title": "optional extensions",
+      "description": "The only place optional unknown data may live. Keys not named in required_extensions are ignored by a reader that does not understand them; they never carry data a reader must act on.",
+      "type": "object",
+      "default": {}
+    }
+  }
+}
