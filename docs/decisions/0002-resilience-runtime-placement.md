@@ -2,6 +2,7 @@
 
 - **Date:** 2026-09-13
 - **Status:** Accepted
+- **Amended by:** ADR 0004
 - **Satisfies:** `docs/specs/2026-09-13-autospec-artificium-resilience-memory-learning-spec.md`
   §1 (preserve architectural boundaries), §3 (current architectural placement),
   §5.2 (no duplicate memory system), §9 (source-of-truth rule), §10 (security).
@@ -43,8 +44,9 @@ the control plane, with the same "pure module + I/O-edge command" split AAR uses
 | Verified Learning | `resilience::learning` | `autospec resilience lesson-verdict` |
 | Identities / events | `resilience::ids`, `resilience::EVENTS` | `autospec resilience events` |
 
-Dispatch judgement stays in `autospec-dispatcher`, execution/session/lease
-mechanics stay in `autospec-orchestrator`, telemetry projection stays in
+Dispatch scheduling stays in autospec (`initiative::dispatch`, `fleet_dispatch`)
+and the reviewer panel lives in `dispatcher-core` (ADR 0004),
+execution/session/lease mechanics stay in `autospec-orchestrator`, telemetry projection stays in
 `autospec-db`, and read presentation stays in `autospec-gui`. The control plane
 defines the versioned serialized contracts (`autospec.context-checkpoint.v1`,
 `autospec.memory-map.v1`, `autospec.attention-stream.v1`,
