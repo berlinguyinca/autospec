@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-protocol-event.v1.schema.json",
+  "title": "autospec protocol event v1",
+  "description": "A mission, worker, build, test, review, merge, cleanup or routing event (R-EVENT). Delivery is at-least-once and consumers are idempotent. Credentials and private prompts are redacted and hidden reasoning is never carried. Optional members are present only when known and are never invented. Built on the envelope in autospec-protocol-envelope.v1.schema.json; only the keyword subset in docs/contracts/autospec-protocol-v1.md section Schema subset is used.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol_version",
+    "idempotency_key",
+    "mission_id",
+    "sequence",
+    "required_extensions",
+    "event_id",
+    "trace_id",
+    "event_type",
+    "timestamp",
+    "human_summary"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "autospec.protocol.event.v1",
+      "description": "Always autospec.protocol.event.v1."
+    },
+    "protocol_version": {
+      "$ref": "#/$defs/protocol_version"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/idempotency_key"
+    },
+    "mission_id": {
+      "$ref": "#/$defs/mission_id"
+    },
+    "sequence": {
+      "$ref": "#/$defs/sequence"
+    },
+    "required_extensions": {
+      "$ref": "#/$defs/required_extensions"
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    },
+    "schema_version": {
+      "type": "integer",
+      "description": "Entity schema version, equal to the N in v<N> of schema.",
+      "minimum": 1
+    },
+    "event_id": {
+      "type": "string",
+      "description": "Unique event identifier."
+    },
+    "trace_id": {
+      "type": "string",
+      "description": "Trace the event belongs to."
+    },
+    "task_id": {
+      "type": "string",
+      "description": "Task the event concerns."
+    },
+    "worker_id": {
+      "type": "string",
+      "description": "Worker that produced or runs the work."
+    },
+    "host_id": {
+      "type": "string",
+      "description": "Host the event came from."
+    },
+    "repository": {
+      "type": "string",
+      "description": "Repository the event concerns."
+    },
+    "worktree_id": {
+      "type": "string",
+      "description": "Worktree the event concerns."
+    },
+    "commit_sha": {
+      "type": "string",
+      "description": "Commit the event is bound to."
+    },
+    "operation_id": {
+      "type": "string",
+      "description": "Operation the event belongs to."
+    },
+    "event_type": {
+      "type": "string",
+      "description": "Event name, for example an autospec.resilience.events.v1 name such as attempt.started."
+    },
+    "state": {
+      "type": "string",
+      "description": "Lifecycle state of the subject after the event."
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "RFC 3339 time the event happened."
+    },
+    "causal_parent_id": {
+      "type": "string",
+      "description": "event_id of the event that caused this one."
+    },
+    "human_summary": {
+      "type": "string",
+      "description": "One-line summary for people. Contains no credentials and no private prompts."
+    },
+    "progress_kind": {
+      "type": "string",
+      "description": "Kind of useful progress this event reports. Heartbeat is never progress."
+    },
+    "heartbeat_at": {
+      "type": "string",
+      "description": "RFC 3339 time of the last live heartbeat. Proves liveness only; separate from last_progress_at."
+    },
+    "last_progress_at": {
+      "type": "string",
+      "description": "RFC 3339 time of the last useful progress. Separate from heartbeat_at."
+    },
+    "deadline_at": {
+      "type": "string",
+      "description": "RFC 3339 deadline for the current operation."
+    },
+    "resource_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "cpu_pct": {
+          "type": "number",
+          "description": "CPU use in percent.",
+          "minimum": 0
+        },
+        "rss_bytes": {
+          "type": "integer",
+          "description": "Resident set size in bytes.",
+          "minimum": 0
+        },
+        "disk_bytes": {
+          "type": "integer",
+          "description": "Disk use in bytes.",
+          "minimum": 0
+        }
+      },
+      "description": "Sampled resource use. Members are present only when sampled."
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "References to artifacts the event produced or concerns."
+    }
+  },
+  "$defs": {
+    "protocol_version": {
+      "title": "protocol version",
+      "description": "Protocol major version this message was produced under. It must equal the version both peers negotiated (highest common supported_versions entry); otherwise the reader fails closed with PROTOCOL_VERSION_UNSUPPORTED.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "idempotency_key": {
+      "title": "idempotency key",
+      "description": "Producer-chosen key, unique within one mission_id. Redelivery of the same key with the same sequence is a duplicate and must not repeat any effect. Reusing a key at a different sequence is an error.",
+      "type": "string"
+    },
+    "mission_id": {
+      "title": "mission identifier",
+      "description": "Identifier of the mission whose ordered stream this message belongs to. Sequence numbers are scoped to this value.",
+      "type": "string"
+    },
+    "sequence": {
+      "title": "per-mission sequence",
+      "description": "Monotonic position in the mission stream. It starts at 1 and advances by exactly 1 with no gaps, as the evaluation journal does.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "required_extensions": {
+      "title": "required extensions",
+      "description": "Names of extensions keys the reader must understand. A name the reader does not understand makes the whole message UNKNOWN_REQUIRED_FIELD and no part of it is applied. Always present; an empty array means none.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extensions": {
+      "title": "optional extensions",
+      "description": "The only place optional unknown data may live. Keys not named in required_extensions are ignored by a reader that does not understand them; they never carry data a reader must act on.",
+      "type": "object",
+      "default": {}
+    }
+  }
+}

@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-protocol-worker.v1.schema.json",
+  "title": "autospec protocol worker v1",
+  "description": "A worker that can run executions: where it runs, what it can build with and which executor backend it belongs to. Built on the envelope in autospec-protocol-envelope.v1.schema.json; only the keyword subset in docs/contracts/autospec-protocol-v1.md section Schema subset is used.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol_version",
+    "idempotency_key",
+    "mission_id",
+    "sequence",
+    "required_extensions",
+    "worker_id",
+    "host_id",
+    "arch",
+    "toolchains",
+    "executor",
+    "model_slots"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "autospec.protocol.worker.v1",
+      "description": "Always autospec.protocol.worker.v1."
+    },
+    "protocol_version": {
+      "$ref": "#/$defs/protocol_version"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/idempotency_key"
+    },
+    "mission_id": {
+      "$ref": "#/$defs/mission_id"
+    },
+    "sequence": {
+      "$ref": "#/$defs/sequence"
+    },
+    "required_extensions": {
+      "$ref": "#/$defs/required_extensions"
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    },
+    "worker_id": {
+      "type": "string",
+      "description": "Stable worker identifier."
+    },
+    "host_id": {
+      "type": "string",
+      "description": "Host the worker runs on."
+    },
+    "arch": {
+      "type": "string",
+      "description": "CPU architecture, for example x86_64 or aarch64."
+    },
+    "toolchains": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Installed toolchains as a map from toolchain name to version."
+    },
+    "executor": {
+      "type": "string",
+      "enum": [
+        "pi-local",
+        "autospec-managed"
+      ],
+      "description": "Executor backend the worker serves."
+    },
+    "model_slots": {
+      "type": "integer",
+      "description": "Number of model sessions the worker can run at once.",
+      "minimum": 0
+    },
+    "credential_ref": {
+      "type": "string",
+      "description": "Identifier of the credential the worker uses. An identifier only: a credential value, token or key never appears in a record."
+    }
+  },
+  "$defs": {
+    "protocol_version": {
+      "title": "protocol version",
+      "description": "Protocol major version this message was produced under. It must equal the version both peers negotiated (highest common supported_versions entry); otherwise the reader fails closed with PROTOCOL_VERSION_UNSUPPORTED.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "idempotency_key": {
+      "title": "idempotency key",
+      "description": "Producer-chosen key, unique within one mission_id. Redelivery of the same key with the same sequence is a duplicate and must not repeat any effect. Reusing a key at a different sequence is an error.",
+      "type": "string"
+    },
+    "mission_id": {
+      "title": "mission identifier",
+      "description": "Identifier of the mission whose ordered stream this message belongs to. Sequence numbers are scoped to this value.",
+      "type": "string"
+    },
+    "sequence": {
+      "title": "per-mission sequence",
+      "description": "Monotonic position in the mission stream. It starts at 1 and advances by exactly 1 with no gaps, as the evaluation journal does.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "required_extensions": {
+      "title": "required extensions",
+      "description": "Names of extensions keys the reader must understand. A name the reader does not understand makes the whole message UNKNOWN_REQUIRED_FIELD and no part of it is applied. Always present; an empty array means none.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extensions": {
+      "title": "optional extensions",
+      "description": "The only place optional unknown data may live. Keys not named in required_extensions are ignored by a reader that does not understand them; they never carry data a reader must act on.",
+      "type": "object",
+      "default": {}
+    }
+  }
+}
