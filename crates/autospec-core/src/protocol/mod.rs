@@ -6,6 +6,7 @@
 //! is an error, and no part of the message is applied.
 
 pub mod negotiate;
+pub mod schema_ir;
 pub mod sequence;
 
 use std::fmt;
@@ -34,6 +35,10 @@ pub enum ProtocolError {
     IdempotencyKeyReused { key: String },
     /// An idempotency key reappeared at its own sequence with a different payload.
     IdempotencyConflict { key: String },
+    /// A schema file uses a keyword outside the contract's subset.
+    UnsupportedSchemaKeyword { file: String, keyword: String },
+    /// A schema file could not be read or is malformed.
+    SchemaLoad { file: String, detail: String },
 }
 
 impl ProtocolError {
@@ -48,6 +53,8 @@ impl ProtocolError {
             ProtocolError::SequenceConflict { .. } => "SEQUENCE_CONFLICT",
             ProtocolError::IdempotencyKeyReused { .. } => "IDEMPOTENCY_KEY_REUSED",
             ProtocolError::IdempotencyConflict { .. } => "IDEMPOTENCY_CONFLICT",
+            ProtocolError::UnsupportedSchemaKeyword { .. } => "UNSUPPORTED_SCHEMA_KEYWORD",
+            ProtocolError::SchemaLoad { .. } => "SCHEMA_LOAD_FAILED",
         }
     }
 }
@@ -85,6 +92,16 @@ impl fmt::Display for ProtocolError {
                     "{}: key `{key}` was accepted at a different sequence",
                     self.code()
                 )
+            }
+            ProtocolError::UnsupportedSchemaKeyword { file, keyword } => {
+                write!(
+                    f,
+                    "{}: `{keyword}` in {file} is outside the protocol schema subset",
+                    self.code()
+                )
+            }
+            ProtocolError::SchemaLoad { file, detail } => {
+                write!(f, "{}: {file}: {detail}", self.code())
             }
             ProtocolError::IdempotencyConflict { key } => {
                 write!(
