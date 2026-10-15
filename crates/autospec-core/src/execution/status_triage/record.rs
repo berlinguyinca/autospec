@@ -96,6 +96,13 @@ fn set(report: &mut AgentReport, key: &str, value: &str) -> Result<(), String> {
         "test_passed" => report.test_passed = Some(parse_count("test_passed", value)?),
         "test_failed" => report.test_failed = Some(parse_count("test_failed", value)?),
         "tests_total" => report.tests_total = Some(parse_count("tests_total", value)?),
+        // Never-started evidence (#4745). Read strictly for the same reason
+        // as the counters above: a silently dropped `false` or `0` would turn
+        // a run that never started into one that is gated locally.
+        "session_recorded" => {
+            report.session_recorded = Some(parse_flag("session_recorded", value)?)
+        }
+        "assistant_turns" => report.assistant_turns = Some(parse_turns("assistant_turns", value)?),
         _ => {}
     }
     Ok(())
@@ -111,6 +118,20 @@ fn parse_count(key: &str, value: &str) -> Result<u64, String> {
     value
         .parse::<u64>()
         .map_err(|_| format!("{key} expects a non-negative test count, got {value}"))
+}
+
+fn parse_flag(key: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("{key} expects true or false, got {value}")),
+    }
+}
+
+fn parse_turns(key: &str, value: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .map_err(|_| format!("{key} expects a non-negative turn count, got {value}"))
 }
 
 fn parse_fmt_files(value: &str) -> Result<usize, String> {

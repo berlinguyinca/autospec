@@ -13,6 +13,7 @@
 
 use super::signal;
 use super::{AgentHoldReason, AgentReport, GateBasis, TriageDecision};
+use crate::fleet_dispatch::AGENT_NEVER_STARTED_STATUS;
 
 /// The hold line the pass prints for an agent-reported hold (rule 7):
 /// the agent's own evidence, not just the hold's reason.
@@ -53,6 +54,11 @@ pub fn decision_line(decision: &TriageDecision, report: &AgentReport) -> String 
     match decision {
         TriageDecision::Redispatch { status } => {
             format!("RE-DISPATCH: agent reported status={status}; the run never reached the gate")
+        }
+        TriageDecision::RaiseForReview { status } if status.as_str() == AGENT_NEVER_STARTED_STATUS => {
+            format!(
+                "RAISE-FOR-REVIEW: agent reported status={status}; the runner exited 0 but recorded no session or no assistant turn, so no verdict about the patch exists (#4745)"
+            )
         }
         TriageDecision::RaiseForReview { status } => {
             format!(
