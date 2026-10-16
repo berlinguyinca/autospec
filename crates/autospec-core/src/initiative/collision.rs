@@ -7,7 +7,8 @@
 //! overlap: disjoint symbol sets do not collide. Symbols are only ever what a
 //! task declared, never inferred.
 //!
-//! A task that declares nothing predicts nothing. The reactive conflict
+//! Paths are relative to a repository, so only tasks in the same repository can
+//! collide. A task that declares nothing predicts nothing. The reactive conflict
 //! handling (`held_conflicts`, `conflict_resolution`, `issue_lock`) stays the
 //! backstop for what this prediction cannot see.
 
@@ -78,14 +79,15 @@ fn shared_with(mine: &[AffectedSurface], theirs: &[AffectedSurface]) -> BTreeSet
 ///
 /// `None` when the candidate declares nothing, or nothing it declares
 /// overlaps another task's declaration. The candidate itself is skipped if it
-/// appears in `others`.
+/// appears in `others`, and so is any task in a different repository (the same
+/// relative path in two repositories is two files).
 pub fn predict(candidate: &Task, others: &[&Task]) -> Option<PredictedCollision> {
     if candidate.affects.is_empty() {
         return None;
     }
     others
         .iter()
-        .filter(|other| other.id != candidate.id)
+        .filter(|other| other.id != candidate.id && other.repository == candidate.repository)
         .find_map(|other| {
             let shared = shared_with(&candidate.affects, &other.affects);
             (!shared.is_empty()).then(|| PredictedCollision {
@@ -188,6 +190,15 @@ mod tests {
         let d = task("TASK-0004", &[("src/a.rs", &[])]);
         let hit = predict(&a, &[&a, &clear, &b, &d]).expect("collision");
         assert_eq!(hit.holder, b.id);
+    }
+
+    #[test]
+    fn the_same_path_in_two_repositories_is_two_files() {
+        let a = task("TASK-0001", &[("src/lib.rs", &[])]);
+        let mut b = task("TASK-0002", &[("src/lib.rs", &[])]);
+        b.repository = RepositoryId::parse("github.com/InferWeave/autospec-orchestrator")
+            .expect("valid repository id");
+        assert_eq!(predict(&a, &[&b]), None);
     }
 
     #[test]
