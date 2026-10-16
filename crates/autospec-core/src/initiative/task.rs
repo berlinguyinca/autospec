@@ -5,6 +5,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::collision::AffectedSurface;
 use super::ids::{RequirementId, TaskId};
 use super::repository::{Capability, RepositoryId};
 use super::roles::AgentRole;
@@ -242,6 +243,11 @@ pub struct Task {
     /// An exclusivity key; two live tasks may not share one.
     #[serde(default)]
     pub exclusivity: Option<String>,
+    /// Files and symbols the task declares it will change; read by
+    /// [`super::collision::predict`]. Empty means undeclared, which predicts
+    /// nothing.
+    #[serde(default)]
+    pub affects: Vec<AffectedSurface>,
     /// The architecture plan version the task was generated from.
     pub plan_version: u32,
     /// Current lifecycle state.
@@ -274,6 +280,7 @@ impl Task {
             validation: Vec::new(),
             required_capabilities: TaskKind::Implementation.default_capabilities(),
             exclusivity: None,
+            affects: Vec::new(),
             plan_version,
             state: TaskState::Defined,
             lease: None,
