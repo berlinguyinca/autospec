@@ -54,6 +54,7 @@ pub mod declaration_conflict;
 pub mod declaration_ownership;
 pub mod dependency_gates;
 pub mod deploy_drift;
+pub mod delivery_benchmark;
 pub mod diff_coverage;
 pub mod dispatch_guard;
 pub mod dispatch_outcomes;
