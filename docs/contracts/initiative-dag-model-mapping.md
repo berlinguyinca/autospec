@@ -5,7 +5,10 @@ Canonical model: the Initiative DAG, `initiative::dag::TaskGraph` with `initiati
 `docs/specs/2026-10-14-pi-autospec-autonomous-delivery-design.md` section 3 and section 4 item 6).
 
 Every other DAG, lease and task-lifecycle type is mapped to the canonical one by an adapter, not rewritten. This
-document is the table the adapters implement. Two rules hold in every mapping:
+document is the contract the adapters must satisfy; the adapter modules named below are added by follow-up issues
+(`initiative::compat_dag` #4759, `initiative::compat_lease` #4760, `initiative::compat_lifecycle` #4761) and do not
+exist until those merge. `Task.affects` and `AffectedSurface` come from `initiative::collision` (#4756). Two rules hold
+in every mapping:
 
 - Fencing data is never dropped. A source value that carries a `fencing_generation` keeps it visible through the adapter.
 - Nothing unknown becomes done. A state or edge the canonical model cannot place maps to a state that does not satisfy
@@ -15,7 +18,7 @@ document is the table the adapters implement. Two rules hold in every mapping:
 
 Source models: `graph::issue_dag::IssueGraph` (`waves`, `detect_cycle`), `graph::order::execution_order` over
 `spec::SpecMetadata`. Canonical: `initiative::dag::TaskGraph` (`topological_order`, `concurrency_waves`, `schedule`).
-Adapter: `initiative::compat_dag`.
+Adapter (planned, #4759): `initiative::compat_dag`.
 
 | Source field | Canonical field | Rule |
 |---|---|---|
@@ -32,15 +35,15 @@ Adapter: `initiative::compat_dag`.
 | `SpecMetadata.dependencies` | `Task.depends_on` | A dependency that is not a listed spec is a `GraphViolation::InvalidTask` naming it (`execution_order` returns `MissingDependency`; a canonical `MissingDependency` needs a `TaskId` an unknown id does not have). |
 | `SpecMetadata.files_to_touch` | `Task.affects` | One `AffectedSurface` per entry, no symbols. |
 | `GraphError { kind: Cycle }` and `IssueGraph::detect_cycle` | `GraphViolation::Cycle` | The adapter validates the built graph with `TaskGraph::topological_order`, so a cycle the old model rejected is rejected. |
-| `IssueGraph::waves` | `TaskGraph::concurrency_waves` | Same waves for the same graph (tested on a diamond). |
-| `execution_order` | `TaskGraph::topological_order` | The old order is a valid topological order of the adapted graph. |
+| `IssueGraph::waves` | `TaskGraph::concurrency_waves` | Required: the same waves for the same graph, checked on a diamond. |
+| `execution_order` | `TaskGraph::topological_order` | Required: the old order is a valid topological order of the adapted graph. |
 
 All adapted tasks are `TaskKind::Implementation`, state `Defined`, in the repository and plan the caller names.
 
 ## Lease types
 
 Source models: `resilience::work_protocol::Lease`, `claim::ClaimLease`. Canonical: `initiative::task::Lease`.
-Adapter: `initiative::compat_lease` (`LeaseView`, `may_supersede`).
+Adapter (planned, #4760): `initiative::compat_lease` (`LeaseView`, `may_supersede`).
 
 | Source field | `LeaseView` accessor | Rule |
 |---|---|---|
@@ -61,7 +64,7 @@ Adapter: `initiative::compat_lease` (`LeaseView`, `may_supersede`).
 ## Task lifecycles
 
 Source models: `resilience::work_protocol::WorkState` (9) with `WorkStateNonHappy` (8). Canonical:
-`initiative::task::TaskState` (12). Adapter: `initiative::compat_lifecycle`. `non_happy` outranks `state`: when it is
+`initiative::task::TaskState` (12). Adapter (planned, #4761): `initiative::compat_lifecycle`. `non_happy` outranks `state`: when it is
 set, the result comes from the non-happy table.
 
 | Source state | `TaskState` | Rule |
@@ -101,7 +104,7 @@ Seven of the nine happy states return exactly as they went in.
 |---|---|
 | `worktree_lock::Lease` | A checkout mutex (worktree, holder, pid, phase) with no expiry or generation; it guards a directory, not a task. |
 | `agent::session::Lease` | A session epoch for native agent sessions (holder, epoch); the epoch is not a task-scoped fencing generation and has no expiry. |
-| `PortfolioLease` | A portfolio-level lease stored in a git ref by `autospec-cli`; it governs a set of repositories, and its fields are private to that module. |
+| `PortfolioLease` | A portfolio-level lease stored in a git ref by `autospec-cli`. It does carry a `generation` and `expires_at`, but they fence a portfolio plan, not a task: the generation never reaches a task lease and the fields are private to that module. |
 | `LeaseGeneration` | A bare positive counter in autonomous accountability; it is a value, not a lease. |
 
 ## Deprecation policy
