@@ -35,6 +35,11 @@ jobs:
         run: |
           set -eu
           cd packages/protocol
+          # The v1 schemas live at the repository root (../../schemas), so
+          # prepack copies them into the package before packing; the test
+          # suite itself runs the same script, but run it up front so the
+          # tarball is populated the same way `npm pack` would.
+          npm run prepack
           # The whole package's test suite, not a hand-picked file: a new
           # *.test.mjs added to the package must run here without widening
           # this workflow.
