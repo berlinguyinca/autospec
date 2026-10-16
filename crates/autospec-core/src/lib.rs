@@ -52,6 +52,7 @@ pub mod cron_log_contract;
 pub mod deadline_ratchet;
 pub mod declaration_conflict;
 pub mod declaration_ownership;
+pub mod delivery_benchmark;
 pub mod dependency_gates;
 pub mod deploy_drift;
 pub mod diff_coverage;
