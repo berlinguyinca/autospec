@@ -7,6 +7,7 @@
 //! not belong to a repository or an organization.
 
 pub mod collision;
+pub mod compat_dag;
 pub mod dag;
 pub mod definition;
 pub mod dispatch;
