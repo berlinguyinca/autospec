@@ -9,6 +9,7 @@
 pub mod collision;
 pub mod compat_dag;
 pub mod compat_lease;
+pub mod compat_lifecycle;
 pub mod dag;
 pub mod definition;
 pub mod dispatch;
