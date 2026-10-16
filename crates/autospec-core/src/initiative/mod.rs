@@ -8,6 +8,7 @@
 
 pub mod collision;
 pub mod compat_dag;
+pub mod compat_lease;
 pub mod dag;
 pub mod definition;
 pub mod dispatch;
