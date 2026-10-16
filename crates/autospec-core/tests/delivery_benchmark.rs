@@ -143,3 +143,17 @@ fn a_result_row_round_trips_through_json() {
     assert!(json.contains("\"pi-autospec\""), "{json}");
     assert_eq!(serde_json::from_str::<RunResult>(&json).unwrap(), row);
 }
+
+#[test]
+fn a_success_with_a_non_finite_or_negative_time_counts_as_a_failure() {
+    let rows = [
+        run(BenchTask::Crash, Arm::Baseline, 10.0, true),
+        run(BenchTask::Crash, Arm::Baseline, f64::NAN, true),
+        run(BenchTask::Crash, Arm::Baseline, f64::INFINITY, true),
+        run(BenchTask::Crash, Arm::Baseline, -5.0, true),
+    ];
+    let baseline = summary_of(&rows, BenchTask::Crash).baseline;
+    assert_eq!(baseline.runs, 4);
+    assert_eq!(baseline.successes, 1);
+    assert_eq!(baseline.p95_secs, Some(10.0));
+}

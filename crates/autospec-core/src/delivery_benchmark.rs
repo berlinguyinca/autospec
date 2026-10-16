@@ -130,7 +130,8 @@ pub const SCENARIOS: [Scenario; 9] = [
     },
 ];
 
-/// One recorded run of one task by one arm.
+/// One recorded run of one task by one arm. Tokens, retries and disk are
+/// aggregated over successful runs only, like the time percentiles.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunResult {
     pub task: BenchTask,
@@ -194,8 +195,16 @@ fn nearest_rank<T: Copy>(sorted: &[T], percent: u32) -> Option<T> {
     Some(sorted[rank - 1])
 }
 
+/// A run counts as a success only if it says so and its time is a real,
+/// non-negative number. A row claiming success with a NaN, infinite or
+/// negative time is bad data: it counts as a failure rather than becoming a
+/// percentile.
+fn counts_as_success(row: &RunResult) -> bool {
+    row.success && row.time_to_verified_secs.is_finite() && row.time_to_verified_secs >= 0.0
+}
+
 fn summarize_arm(rows: &[&RunResult]) -> ArmSummary {
-    let ok: Vec<&&RunResult> = rows.iter().filter(|row| row.success).collect();
+    let ok: Vec<&&RunResult> = rows.iter().filter(|row| counts_as_success(row)).collect();
     let mut times: Vec<f64> = ok.iter().map(|row| row.time_to_verified_secs).collect();
     times.sort_by(f64::total_cmp);
     let mut tokens: Vec<u64> = ok.iter().map(|row| row.tokens).collect();
