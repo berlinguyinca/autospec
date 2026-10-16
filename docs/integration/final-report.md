@@ -58,20 +58,20 @@ Zip acceptance A1-A9 are mandatory. Each is run as a fault-injection test or the
 
 ## Benchmarks
 
-Identical task set against the standalone baseline. Time is time-to-verified in seconds. Thresholds come from measured baselines, never invented percentages; a task with no successful baseline run has no comparison.
+Identical task set against the standalone baseline. Task kinds use the wire names of `delivery_benchmark::BenchTask`. Tokens, Retries, Disk and Success each hold `baseline / pi-autospec`; Success is the share of runs that succeeded. `autospec benchmark delivery --results <PATH>` prints these rows. Time is time-to-verified in seconds. Thresholds come from measured baselines, never invented percentages; a task with no successful baseline run has no comparison.
 
 | Task kind | Baseline p50 | Baseline p95 | pi-autospec p50 | pi-autospec p95 | Tokens | Retries | Disk | Success |
 |---|---|---|---|---|---|---|---|---|
-| trivial fix | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
-| medium feature | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
-| complex Rust change | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
-| multi-repo contract | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
-| failing test | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
-| gateway busy | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
-| stale CI | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
-| patch collision | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
+| trivial-fix | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
+| medium-feature | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
+| complex-rust-change | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
+| multi-repo-contract | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
+| failing-test | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
+| gateway-busy | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
+| stale-ci | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
+| patch-collision | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
 | crash | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
-| long test | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
+| long-test | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |
 
 ## Rollback
 
