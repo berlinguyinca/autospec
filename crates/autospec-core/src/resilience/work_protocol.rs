@@ -22,6 +22,11 @@ use super::ids::{AttemptId, ClaimId, IdempotencyKey, ReceiptId, SessionId, WorkI
 pub const WORK_RECEIPT_SCHEMA: &str = "autospec.work-receipt.v1";
 
 /// Canonical happy-path lifecycle.
+///
+/// Not the canonical task lifecycle: that is
+/// `crate::initiative::task::TaskState`. `crate::initiative::compat_lifecycle`
+/// maps this type, with [`WorkStateNonHappy`], onto it. No deprecation
+/// attribute; see `docs/contracts/initiative-dag-model-mapping.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum WorkState {
     Created,
@@ -93,6 +98,12 @@ pub struct WorkItem {
 }
 
 /// A lease on an attempt. Claims are leases, not permanent flags.
+///
+/// Not the canonical task lease: that is `crate::initiative::task::Lease`.
+/// `crate::initiative::compat_lease::LeaseView` reads this type, the task
+/// lease and `crate::claim::ClaimLease` through one view, and keeps
+/// `fencing_generation`. No deprecation attribute; see
+/// `docs/contracts/initiative-dag-model-mapping.md`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Lease {
     pub claim_id: ClaimId,
