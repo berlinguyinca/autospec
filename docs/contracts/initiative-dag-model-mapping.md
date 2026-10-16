@@ -5,10 +5,8 @@ Canonical model: the Initiative DAG, `initiative::dag::TaskGraph` with `initiati
 `docs/specs/2026-10-14-pi-autospec-autonomous-delivery-design.md` section 3 and section 4 item 6).
 
 Every other DAG, lease and task-lifecycle type is mapped to the canonical one by an adapter, not rewritten. This
-document is the contract the adapters must satisfy; the adapter modules named below are added by follow-up issues
-(`initiative::compat_dag` #4759, `initiative::compat_lease` #4760, `initiative::compat_lifecycle` #4761) and do not
-exist until those merge. `Task.affects` and `AffectedSurface` come from `initiative::collision` (#4756). Two rules hold
-in every mapping:
+document is the contract the adapters satisfy; the adapter modules are listed under "Adapters" below.
+`Task.affects` and `AffectedSurface` come from `initiative::collision`. Two rules hold in every mapping:
 
 - Fencing data is never dropped. A source value that carries a `fencing_generation` keeps it visible through the adapter.
 - Nothing unknown becomes done. A state or edge the canonical model cannot place maps to a state that does not satisfy
@@ -18,7 +16,7 @@ in every mapping:
 
 Source models: `graph::issue_dag::IssueGraph` (`waves`, `detect_cycle`), `graph::order::execution_order` over
 `spec::SpecMetadata`. Canonical: `initiative::dag::TaskGraph` (`topological_order`, `concurrency_waves`, `schedule`).
-Adapter (planned, #4759): `initiative::compat_dag`.
+Adapter: `initiative::compat_dag`.
 
 | Source field | Canonical field | Rule |
 |---|---|---|
@@ -33,17 +31,17 @@ Adapter (planned, #4759): `initiative::compat_dag`.
 | `SpecMetadata.id` | `Task.id` | Same sorted-order assignment as `PlannedIssue.id`. |
 | `SpecMetadata.title` | `Task.summary` | Copied. |
 | `SpecMetadata.dependencies` | `Task.depends_on` | A dependency that is not a listed spec is a `GraphViolation::InvalidTask` naming it (`execution_order` returns `MissingDependency`; a canonical `MissingDependency` needs a `TaskId` an unknown id does not have). |
-| `SpecMetadata.files_to_touch` | `Task.affects` | One `AffectedSurface` per entry, no symbols. |
+| `SpecMetadata.files_to_touch` | `Task.affects` | One `AffectedSurface` per entry, no symbols; a `dir/**` entry becomes `dir/`, as for ownership. |
 | `GraphError { kind: Cycle }` and `IssueGraph::detect_cycle` | `GraphViolation::Cycle` | The adapter validates the built graph with `TaskGraph::topological_order`, so a cycle the old model rejected is rejected. |
-| `IssueGraph::waves` | `TaskGraph::concurrency_waves` | Required: the same waves for the same graph, checked on a diamond. |
-| `execution_order` | `TaskGraph::topological_order` | Required: the old order is a valid topological order of the adapted graph. |
+| `IssueGraph::waves` | `TaskGraph::concurrency_waves` | Same waves for the same graph (tested on a diamond). |
+| `execution_order` | `TaskGraph::topological_order` | The old order is a valid topological order of the adapted graph (tested). |
 
 All adapted tasks are `TaskKind::Implementation`, state `Defined`, in the repository and plan the caller names.
 
 ## Lease types
 
 Source models: `resilience::work_protocol::Lease`, `claim::ClaimLease`. Canonical: `initiative::task::Lease`.
-Adapter (planned, #4760): `initiative::compat_lease` (`LeaseView`, `may_supersede`).
+Adapter: `initiative::compat_lease` (`LeaseView`, `may_supersede`).
 
 | Source field | `LeaseView` accessor | Rule |
 |---|---|---|
@@ -64,7 +62,7 @@ Adapter (planned, #4760): `initiative::compat_lease` (`LeaseView`, `may_supersed
 ## Task lifecycles
 
 Source models: `resilience::work_protocol::WorkState` (9) with `WorkStateNonHappy` (8). Canonical:
-`initiative::task::TaskState` (12). Adapter (planned, #4761): `initiative::compat_lifecycle`. `non_happy` outranks `state`: when it is
+`initiative::task::TaskState` (12). Adapter: `initiative::compat_lifecycle`. `non_happy` outranks `state`: when it is
 set, the result comes from the non-happy table.
 
 | Source state | `TaskState` | Rule |
@@ -112,3 +110,13 @@ Seven of the nine happy states return exactly as they went in.
 The non-canonical types stay. Their module and type documentation gains a note naming the canonical type and the
 `initiative::compat_*` adapter. No `#[deprecated]` attribute is added, because it would turn every existing caller into
 a warning, and no caller is rewritten in this effort.
+
+`ClaimLease` keeps its note here rather than in rustdoc, because `claim/mod.rs` is over the line-count ratchet.
+
+## Adapters
+
+| Module | Adapts | Entry points |
+|---|---|---|
+| `initiative::compat_dag` (`crates/autospec-core/src/initiative/compat_dag.rs`) | `IssueGraph`, `SpecMetadata` lists | `task_graph_from_issue_graph`, `task_graph_from_specs`, `task_ids` |
+| `initiative::compat_lease` (`crates/autospec-core/src/initiative/compat_lease.rs`) | `work_protocol::Lease`, `ClaimLease`, `task::Lease` | `LeaseView`, `may_supersede` |
+| `initiative::compat_lifecycle` (`crates/autospec-core/src/initiative/compat_lifecycle.rs`) | `WorkState`, `WorkStateNonHappy` | `task_state_from_work`, `work_state_from_task` |
