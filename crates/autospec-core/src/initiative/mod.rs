@@ -6,6 +6,7 @@
 //! against it, and the GitHub projection of all of that. It deliberately does
 //! not belong to a repository or an organization.
 
+pub mod collision;
 pub mod dag;
 pub mod definition;
 pub mod dispatch;
