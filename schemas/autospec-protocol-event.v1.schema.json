@@ -142,6 +142,20 @@
       },
       "description": "Sampled resource use. Members are present only when sampled."
     },
+    "model": {
+      "type": "string",
+      "description": "Model used for the work, present only when known."
+    },
+    "input_tokens": {
+      "type": "integer",
+      "description": "Prompt tokens, present only when known.",
+      "minimum": 0
+    },
+    "output_tokens": {
+      "type": "integer",
+      "description": "Completion tokens, present only when known.",
+      "minimum": 0
+    },
     "artifact_refs": {
       "type": "array",
       "items": {
