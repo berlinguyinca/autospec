@@ -48,9 +48,12 @@ export interface Event {
   host_id?: string;
   human_summary: string;
   idempotency_key: string;
+  input_tokens?: number;
   last_progress_at?: string;
   mission_id: string;
+  model?: string;
   operation_id?: string;
+  output_tokens?: number;
   progress_kind?: string;
   protocol_version: number;
   repository?: string;
