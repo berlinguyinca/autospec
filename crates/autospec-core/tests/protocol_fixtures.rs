@@ -116,14 +116,14 @@ fn every_valid_record_has_no_violations_and_passes_the_envelope_check() {
 }
 
 #[test]
-fn valid_events_are_one_mission_with_sequences_one_to_three_and_all_apply() {
+fn valid_events_are_one_mission_with_sequences_one_to_four_and_all_apply() {
     let valid = fixture("valid.json");
     let events = valid["event"].as_array().expect("events");
     let sequences: Vec<u64> = events
         .iter()
         .map(|e| e["sequence"].as_u64().unwrap())
         .collect();
-    assert_eq!(sequences, vec![1, 2, 3]);
+    assert_eq!(sequences, vec![1, 2, 3, 4]);
     let mission = events[0]["mission_id"].clone();
     assert!(events.iter().all(|e| e["mission_id"] == mission));
     let set = schemas();

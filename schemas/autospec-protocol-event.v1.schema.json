@@ -156,6 +156,35 @@
       "description": "Completion tokens, present only when known.",
       "minimum": 0
     },
+    "verdict": {
+      "type": "string",
+      "enum": ["healthy", "quiet_healthy", "stalled"],
+      "description": "Watchdog verdict for a running execution, present only on watchdog samples."
+    },
+    "current_command": {
+      "type": "string",
+      "description": "Command the execution is currently running, present only when known."
+    },
+    "cpu_percent": {
+      "type": "number",
+      "description": "CPU use in percent, present only when sampled.",
+      "minimum": 0
+    },
+    "io_bytes": {
+      "type": "integer",
+      "description": "Cumulative block-I/O bytes, present only when sampled.",
+      "minimum": 0
+    },
+    "rss_bytes": {
+      "type": "integer",
+      "description": "Resident set size in bytes, present only when sampled.",
+      "minimum": 0
+    },
+    "disk_bytes": {
+      "type": "integer",
+      "description": "Bytes used on the execution's storage volume, present only when sampled.",
+      "minimum": 0
+    },
     "artifact_refs": {
       "type": "array",
       "items": {

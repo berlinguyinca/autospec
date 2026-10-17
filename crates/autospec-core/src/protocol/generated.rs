@@ -94,7 +94,13 @@ pub struct Event {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
     pub event_id: String,
     pub event_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,6 +113,8 @@ pub struct Event {
     pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<String>,
     pub mission_id: String,
@@ -124,6 +132,8 @@ pub struct Event {
     pub required_extensions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_usage: Option<EventResourceUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_bytes: Option<u64>,
     pub schema: EventSchema,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_version: Option<u64>,
@@ -134,6 +144,8 @@ pub struct Event {
     pub task_id: Option<String>,
     pub timestamp: String,
     pub trace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<EventVerdict>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +169,17 @@ pub struct EventResourceUsage {
 pub enum EventSchema {
     #[serde(rename = "autospec.protocol.event.v1")]
     AutospecProtocolEventV1,
+}
+
+// linter:allow-UNWIRED_PUB_ITEM generated protocol types; their consumers arrive in later T08 issues
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventVerdict {
+    #[serde(rename = "healthy")]
+    Healthy,
+    #[serde(rename = "quiet_healthy")]
+    QuietHealthy,
+    #[serde(rename = "stalled")]
+    Stalled,
 }
 
 // linter:allow-UNWIRED_PUB_ITEM generated protocol types; their consumers arrive in later T08 issues
