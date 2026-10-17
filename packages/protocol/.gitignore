@@ -1,0 +1,3 @@
+# Copied from ../../schemas by prepack.mjs; never committed.
+schemas/
+node_modules/

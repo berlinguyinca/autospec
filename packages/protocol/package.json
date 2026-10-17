@@ -1,0 +1,23 @@
+{
+  "name": "@autospec/protocol",
+  "version": "1.0.0",
+  "description": "autospec.protocol v1 contract: the generated TypeScript declarations (types.d.ts), rendered from the v1 JSON Schemas at the repository root",
+  "type": "module",
+  "types": "types.d.ts",
+  "files": [
+    "types.d.ts",
+    "schemas/"
+  ],
+  "exports": {
+    ".": {
+      "types": "./types.d.ts",
+      "default": "./types.d.ts"
+    },
+    "./schemas/*": "./schemas/*"
+  },
+  "scripts": {
+    "prepack": "node prepack.mjs",
+    "test": "node --test fixtures.test.mjs package.test.mjs"
+  },
+  "license": "MIT"
+}
