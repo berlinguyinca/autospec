@@ -40,7 +40,10 @@ export interface Event {
   artifact_refs?: string[];
   causal_parent_id?: string;
   commit_sha?: string;
+  cpu_percent?: number;
+  current_command?: string;
   deadline_at?: string;
+  disk_bytes?: number;
   event_id: string;
   event_type: string;
   extensions?: Record<string, unknown>;
@@ -49,6 +52,7 @@ export interface Event {
   human_summary: string;
   idempotency_key: string;
   input_tokens?: number;
+  io_bytes?: number;
   last_progress_at?: string;
   mission_id: string;
   model?: string;
@@ -63,6 +67,7 @@ export interface Event {
     disk_bytes?: number;
     rss_bytes?: number;
   };
+  rss_bytes?: number;
   schema: "autospec.protocol.event.v1";
   schema_version?: number;
   sequence: number;
@@ -70,6 +75,7 @@ export interface Event {
   task_id?: string;
   timestamp: string;
   trace_id: string;
+  verdict?: "healthy" | "quiet_healthy" | "stalled";
   worker_id?: string;
   worktree_id?: string;
 }

@@ -145,6 +145,26 @@
       "model": "fixture-model",
       "input_tokens": 120,
       "output_tokens": 45
+    },
+    {
+      "schema": "autospec.protocol.event.v1",
+      "protocol_version": 1,
+      "idempotency_key": "idem-event-4",
+      "mission_id": "m-fixture-1",
+      "sequence": 4,
+      "required_extensions": [],
+      "event_id": "ev-4",
+      "trace_id": "tr-1",
+      "event_type": "watchdog.sample",
+      "timestamp": "2026-10-15T12:00:01Z",
+      "human_summary": "watchdog healthy",
+      "last_progress_at": "2026-10-15T12:00:01Z",
+      "verdict": "healthy",
+      "current_command": "cargo build",
+      "cpu_percent": 12.5,
+      "io_bytes": 2048,
+      "rss_bytes": 1048576,
+      "disk_bytes": 10485760
     }
   ],
   "resource-record": [
