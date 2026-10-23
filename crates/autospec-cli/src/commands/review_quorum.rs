@@ -1,5 +1,5 @@
 //! `autospec review-quorum --input FILE [--json]` evaluates a head-bound post-PR
-//! review quorum (T06). The input is `{"head", "policy", "votes"}`; the votes are
+//! review quorum (T06). The input is `{"target", "head", "policy", "votes"}`; the votes are
 //! built from validated independent-review receipts (`review_commit` ->
 //! `commit`, `verdict_digest` -> `receipt_digest`). Exit 0 satisfied, 1
 //! insufficient (fresh review needed), 3 blocked, 2 invalid input.
@@ -17,6 +17,7 @@ const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QuorumInput {
+    target: String,
     head: String,
     policy: QuorumPolicy,
     votes: Vec<QuorumVote>,
@@ -69,5 +70,5 @@ fn evaluate_file(path: &str) -> Result<QuorumOutcome, String> {
     }
     let parsed: QuorumInput =
         serde_json::from_str(&raw).map_err(|e| format!("parse review quorum input: {e}"))?;
-    evaluate_quorum(&parsed.head, &parsed.votes, &parsed.policy)
+    evaluate_quorum(&parsed.target, &parsed.head, &parsed.votes, &parsed.policy)
 }

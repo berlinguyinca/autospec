@@ -14,7 +14,9 @@
 //!    implementer's provider (or on an unknown provider) cannot either.
 //! 4. A receipt digest shared by two identities is a replay: neither `lgtm`
 //!    counts.
-//! 5. Filters only ever remove `lgtm` votes. A current-head `blocked` verdict
+//! 5. A vote for another review target (repository + PR) is ignored: the same
+//!    SHA on a stacked or duplicate PR is a different diff against a different base.
+//! 6. Filters only ever remove `lgtm` votes. A current-head `blocked` verdict
 //!    always blocks, whoever filed it (fail closed).
 //!
 //! The function is pure and deterministic: no clock, no I/O.
@@ -34,6 +36,9 @@ pub enum VoteVerdict {
 #[serde(deny_unknown_fields)]
 pub struct QuorumVote {
     pub reviewer: String,
+    /// The review target the verdict was issued for (repository + PR, e.g.
+    /// `owner/repo#12`). A receipt for the same SHA on another PR is not this PR's.
+    pub target: String,
     #[serde(default)]
     pub provider: Option<String>,
     pub verdict: VoteVerdict,
@@ -48,8 +53,8 @@ pub struct QuorumVote {
 #[serde(deny_unknown_fields)]
 pub struct QuorumPolicy {
     pub required: usize,
-    #[serde(default)]
-    pub pr_author: Option<String>,
+    /// REQUIRED: a missing author would let the author vote as a reviewer.
+    pub pr_author: String,
     #[serde(default)]
     pub excluded_identities: Vec<String>,
     #[serde(default)]
@@ -62,6 +67,7 @@ pub struct QuorumPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum RejectReason {
     StaleHead,
+    WrongTarget,
     InvalidCommit,
     InvalidReviewer,
     Author,
@@ -116,6 +122,7 @@ fn canonical_identity(value: &str) -> Option<String> {
 }
 
 pub fn evaluate_quorum(
+    target: &str,
     head: &str,
     votes: &[QuorumVote],
     policy: &QuorumPolicy,
@@ -125,9 +132,12 @@ pub fn evaluate_quorum(
     if policy.required == 0 {
         return Err("review quorum requires at least one reviewer".to_string());
     }
-    let author = policy.pr_author.as_deref().and_then(canonical_identity);
-    if policy.pr_author.is_some() && author.is_none() {
-        return Err("review quorum pr_author is not a valid identity".to_string());
+    let author = canonical_identity(&policy.pr_author).ok_or_else(|| {
+        "review quorum pr_author is required and must be a valid identity".to_string()
+    })?;
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("review quorum requires a review target".to_string());
     }
     let mut excluded: BTreeSet<String> = BTreeSet::new();
     for raw in &policy.excluded_identities {
@@ -161,6 +171,10 @@ pub fn evaluate_quorum(
                 reason,
             });
         };
+        if vote.target.trim() != target {
+            reject(&mut rejected, RejectReason::WrongTarget);
+            continue;
+        }
         match canonical_commit(&vote.commit) {
             None => {
                 reject(&mut rejected, RejectReason::InvalidCommit);
@@ -177,7 +191,7 @@ pub fn evaluate_quorum(
             blocking.insert(reviewer);
             continue;
         }
-        if author.as_deref() == Some(reviewer.as_str()) {
+        if author == reviewer {
             reject(&mut rejected, RejectReason::Author);
             continue;
         }

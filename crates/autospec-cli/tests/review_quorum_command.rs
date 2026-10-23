@@ -23,8 +23,8 @@ fn run(input: &str) -> (Option<i32>, String, String) {
 
 fn input(head: &str, vote_commit: &str, verdict: &str) -> String {
     format!(
-        r#"{{"head":"{head}","policy":{{"required":1,"pr_author":"author"}},
-        "votes":[{{"reviewer":"r1","verdict":"{verdict}","commit":"{vote_commit}","receipt_digest":"d1"}}]}}"#
+        r#"{{"target":"o/r#1","head":"{head}","policy":{{"required":1,"pr_author":"author"}},
+        "votes":[{{"reviewer":"r1","target":"o/r#1","verdict":"{verdict}","commit":"{vote_commit}","receipt_digest":"d1"}}]}}"#
     )
 }
 
@@ -42,11 +42,21 @@ fn satisfied_exits_zero_stale_exits_one_blocked_exits_three() {
 
 #[test]
 fn malformed_input_is_a_diagnostic_not_a_pass() {
-    let (code, _, err) = run(r#"{"head":"abc","policy":{"required":1},"votes":[]}"#);
+    let (code, _, err) = run(
+        r#"{"target":"o/r#1","head":"abc","policy":{"required":1,"pr_author":"a"},"votes":[]}"#,
+    );
     assert_eq!(code, Some(2));
     assert!(err.contains("head"));
     assert_eq!(
-        run(r#"{"head":"x","policy":{"required":1},"votes":[],"extra":1}"#).0,
+        run(r#"{"target":"t","head":"x","policy":{"required":1,"pr_author":"a"},"votes":[],"extra":1}"#).0,
         Some(2)
     );
+}
+
+#[test]
+fn a_policy_without_pr_author_is_refused() {
+    let head = "a".repeat(40);
+    let body =
+        format!(r#"{{"target":"o/r#1","head":"{head}","policy":{{"required":1}},"votes":[]}}"#);
+    assert_eq!(run(&body).0, Some(2));
 }
