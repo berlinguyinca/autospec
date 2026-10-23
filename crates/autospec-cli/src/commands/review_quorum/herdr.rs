@@ -13,12 +13,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use autospec_core::autonomous::review_quorum::{
-    canonical_commit, canonical_target, receipt_binding, sha256_hex,
+    canonical_commit, canonical_target, hmac_sha256_hex, receipt_binding, sha256_hex,
 };
 use nix::fcntl::{Flock, FlockArg};
 use serde_json::{json, Value};
@@ -134,8 +134,8 @@ pub fn parse_config(text: &str) -> Result<HerdrConfig, String> {
         Some(v) => v
             .parse::<u64>()
             .ok()
-            .filter(|s| (10..=86_400).contains(s))
-            .ok_or("config: herdr.dispatch_timeout_seconds must be 10..86400")?,
+            .filter(|s| (1..=86_400).contains(s))
+            .ok_or("config: herdr.dispatch_timeout_seconds must be 1..86400")?,
     };
     Ok(HerdrConfig {
         enabled,
@@ -474,6 +474,34 @@ pub fn fetch_quorum(cfg: &HerdrConfig, scratch: &Path, pr_node: &str) -> Result<
 
 // ---------------------------------------------------------------- dispatch dedupe
 
+/// Create (0700) or validate a private directory: not a symlink, owned by us, not writable by
+/// group/other. Existing directories are accepted as they are; only new ones are tightened.
+pub fn private_dir(path: &Path) -> Result<PathBuf, String> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if !meta.file_type().is_dir() {
+                return Err(format!(
+                    "{} must be a real directory (not a symlink)",
+                    path.display()
+                ));
+            }
+            if meta.uid() != nix::unistd::Uid::current().as_raw() || meta.mode() & 0o022 != 0 {
+                return Err(format!(
+                    "{} must be owned by the current user and not group/other writable",
+                    path.display()
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::os::unix::fs::DirBuilderExt::mode(fs::DirBuilder::new().recursive(true), 0o700)
+                .create(path)
+                .map_err(|e| format!("create {}: {e}", path.display()))?;
+        }
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    }
+    Ok(path.to_path_buf())
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -497,50 +525,72 @@ fn pid_alive(pid: u32) -> bool {
 enum Marker {
     Absent,
     Dispatched,
-    Failed,
+    /// A dispatch failed `failures` times; the next try is allowed at `next_try_at`.
+    Failed {
+        failures: u32,
+        next_try_at: u64,
+    },
     /// Claimed by `pid` at `started`; `token` identifies the claim.
     Pending {
         pid: u32,
         started: u64,
         token: String,
+        failures: u32,
     },
-    /// Present but not readable as a marker (truncated by something else). Treated as a
-    /// pending claim whose age is the file's mtime, never as "not dispatched".
+    /// Present but not a marker this tool wrote (truncated, forged, wrong owner/mode, link).
+    /// Treated as a pending claim whose age is the file's mtime, never as "not dispatched".
     Unreadable {
         started: u64,
     },
 }
 
-fn read_marker(path: &Path) -> Marker {
-    let Ok(text) = fs::read_to_string(path) else {
-        return if path.exists() {
-            Marker::Unreadable {
-                started: file_mtime(path),
-            }
-        } else {
-            Marker::Absent
-        };
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        return Marker::Unreadable {
-            started: file_mtime(path),
-        };
-    };
-    match value["state"].as_str() {
-        Some("dispatched") => Marker::Dispatched,
-        Some("failed") => Marker::Failed,
-        Some("pending") => Marker::Pending {
-            pid: value["pid"]
-                .as_u64()
-                .and_then(|p| u32::try_from(p).ok())
-                .unwrap_or(0),
-            started: value["started"].as_u64().unwrap_or(0),
-            token: value["token"].as_str().unwrap_or("").to_string(),
-        },
-        _ => Marker::Unreadable {
-            started: file_mtime(path),
-        },
+/// The per-install secret that authenticates markers: a random nonce file in the state dir.
+fn marker_key(state_dir: &Path) -> Result<Vec<u8>, String> {
+    let path = state_dir.join(".nonce");
+    if fs::symlink_metadata(&path).is_err() {
+        let mut bytes = [0u8; 32];
+        fs::File::open("/dev/urandom")
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes))
+            .map_err(|e| format!("read /dev/urandom: {e}"))?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("create nonce: {e}"))?;
+        file.write_all(sha256_hex(&bytes).as_bytes())
+            .map_err(|e| format!("write nonce: {e}"))?;
     }
+    let meta = fs::symlink_metadata(&path).map_err(|e| format!("nonce: {e}"))?;
+    if !meta.file_type().is_file()
+        || meta.uid() != nix::unistd::Uid::current().as_raw()
+        || meta.mode() & 0o077 != 0
+    {
+        return Err(
+            "state nonce must be a regular 0600 file owned by the current user".to_string(),
+        );
+    }
+    fs::read(&path).map_err(|e| format!("nonce: {e}"))
+}
+
+fn marker_mac(key: &[u8], body: &Value) -> String {
+    let field = |name: &str| body[name].to_string();
+    let message = [
+        "pr",
+        "head",
+        "state",
+        "pid",
+        "started",
+        "token",
+        "failures",
+        "next_try_at",
+        "detail",
+    ]
+    .iter()
+    .map(|n| field(n))
+    .collect::<Vec<_>>()
+    .join("\u{1f}");
+    hmac_sha256_hex(key, message.as_bytes())
 }
 
 fn file_mtime(path: &Path) -> u64 {
@@ -551,21 +601,89 @@ fn file_mtime(path: &Path) -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Write a marker atomically (temp file in the same directory, then rename).
-fn write_marker(path: &Path, body: &Value) -> Result<(), String> {
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&tmp, format!("{body}\n")).map_err(|e| format!("write marker: {e}"))?;
+fn read_marker(path: &Path, key: &[u8]) -> Marker {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return Marker::Absent;
+    };
+    let unreadable = || Marker::Unreadable {
+        started: file_mtime(path),
+    };
+    if !meta.file_type().is_file()
+        || meta.uid() != nix::unistd::Uid::current().as_raw()
+        || meta.mode() & 0o077 != 0
+    {
+        return unreadable();
+    }
+    let Some(value) = fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return unreadable();
+    };
+    if value["mac"].as_str() != Some(marker_mac(key, &value).as_str()) {
+        return unreadable();
+    }
+    let num = |name: &str| value[name].as_u64().unwrap_or(0);
+    match value["state"].as_str() {
+        Some("dispatched") => Marker::Dispatched,
+        Some("failed") => Marker::Failed {
+            failures: u32::try_from(num("failures")).unwrap_or(u32::MAX),
+            next_try_at: num("next_try_at"),
+        },
+        Some("pending") => Marker::Pending {
+            pid: u32::try_from(num("pid")).unwrap_or(0),
+            started: num("started"),
+            token: value["token"].as_str().unwrap_or("").to_string(),
+            failures: u32::try_from(num("failures")).unwrap_or(0),
+        },
+        _ => unreadable(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn marker_body(
+    pr: &str,
+    head: &str,
+    state: &str,
+    pid: u32,
+    started: u64,
+    token: &str,
+    failures: u32,
+    next_try_at: u64,
+    detail: &str,
+) -> Value {
+    json!({"pr": pr, "head": head, "state": state, "pid": pid, "started": started, "token": token,
+           "failures": failures, "next_try_at": next_try_at, "detail": detail})
+}
+
+/// Write a marker atomically: a fresh 0600 temp file in the same directory, then rename.
+fn write_marker(path: &Path, key: &[u8], mut body: Value) -> Result<(), String> {
+    body["mac"] = Value::String(marker_mac(key, &body));
+    let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), now_secs()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|e| format!("write marker: {e}"))?;
+    file.write_all(format!("{body}\n").as_bytes())
+        .map_err(|e| format!("write marker: {e}"))?;
     fs::rename(&tmp, path).map_err(|e| format!("commit marker: {e}"))
 }
 
 /// Run `f` holding an exclusive flock on the state dir's lock file. The critical sections are
 /// short (read, decide, write one small file); the dispatch itself runs outside the lock.
 fn locked<T>(state_dir: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let lock = state_dir.join(".lock");
+    if fs::symlink_metadata(&lock).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err("state lock must not be a symlink".to_string());
+    }
     let file = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(state_dir.join(".lock"))
+        .mode(0o600)
+        .open(&lock)
         .map_err(|e| format!("open state lock: {e}"))?;
     let _guard =
         Flock::lock(file, FlockArg::LockExclusive).map_err(|(_, e)| format!("state lock: {e}"))?;
@@ -573,38 +691,111 @@ fn locked<T>(state_dir: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<
 }
 
 enum Claim {
-    Won(String),
+    Won { token: String, failures: u32 },
     Already,
     InProgress,
+    Backoff(u64),
 }
 
 /// Decide whether this process may dispatch for the marker, and if so claim it atomically.
+/// A pending claim outlives the dispatch timeout by a grace period, so a claim is never
+/// re-taken while its (killed-on-timeout) child may still be dying.
 fn claim(
     path: &Path,
+    key: &[u8],
     pr_node: &str,
     head: &str,
     timeout: u64,
     take: bool,
 ) -> Result<Claim, String> {
+    const GRACE: u64 = 30;
     let now = now_secs();
-    let expired = |started: u64| now.saturating_sub(started) > timeout;
-    match read_marker(path) {
+    let expired = |started: u64| now.saturating_sub(started) > timeout + GRACE;
+    let mut failures = 0;
+    match read_marker(path, key) {
         Marker::Dispatched => return Ok(Claim::Already),
-        Marker::Pending { pid, started, .. } if pid_alive(pid) && !expired(started) => {
-            return Ok(Claim::InProgress);
+        Marker::Pending {
+            pid,
+            started,
+            failures: f,
+            ..
+        } => {
+            if pid_alive(pid) && !expired(started) {
+                return Ok(Claim::InProgress);
+            }
+            failures = f;
         }
         Marker::Unreadable { started } if !expired(started) => return Ok(Claim::InProgress),
+        Marker::Failed {
+            failures: f,
+            next_try_at,
+        } => {
+            if now < next_try_at {
+                return Ok(Claim::Backoff(next_try_at));
+            }
+            failures = f;
+        }
         _ => {}
     }
     let token = sha256_hex(format!("{now}{}{pr_node}{head}", std::process::id()).as_bytes());
     if take {
         write_marker(
             path,
-            &json!({"pr": pr_node, "head": head, "state": "pending", "pid": std::process::id(),
-                    "started": now, "token": token}),
+            key,
+            marker_body(
+                pr_node,
+                head,
+                "pending",
+                std::process::id(),
+                now,
+                &token,
+                failures,
+                0,
+                "",
+            ),
         )?;
     }
-    Ok(Claim::Won(token))
+    Ok(Claim::Won { token, failures })
+}
+
+/// Run the dispatch command in its own process group and kill the group when it outlives
+/// `timeout`; the child is always reaped before this returns, so the claim is held until it
+/// is dead.
+fn run_dispatch(
+    command: &str,
+    pr_node: &str,
+    head: &str,
+    timeout: u64,
+) -> Result<std::process::ExitStatus, String> {
+    use std::os::unix::process::CommandExt;
+    let mut child = Command::new(command)
+        .arg("--")
+        .arg(pr_node)
+        .arg(head)
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("run dispatch_command: {e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                if let Ok(pid) = i32::try_from(child.id()) {
+                    let _ = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(pid),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "dispatch_command exceeded dispatch_timeout_seconds ({timeout}) and was killed"
+                ));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(e) => return Err(format!("wait for dispatch_command: {e}")),
+        }
+    }
 }
 
 /// Statuses where Herdr cannot vouch for the head or the author: an operator must look, and
@@ -640,7 +831,7 @@ pub fn request_rereview(
     let Some(head) = head.filter(|_| required) else {
         return Ok((format!("not_needed:{status}"), quorum));
     };
-    fs::create_dir_all(state_dir).map_err(|e| format!("create state dir: {e}"))?;
+    private_dir(state_dir)?;
     let marker = state_dir.join(format!(
         "{}-{}.json",
         &sha256_hex(pr_node.as_bytes())[..16],
@@ -648,24 +839,35 @@ pub fn request_rereview(
     ));
     let timeout = cfg.dispatch_timeout_seconds;
     let mine = locked(state_dir, || {
-        claim(&marker, &pr_node, &head, timeout, !dry_run)
+        let key = marker_key(state_dir)?;
+        claim(&marker, &key, &pr_node, &head, timeout, !dry_run)
     })?;
-    let token = match mine {
+    let (token, failures) = match mine {
         Claim::Already => return Ok(("already_requested".to_string(), quorum)),
         Claim::InProgress => return Ok(("request_in_progress".to_string(), quorum)),
-        Claim::Won(_) if dry_run => return Ok(("would_request".to_string(), quorum)),
-        Claim::Won(token) => token,
+        Claim::Backoff(_) => return Ok(("request_backoff".to_string(), quorum)),
+        Claim::Won { .. } if dry_run => return Ok(("would_request".to_string(), quorum)),
+        Claim::Won { token, failures } => (token, failures),
     };
     let finish = |state: &str, detail: &str| -> Result<bool, String> {
         locked(state_dir, || {
-            match read_marker(&marker) {
+            let key = marker_key(state_dir)?;
+            match read_marker(&marker, &key) {
                 Marker::Pending { token: t, .. } if t == token => {}
                 _ => return Ok(false), // reclaimed by someone else after our timeout
             }
+            let now = now_secs();
+            let (n, next) = if state == "failed" {
+                let n = failures.saturating_add(1);
+                // exponential backoff: 30s, 60s, 120s ... capped at one hour
+                (n, now + (30u64 << n.saturating_sub(1).min(7)).min(3600))
+            } else {
+                (0, 0)
+            };
             write_marker(
                 &marker,
-                &json!({"pr": pr_node, "head": head, "state": state, "detail": detail,
-                        "finished": now_secs()}),
+                &key,
+                marker_body(&pr_node, &head, state, 0, now, "", n, next, detail),
             )?;
             Ok(true)
         })
@@ -675,29 +877,22 @@ pub fn request_rereview(
             finish("dispatched", "no dispatch_command configured: marker only")?;
             Ok(("requested_marker_only".to_string(), quorum))
         }
-        Some(command) => {
-            let outcome = Command::new(command)
-                .arg("--")
-                .arg(&pr_node)
-                .arg(&head)
-                .status();
-            match outcome {
-                Ok(status) if status.success() => {
-                    finish("dispatched", "")?;
-                    Ok(("requested".to_string(), quorum))
-                }
-                Ok(status) => {
-                    finish("failed", &format!("exit {status}"))?;
-                    Err(format!(
-                        "dispatch_command failed ({status}); will retry on the next request"
-                    ))
-                }
-                Err(e) => {
-                    finish("failed", &format!("spawn: {e}"))?;
-                    Err(format!("run dispatch_command: {e}"))
-                }
+        Some(command) => match run_dispatch(command, &pr_node, &head, timeout) {
+            Ok(status) if status.success() => {
+                finish("dispatched", "")?;
+                Ok(("requested".to_string(), quorum))
             }
-        }
+            Ok(status) => {
+                finish("failed", &format!("exit {status}"))?;
+                Err(format!(
+                    "dispatch_command failed ({status}); will retry after a backoff"
+                ))
+            }
+            Err(e) => {
+                finish("failed", &e)?;
+                Err(e)
+            }
+        },
     }
 }
 
@@ -737,7 +932,7 @@ mod tests {
             ("herdr:\n  url: \"x\n", "unterminated quote"),
             ("herdr:\n  url: \"x\" y\n", "text after quote"),
             (
-                "herdr:\n  dispatch_timeout_seconds: 1\n",
+                "herdr:\n  dispatch_timeout_seconds: 0\n",
                 "timeout too small",
             ),
             (

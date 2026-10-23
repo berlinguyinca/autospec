@@ -162,6 +162,44 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// HMAC-SHA256 (RFC 2104) as lower-case hex. Hand-rolled over `sha2` so the tree gains no
+/// dependency; checked against the RFC 4231 vectors in the tests.
+pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    let mut block = [0u8; 64];
+    if key.len() > 64 {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let pad = |byte: u8| -> Vec<u8> { block.iter().map(|b| b ^ byte).collect() };
+    let mut inner = pad(0x36);
+    inner.extend_from_slice(message);
+    let mut outer = pad(0x5c);
+    outer.extend_from_slice(&Sha256::digest(&inner));
+    Sha256::digest(&outer)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// What an attested report's HMAC covers. The same bytes are built when writing and verifying.
+pub fn report_attestation_message(
+    target: &str,
+    head: &str,
+    verdict: &str,
+    evaluated_at: u64,
+    votes_digest: &str,
+) -> Vec<u8> {
+    format!(
+        "pr-review-report-v1\0{}\0{}\0{}\0{evaluated_at}\0{}",
+        canonical_target(target).unwrap_or_default(),
+        ascii_trim(head).to_ascii_lowercase(),
+        verdict,
+        ascii_trim(votes_digest).to_ascii_lowercase()
+    )
+    .into_bytes()
+}
+
 /// The binding a producer attaches to a receipt digest and an evaluator recomputes.
 pub fn receipt_binding(target: &str, commit: &str, reviewer: &str, receipt_digest: &str) -> String {
     let tuple = format!(

@@ -13,7 +13,10 @@ use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 
+mod gate;
 mod herdr;
+
+use gate::REPORT_SOURCE;
 
 use autospec_core::autonomous::review_quorum::{
     evaluate_quorum, QuorumOutcome, QuorumPolicy, QuorumStatus, QuorumVote,
@@ -41,6 +44,8 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     let mut input = None;
     let mut json = false;
     let mut report = None;
+    let mut operator_config = None;
+    let mut repo_root = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -49,11 +54,38 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             "--write-report" => {
                 report = Some(iter.next().ok_or("--write-report requires a path")?.clone())
             }
+            "--operator-config" => {
+                operator_config = Some(PathBuf::from(
+                    iter.next().ok_or("--operator-config requires a path")?,
+                ))
+            }
+            "--repo-root" => {
+                repo_root = Some(PathBuf::from(
+                    iter.next().ok_or("--repo-root requires a directory")?,
+                ))
+            }
             other => return Err(format!("unknown review-quorum argument: {other}")),
         }
     }
     let path = input.ok_or("review-quorum requires --input FILE")?;
-    let (target, outcome) = match evaluate_file(&path) {
+    // The attestation key (if the trusted config names one) is resolved before evaluating, so
+    // a misconfigured key also overwrites the old report with a non-pass one.
+    let key = if report.is_some() {
+        match attestation_key(repo_root.as_deref(), operator_config.as_deref()) {
+            Ok(key) => key,
+            Err(error) => {
+                if let Some(report) = &report {
+                    write_error_report(report, &path, &error).map_err(|e| {
+                        format!("{error}; also could not write the failure report: {e}")
+                    })?;
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+    let (target, outcome, votes_digest) = match evaluate_file(&path) {
         Ok(ok) => ok,
         Err(error) => {
             // The gate must never keep trusting an OLDER pass because this evaluation failed:
@@ -67,7 +99,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         }
     };
     if let Some(report) = report {
-        write_promotion_report(&report, &target, &outcome)?;
+        write_promotion_report(&report, &target, &outcome, &votes_digest, key.as_deref())?;
     }
     if json {
         println!(
@@ -92,7 +124,21 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     })
 }
 
-fn evaluate_file(path: &str) -> Result<(String, QuorumOutcome), String> {
+/// The attestation key named by the TRUSTED config (operator file or the default branch's),
+/// never by the checkout under review.
+fn attestation_key(
+    repo_root: Option<&std::path::Path>,
+    operator: Option<&std::path::Path>,
+) -> Result<Option<Vec<u8>>, String> {
+    let root = repo_root.map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let trusted = gate::trusted(&root, operator, true);
+    match trusted.key_file {
+        None => Ok(None),
+        Some(file) => gate::load_attestation_key(&file, Some(&root)).map(Some),
+    }
+}
+
+fn evaluate_file(path: &str) -> Result<(String, QuorumOutcome, String), String> {
     let file = fs::File::open(path).map_err(|e| format!("open review quorum input: {e}"))?;
     let mut raw = String::new();
     file.take(MAX_INPUT_BYTES + 1)
@@ -104,14 +150,25 @@ fn evaluate_file(path: &str) -> Result<(String, QuorumOutcome), String> {
     let parsed: QuorumInput =
         serde_json::from_str(&raw).map_err(|e| format!("parse review quorum input: {e}"))?;
     let outcome = evaluate_quorum(&parsed.target, &parsed.head, &parsed.votes, &parsed.policy)?;
-    Ok((parsed.target, outcome))
+    // sorted-key JSON of the votes as given: what the attestation binds the verdict to
+    let votes: serde_json::Value = serde_json::from_str::<serde_json::Value>(&raw)
+        .map_err(|e| e.to_string())?["votes"]
+        .clone();
+    let digest = autospec_core::autonomous::review_quorum::sha256_hex(votes.to_string().as_bytes());
+    Ok((parsed.target, outcome, digest))
 }
 
 /// Write the report `autospec-promote-pr.sh` already consumes (`review-quorum.json`), so the
 /// merge path gates on THIS evaluator without any change to the shell: a non-pass verdict or
 /// any blocking finding blocks promotion. Run it after the feature-scoped Python quorum, which
 /// writes the same file.
-fn write_promotion_report(path: &str, target: &str, outcome: &QuorumOutcome) -> Result<(), String> {
+fn write_promotion_report(
+    path: &str,
+    target: &str,
+    outcome: &QuorumOutcome,
+    votes_digest: &str,
+    key: Option<&[u8]>,
+) -> Result<(), String> {
     let (verdict, ready) = match outcome.status {
         QuorumStatus::Satisfied => ("pass", true),
         QuorumStatus::Blocked => ("blocked", false),
@@ -122,13 +179,27 @@ fn write_promotion_report(path: &str, target: &str, outcome: &QuorumOutcome) -> 
         .iter()
         .map(|who| serde_json::json!({"specialist": who, "verdict": "blocked"}))
         .collect();
-    let body = serde_json::json!({"schema": 1, "source": REPORT_SOURCE, "target_id": target,
+    let target = autospec_core::autonomous::review_quorum::canonical_target(target)
+        .unwrap_or_else(|| target.to_string());
+    let evaluated_at = gate::evaluated_now();
+    let mut body = serde_json::json!({"schema": 1, "source": REPORT_SOURCE, "target_id": target,
         "head": outcome.head, "verdict": verdict, "promotion_ready": ready, "blocking_findings": blocking,
-        "counted": outcome.counted, "rereview_required": outcome.rereview_required});
+        "counted": outcome.counted, "rereview_required": outcome.rereview_required,
+        "evaluated_at": evaluated_at, "votes_digest": votes_digest});
+    if let Some(key) = key {
+        let message = autospec_core::autonomous::review_quorum::report_attestation_message(
+            &target,
+            &outcome.head,
+            verdict,
+            evaluated_at,
+            votes_digest,
+        );
+        body["hmac"] = serde_json::Value::String(
+            autospec_core::autonomous::review_quorum::hmac_sha256_hex(key, &message),
+        );
+    }
     write_atomic(path, &body)
 }
-
-const REPORT_SOURCE: &str = "head-bound-review-quorum";
 
 /// Temp file + rename, so a reader never sees half a report and a crash leaves the old one.
 fn write_atomic(path: &str, body: &serde_json::Value) -> Result<(), String> {
@@ -158,93 +229,28 @@ fn write_error_report(path: &str, input: &str, error: &str) -> Result<(), String
     write_atomic(path, &body)
 }
 
-/// Does `.autospec/autospec.yml` require the head-bound quorum? (`review_quorum:` block with
-/// `required: true`.) A missing or unreadable file means "not required".
-fn required_by_config(root: &std::path::Path) -> bool {
-    let Ok(text) = fs::read_to_string(root.join(".autospec/autospec.yml")) else {
-        return false;
-    };
-    let mut in_block = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if !line.starts_with([' ', '\t']) {
-            in_block = trimmed.split('#').next().unwrap_or("").trim() == "review_quorum:";
-        } else if in_block {
-            let value = trimmed
-                .strip_prefix("required:")
-                .map(|v| v.split('#').next().unwrap_or("").trim());
-            if value == Some("true") {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// The live head and target of a PR, from `gh` (a fake `gh` on PATH in tests).
-fn live_pr(
-    root: &std::path::Path,
-    pr: &str,
-    repo: Option<&str>,
-) -> Result<(String, String), String> {
-    let mut cmd = std::process::Command::new("gh");
-    cmd.current_dir(root)
-        .args(["pr", "view", pr, "--json", "headRefOid,url"]);
-    if let Some(repo) = repo {
-        cmd.args(["--repo", repo]);
-    }
-    let out = cmd.output().map_err(|e| format!("cannot run gh: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "gh pr view failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("gh answered invalid JSON: {e}"))?;
-    let head = value["headRefOid"]
-        .as_str()
-        .and_then(autospec_core::autonomous::review_quorum::canonical_commit)
-        .ok_or("gh did not return a full head sha")?;
-    let url = url::Url::parse(value["url"].as_str().unwrap_or(""))
-        .map_err(|e| format!("gh returned no PR url: {e}"))?;
-    let segments: Vec<&str> = url
-        .path_segments()
-        .map(Iterator::collect)
-        .unwrap_or_default();
-    let (Some(host), [owner, name, "pull", number, ..]) = (url.host_str(), segments.as_slice())
-    else {
-        return Err("gh returned an unexpected PR url".to_string());
-    };
-    Ok((
-        head,
-        format!("pr:{host}/{owner}/{name}#{number}").to_ascii_lowercase(),
-    ))
-}
-
-/// `verify-report`: may the merge path trust `review-quorum.json`? Exit 0 yes, 1 no (reasons
-/// printed as JSON). Fail closed: when the quorum is required (config or `--required`) a
-/// missing, empty, malformed, failing, or other-head report blocks, and so does any report
-/// this tool wrote (`source: head-bound-review-quorum`) that is not a current pass for THIS PR.
-/// Older reports from the feature-scoped Python quorum keep their old meaning when the
-/// quorum is not required.
+/// `verify-report`: may the merge path trust `review-quorum.json`? See `gate.rs`.
+/// Exit 0 yes, 1 no (reasons as JSON), 2 usage.
 fn verify_report(args: &[String]) -> Result<i32, String> {
-    let f = flags(args, &["repo-root", "report", "pr", "repo", "required"])?;
-    let root = PathBuf::from(f.get("repo-root").map_or(".", String::as_str));
-    let report_path = f.get("report").map_or_else(
-        || root.join(".autospec/reports/review-quorum.json"),
-        PathBuf::from,
-    );
-    let required = f.contains_key("required") || required_by_config(&root);
-    let pr = f.get("pr").map_or("", String::as_str);
-    let repo = f.get("repo").map(String::as_str);
+    let f = flags(
+        args,
+        &[
+            "repo-root",
+            "report",
+            "pr",
+            "repo",
+            "head",
+            "required",
+            "no-live",
+            "operator-config",
+            "scratch-dir",
+        ],
+    )?;
+    let pr = f.get("pr").cloned().unwrap_or_default();
     if !pr.is_empty() && !(pr.len() <= 9 && pr.bytes().all(|b| b.is_ascii_digit())) {
         return Err("--pr must be a PR number".to_string());
     }
-    if let Some(repo) = repo {
+    if let Some(repo) = f.get("repo") {
         let ok = repo.split_once('/').is_some_and(|(o, n)| {
             [o, n].iter().all(|p| {
                 !p.is_empty()
@@ -256,95 +262,24 @@ fn verify_report(args: &[String]) -> Result<i32, String> {
             return Err("--repo must be OWNER/REPO".to_string());
         }
     }
-    let mut reasons: Vec<String> = Vec::new();
-    let report: Option<serde_json::Value> = match fs::read_to_string(&report_path) {
-        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(v) if v.as_object().is_some_and(|o| !o.is_empty()) => Some(v),
-            Ok(_) => {
-                reasons.push("review-quorum.json is empty or not an object".to_string());
-                None
-            }
-            Err(e) => {
-                reasons.push(format!("review-quorum.json is malformed: {e}"));
-                None
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if required {
-                reasons.push(
-                    "review quorum is required but review-quorum.json is missing".to_string(),
-                );
-            }
-            None
-        }
-        Err(e) => {
-            reasons.push(format!("review-quorum.json is unreadable: {e}"));
-            None
-        }
-    };
-    if let Some(report) = &report {
-        let verdict = report["verdict"].as_str().unwrap_or("");
-        let ours = report["source"].as_str() == Some(REPORT_SOURCE);
-        if !matches!(verdict, "pass" | "pass_with_warnings") {
-            reasons.push(format!(
-                "review quorum verdict is {}",
-                if verdict.is_empty() {
-                    "missing"
-                } else {
-                    verdict
-                }
-            ));
-        }
-        if report["blocking_findings"]
-            .as_array()
-            .is_some_and(|b| !b.is_empty())
-        {
-            reasons.push("blocking specialist finding".to_string());
-        }
-        if required || ours {
-            if !ours {
-                reasons.push(
-                    "required review quorum report is not from the head-bound evaluator"
-                        .to_string(),
-                );
-            }
-            if report["promotion_ready"].as_bool() != Some(true) || verdict != "pass" {
-                reasons.push("report is not a head-bound pass".to_string());
-            }
-            if pr.is_empty() {
-                reasons.push("no --pr: cannot bind the report to a PR head".to_string());
-            } else {
-                match live_pr(&root, pr, repo) {
-                    Err(e) => reasons.push(format!("cannot verify the live PR head: {e}")),
-                    Ok((live_head, live_target)) => {
-                        let head = report["head"]
-                            .as_str()
-                            .and_then(autospec_core::autonomous::review_quorum::canonical_commit);
-                        if head.as_deref() != Some(live_head.as_str()) {
-                            reasons.push(format!(
-                                "report head {} is not the live PR head {live_head}",
-                                head.as_deref().unwrap_or("<none>")
-                            ));
-                        }
-                        let target = report["target_id"]
-                            .as_str()
-                            .and_then(autospec_core::autonomous::review_quorum::canonical_target);
-                        if target.as_deref() != Some(live_target.as_str()) {
-                            reasons.push(format!(
-                                "report target {} is not {live_target}",
-                                target.as_deref().unwrap_or("<none>")
-                            ));
-                        }
-                    }
-                }
-            }
+    if let Some(head) = f.get("head") {
+        if autospec_core::autonomous::review_quorum::canonical_commit(head).is_none() {
+            return Err("--head must be a full commit sha".to_string());
         }
     }
-    println!(
-        "{}",
-        serde_json::json!({"ok": reasons.is_empty(), "required": required, "reasons": reasons})
-    );
-    Ok(i32::from(!reasons.is_empty()))
+    let (ok, body) = gate::verify(&gate::VerifyArgs {
+        root: PathBuf::from(f.get("repo-root").map_or(".", String::as_str)),
+        report: f.get("report").map(PathBuf::from),
+        pr,
+        repo: f.get("repo").cloned(),
+        expect_head: f.get("head").cloned(),
+        force_required: f.contains_key("required"),
+        no_live: f.contains_key("no-live"),
+        operator_config: f.get("operator-config").map(PathBuf::from),
+        scratch: f.get("scratch-dir").map(PathBuf::from),
+    });
+    println!("{body}");
+    Ok(i32::from(!ok))
 }
 
 fn flags(
@@ -358,7 +293,7 @@ fn flags(
         if !arg.starts_with("--") || !allowed.contains(&name) {
             return Err(format!("unknown review-quorum argument: {arg}"));
         }
-        let value = if matches!(name, "dry-run" | "retract" | "required") {
+        let value = if matches!(name, "dry-run" | "retract" | "required" | "no-live") {
             "true".to_string()
         } else {
             iter.next()
@@ -378,10 +313,13 @@ fn need<'a>(
         .ok_or(format!("review-quorum requires --{key}"))
 }
 
-fn scratch(base: &str) -> Result<PathBuf, String> {
-    let dir = PathBuf::from(base);
-    fs::create_dir_all(&dir).map_err(|e| format!("create scratch dir: {e}"))?;
-    Ok(dir)
+/// The scratch dir for key-bearing temp files: `--scratch-dir`, else the operator's state dir
+/// (never inside a repository).
+fn scratch(explicit: Option<&String>) -> Result<PathBuf, String> {
+    match explicit {
+        Some(dir) => herdr::private_dir(&PathBuf::from(dir)),
+        None => herdr::private_dir(&gate::default_state_root()?.join("herdr-scratch")),
+    }
 }
 
 /// Fully validate the two receipt files before anything is signed or sent: both are JSON
@@ -470,11 +408,7 @@ fn publish(args: &[String]) -> Result<i32, String> {
         );
         return Ok(0);
     }
-    let dir = scratch(
-        f.get("scratch-dir")
-            .map(String::as_str)
-            .unwrap_or(".autospec/state/herdr-scratch"),
-    )?;
+    let dir = scratch(f.get("scratch-dir"))?;
     let acks = herdr::publish(&cfg, &dir, &pubn)?;
     println!(
         "{}",
@@ -495,16 +429,11 @@ fn request(args: &[String]) -> Result<i32, String> {
         println!("{{\"outcome\":\"skipped\",\"reason\":\"herdr.enabled is false\"}}");
         return Ok(0);
     }
-    let dir = scratch(
-        f.get("scratch-dir")
-            .map(String::as_str)
-            .unwrap_or(".autospec/state/herdr-scratch"),
-    )?;
-    let state = PathBuf::from(
-        f.get("state-dir")
-            .map(String::as_str)
-            .unwrap_or(".autospec/state/review-requests"),
-    );
+    let dir = scratch(f.get("scratch-dir"))?;
+    let state = match f.get("state-dir") {
+        Some(dir) => PathBuf::from(dir),
+        None => gate::default_state_root()?.join("review-requests"),
+    };
     let (outcome, quorum) = herdr::request_rereview(
         &cfg,
         &dir,

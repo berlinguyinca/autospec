@@ -9,7 +9,7 @@ use std::process::Command;
 mod temp_directory;
 use temp_directory::unique as temp_dir;
 
-use autospec_core::autonomous::review_quorum::{receipt_binding, sha256_hex};
+use autospec_core::autonomous::review_quorum::{hmac_sha256_hex, receipt_binding, sha256_hex};
 
 fn autospec(args: &[&str]) -> (Option<i32>, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_autospec"))
@@ -109,6 +109,47 @@ fn verdict_files(dir: &Path, commit: &str, verdict: &str) -> (PathBuf, PathBuf) 
 }
 
 const PR: &str = "pr:github.com/o/r#7";
+
+/// Write a marker the way `request` does (including its MAC under the state dir's nonce), so a
+/// test can stage a specific claim state.
+fn forge_marker(
+    state: &Path,
+    marker: &Path,
+    head: &str,
+    marker_state: &str,
+    pid: u32,
+    started: u64,
+    failures: u32,
+    next_try_at: u64,
+) {
+    std::fs::create_dir_all(state).unwrap();
+    std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let nonce = state.join(".nonce");
+    if !nonce.exists() {
+        std::fs::write(&nonce, "n".repeat(64)).unwrap();
+        std::fs::set_permissions(&nonce, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut body = serde_json::json!({"pr": PR, "head": head, "state": marker_state, "pid": pid,
+        "started": started, "token": "t", "failures": failures, "next_try_at": next_try_at, "detail": ""});
+    let message = [
+        "pr",
+        "head",
+        "state",
+        "pid",
+        "started",
+        "token",
+        "failures",
+        "next_try_at",
+        "detail",
+    ]
+    .iter()
+    .map(|n| body[*n].to_string())
+    .collect::<Vec<_>>()
+    .join("\u{1f}");
+    body["mac"] = hmac_sha256_hex(&std::fs::read(&nonce).unwrap(), message.as_bytes()).into();
+    std::fs::write(marker, format!("{body}\n")).unwrap();
+    std::fs::set_permissions(marker, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
 
 #[test]
 fn publish_is_off_by_default_and_builds_bound_idempotent_envelopes() {
@@ -294,10 +335,37 @@ fn a_failed_dispatch_is_retried_not_remembered_as_done() {
         ])
     };
     assert_eq!(run().0, Some(2));
-    assert_eq!(
-        run().0,
-        Some(2),
-        "still pending: it dispatches again instead of reporting already_requested"
+    let marker_path = std::fs::read_dir(&state)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "json"))
+        .unwrap();
+    let marker: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
+    assert_eq!(marker["state"], "failed");
+    assert_eq!(marker["failures"], 1);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(
+        marker["next_try_at"].as_u64().unwrap() >= now + 25,
+        "backoff is stored: {marker}"
+    );
+    // inside the backoff window nothing is dispatched again (and it is not "done" either)
+    let (code, out, _) = run();
+    assert_eq!(code, Some(0));
+    assert!(out.contains("request_backoff"), "{out}");
+    // once the window has passed it is retried, with the failure count carried and the delay doubled
+    forge_marker(&state, &marker_path, &head, "failed", 0, now, 1, now - 1);
+    assert_eq!(run().0, Some(2));
+    let marker: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
+    assert_eq!(marker["failures"], 2);
+    assert!(
+        marker["next_try_at"].as_u64().unwrap() >= now + 55,
+        "{marker}"
     );
 }
 
@@ -383,6 +451,10 @@ impl Gate {
             file.to_str().unwrap(),
             "--write-report",
             self.report().to_str().unwrap(),
+            "--repo-root",
+            self.dir.to_str().unwrap(),
+            "--operator-config",
+            self.dir.join("no-operator-config.yml").to_str().unwrap(),
         ])
         .0
     }
@@ -556,6 +628,8 @@ fn verify_report_can_be_run_directly() {
                 "verify-report",
                 "--repo-root",
                 gate.dir.to_str().unwrap(),
+                "--operator-config",
+                gate.dir.join("no-operator-config.yml").to_str().unwrap(),
             ])
             .args(extra)
             .output()
@@ -701,17 +775,21 @@ fn concurrent_requests_dispatch_exactly_once() {
 fn a_pending_marker_with_a_live_owner_blocks_and_a_stale_one_expires() {
     let r = Request::new("rq-pending", "true");
     let head = "a".repeat(40);
-    std::fs::create_dir_all(&r.state).unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let write = |pid: u32, started: u64| {
-        std::fs::write(
-            r.marker(&head),
-            format!(r#"{{"state":"pending","pid":{pid},"started":{started},"token":"t"}}"#),
-        )
-        .unwrap();
+        forge_marker(
+            &r.state,
+            &r.marker(&head),
+            &head,
+            "pending",
+            pid,
+            started,
+            0,
+            0,
+        );
     };
     // Live owner (this test process), fresh: blocks.
     write(std::process::id(), now);
@@ -736,6 +814,7 @@ fn a_partial_marker_is_pending_not_dispatchable_until_it_expires() {
     let r = Request::new("rq-partial", "true");
     let head = "a".repeat(40);
     std::fs::create_dir_all(&r.state).unwrap();
+    std::fs::set_permissions(&r.state, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(r.marker(&head), "{\"state\":\"pend").unwrap();
     assert!(
         r.run().1.contains("request_in_progress"),
@@ -1040,4 +1119,534 @@ fn receipt_fields_are_validated_before_anything_is_built() {
     )
     .unwrap();
     assert_eq!(go().0, Some(0));
+}
+
+// ---------------------------------------------------------------- trusted sources, attestation, live
+fn run_git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+impl Gate {
+    /// Make the repo a git checkout whose default branch (`origin/main`) carries `yaml` as
+    /// `.autospec/autospec.yml`; the working tree (the "PR") may then change it freely.
+    fn base(&self, yaml: &str) {
+        run_git(&self.dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(self.dir.join(".autospec/autospec.yml"), yaml).unwrap();
+        run_git(&self.dir, &["add", ".autospec/autospec.yml"]);
+        run_git(&self.dir, &["commit", "-q", "-m", "base"]);
+        run_git(
+            &self.dir,
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+    }
+
+    fn operator(&self, yaml: &str) -> PathBuf {
+        self.operator_named("operator.yml", yaml)
+    }
+
+    fn operator_named(&self, name: &str, yaml: &str) -> PathBuf {
+        let path = self.dir.join(name);
+        std::fs::write(&path, yaml).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    }
+
+    fn evaluate_with(&self, body: &str, operator: &Path) -> Option<i32> {
+        let file = self.dir.join("in.json");
+        std::fs::write(&file, body).unwrap();
+        autospec(&[
+            "review-quorum",
+            "--input",
+            file.to_str().unwrap(),
+            "--write-report",
+            self.report().to_str().unwrap(),
+            "--repo-root",
+            self.dir.to_str().unwrap(),
+            "--operator-config",
+            operator.to_str().unwrap(),
+        ])
+        .0
+    }
+
+    fn verify(&self, operator: &Path, extra: &[&str]) -> (Option<i32>, serde_json::Value) {
+        let path = format!(
+            "{}:{}",
+            self.bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = Command::new(env!("CARGO_BIN_EXE_autospec"))
+            .env("PATH", path)
+            .args([
+                "review-quorum",
+                "verify-report",
+                "--repo-root",
+                self.dir.to_str().unwrap(),
+                "--operator-config",
+                operator.to_str().unwrap(),
+                "--pr",
+                "7",
+            ])
+            .args(extra)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        (
+            out.status.code(),
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn rewrite_report(&self, edit: impl FnOnce(&mut serde_json::Value)) {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(self.report()).unwrap()).unwrap();
+        edit(&mut v);
+        std::fs::write(self.report(), v.to_string()).unwrap();
+    }
+}
+
+fn reasons(v: &serde_json::Value) -> String {
+    v["reasons"].to_string()
+}
+
+fn key_file(name: &str) -> PathBuf {
+    let dir = temp_dir(name);
+    let path = dir.join("attest.key");
+    std::fs::write(
+        &path,
+        format!("{}\n", sha256_hex(name.as_bytes()).repeat(2)),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+#[test]
+fn a_pr_cannot_remove_the_requirement_by_editing_its_own_checkout() {
+    let gate = Gate::new("rq-trusted-base");
+    gate.base("version: 1\nreview_quorum:\n  required: true\n");
+    // the PR strips the block and has no report: still blocked, by the default branch's config
+    std::fs::write(gate.dir.join(".autospec/autospec.yml"), "version: 1\n").unwrap();
+    let (code, plan) = gate.promote("7");
+    assert_eq!(code, Some(1), "{plan}");
+    assert!(plan.contains("review-quorum.json is missing"), "{plan}");
+    // a real pass promotes; the PR then deleting the report is blocked again
+    let a = "a".repeat(40);
+    assert_eq!(gate.evaluate(&gate_input(&a, "lgtm", "author")), Some(0));
+    let (code, plan) = gate.promote("7");
+    assert_eq!(code, Some(0), "{plan}");
+    let plan_json: serde_json::Value = serde_json::from_str(&plan).unwrap();
+    assert_eq!(
+        plan_json["review_quorum_head"],
+        a.as_str(),
+        "the verified head is recorded"
+    );
+    std::fs::remove_file(gate.report()).unwrap();
+    assert_eq!(gate.promote("7").0, Some(1));
+    // and `required: false` in the PR's own file changes nothing either
+    std::fs::write(
+        gate.dir.join(".autospec/autospec.yml"),
+        "review_quorum:\n  required: false\n",
+    )
+    .unwrap();
+    assert_eq!(gate.promote("7").0, Some(1));
+}
+
+#[test]
+fn the_operators_own_config_requires_the_quorum_and_an_unreadable_one_fails_closed() {
+    let gate = Gate::new("rq-trusted-operator");
+    let none = gate.dir.join("none.yml");
+    assert_eq!(
+        gate.verify(&none, &[]).0,
+        Some(0),
+        "no trusted source, no report: not adopted"
+    );
+    let op = gate.operator("review_quorum:\n  required: true\n");
+    let (code, v) = gate.verify(&op, &[]);
+    assert_eq!(code, Some(1), "{v}");
+    assert!(reasons(&v).contains("missing"), "{v}");
+    // a trusted source that exists but cannot be parsed / read means required
+    for bad in [
+        "review_quorum: [",
+        "- just\n- a list\n",
+        "x: [\nreview_quorum: false\n",
+    ] {
+        let op = gate.operator(bad);
+        let (code, v) = gate.verify(&op, &[]);
+        assert_eq!(code, Some(1), "{bad:?}: {v}");
+        assert!(v["required"] == true, "{v}");
+    }
+    let dir_as_config = gate.dir.join("config-dir");
+    std::fs::create_dir(&dir_as_config).unwrap();
+    assert_eq!(gate.verify(&dir_as_config, &[]).0, Some(1));
+    // an explicit false in the operator's config is the only way to opt out
+    let op = gate.operator("review_quorum:\n  required: false\n");
+    assert_eq!(gate.verify(&op, &[]).0, Some(0));
+}
+
+#[test]
+fn an_attested_report_cannot_be_forged_or_edited() {
+    let gate = Gate::new("rq-attest");
+    let key = key_file("rq-attest-key");
+    let op = gate.operator(&format!(
+        "review_quorum:\n  required: true\n  attestation_key_file: {}\n",
+        key.display()
+    ));
+    let a = "a".repeat(40);
+    assert_eq!(
+        gate.evaluate_with(&gate_input(&a, "lgtm", "author"), &op),
+        Some(0)
+    );
+    let (code, v) = gate.verify(&op, &[]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["origin"], "attested");
+
+    // a hand-written report with every field right but no key material
+    let genuine: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(gate.report()).unwrap()).unwrap();
+    gate.rewrite_report(|v| {
+        v.as_object_mut().unwrap().remove("hmac");
+    });
+    let (code, v) = gate.verify(&op, &[]);
+    assert_eq!(code, Some(1));
+    assert!(reasons(&v).contains("hmac"), "{v}");
+    // a wrong MAC, and each covered field edited
+    for field in [
+        "target_id",
+        "head",
+        "evaluated_at",
+        "votes_digest",
+        "verdict",
+    ] {
+        std::fs::write(gate.report(), genuine.to_string()).unwrap();
+        gate.rewrite_report(|v| {
+            v[field] = match field {
+                "evaluated_at" => serde_json::json!(genuine["evaluated_at"].as_u64().unwrap() + 1),
+                "head" => serde_json::json!("b".repeat(40)),
+                "target_id" => serde_json::json!("pr:github.com/o/r#8"),
+                "verdict" => serde_json::json!("pass_with_warnings"),
+                _ => serde_json::json!("0".repeat(64)),
+            };
+        });
+        assert_eq!(
+            gate.verify(&op, &[]).0,
+            Some(1),
+            "editing {field} must invalidate the report"
+        );
+    }
+    // signed with another key
+    let other = key_file("rq-attest-other");
+    let op_other = gate.operator_named(
+        "other-operator.yml",
+        &format!(
+            "review_quorum:\n  required: true\n  attestation_key_file: {}\n",
+            other.display()
+        ),
+    );
+    assert_eq!(
+        gate.evaluate_with(&gate_input(&a, "lgtm", "author"), &op_other),
+        Some(0)
+    );
+    assert_eq!(gate.verify(&op, &[]).0, Some(1));
+    // without a key anywhere the origin is unproven and says so
+    let plain = gate.operator("review_quorum:\n  required: true\n");
+    assert_eq!(
+        gate.evaluate_with(&gate_input(&a, "lgtm", "author"), &plain),
+        Some(0)
+    );
+    let (code, v) = gate.verify(&plain, &[]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["origin"], "unattested");
+    assert!(v["warnings"].to_string().contains("unattested"), "{v}");
+}
+
+#[test]
+fn an_attestation_key_must_be_private_absolute_and_outside_the_repo() {
+    let gate = Gate::new("rq-attest-rules");
+    let a = "a".repeat(40);
+    let fail = |path: &Path, why: &str| {
+        let op = gate.operator(&format!(
+            "review_quorum:\n  required: true\n  attestation_key_file: {}\n",
+            path.display()
+        ));
+        assert_eq!(
+            gate.evaluate_with(&gate_input(&a, "lgtm", "author"), &op),
+            Some(2),
+            "{why}"
+        );
+        let report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(gate.report()).unwrap()).unwrap();
+        assert_eq!(
+            report["verdict"], "invalid_input",
+            "{why}: a bad key overwrites the report"
+        );
+        assert_eq!(gate.verify(&op, &[]).0, Some(1), "{why}");
+    };
+    let good = key_file("rq-attest-good");
+    // world-readable
+    let open = key_file("rq-attest-open");
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o644)).unwrap();
+    fail(&open, "mode 0644");
+    // relative
+    fail(Path::new("attest.key"), "relative path");
+    // symlink
+    let link = good.parent().unwrap().join("link.key");
+    std::os::unix::fs::symlink(&good, &link).unwrap();
+    fail(&link, "symlink");
+    // inside the repository
+    let inside = gate.dir.join("inside.key");
+    std::fs::copy(&good, &inside).unwrap();
+    std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o600)).unwrap();
+    fail(&inside, "inside the repo");
+    // inside some other git worktree
+    let wt = temp_dir("rq-attest-wt");
+    std::fs::create_dir_all(wt.join(".git")).unwrap();
+    std::fs::write(wt.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let in_wt = wt.join("attest.key");
+    std::fs::copy(&good, &in_wt).unwrap();
+    std::fs::set_permissions(&in_wt, std::fs::Permissions::from_mode(0o600)).unwrap();
+    fail(&in_wt, "inside a worktree");
+    // too short
+    let short = good.parent().unwrap().join("short.key");
+    std::fs::write(&short, "tiny").unwrap();
+    std::fs::set_permissions(&short, std::fs::Permissions::from_mode(0o600)).unwrap();
+    fail(&short, "short key");
+    // missing
+    fail(&good.parent().unwrap().join("nope.key"), "missing");
+}
+
+#[test]
+fn a_pass_has_an_age_limit() {
+    let gate = Gate::new("rq-age");
+    let a = "a".repeat(40);
+    let op = gate.operator("review_quorum:\n  required: true\n  max_report_age_seconds: 60\n");
+    assert_eq!(
+        gate.evaluate_with(&gate_input(&a, "lgtm", "author"), &op),
+        Some(0)
+    );
+    assert_eq!(gate.verify(&op, &[]).0, Some(0));
+    let at =
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(gate.report()).unwrap())
+            .unwrap()["evaluated_at"]
+            .as_u64()
+            .unwrap();
+    gate.rewrite_report(|v| v["evaluated_at"] = serde_json::json!(at - 120));
+    let (code, v) = gate.verify(&op, &[]);
+    assert_eq!(code, Some(1));
+    assert!(
+        reasons(&v).contains("older than max_report_age_seconds (60)"),
+        "{v}"
+    );
+    gate.rewrite_report(|v| v["evaluated_at"] = serde_json::json!(at + 100_000));
+    assert!(reasons(&gate.verify(&op, &[]).1).contains("future"));
+    gate.rewrite_report(|v| {
+        v.as_object_mut().unwrap().remove("evaluated_at");
+    });
+    assert!(reasons(&gate.verify(&op, &[]).1).contains("no evaluated_at"));
+    // the default bound is 15 minutes
+    let default = gate.operator("review_quorum:\n  required: true\n");
+    gate.rewrite_report(|v| v["evaluated_at"] = serde_json::json!(at - 1000));
+    assert!(reasons(&gate.verify(&default, &[]).1).contains("(900)"));
+}
+
+#[test]
+fn the_gate_asks_herdr_at_verify_time_and_a_later_block_or_an_outage_blocks() {
+    let gate = Gate::new("rq-live");
+    let a = "a".repeat(40);
+    let reply = gate.dir.join("reply.json");
+    let curl = script(
+        &gate.dir,
+        "curl",
+        &format!("cat {}; printf '\\n200'", reply.display()),
+    );
+    let op = gate.operator(&format!(
+        "review_quorum:\n  required: true\nherdr:\n  enabled: true\n  url: http://127.0.0.1:9\n  ingest_key: {}\n  curl: {}\n",
+        sha256_hex(b"k"), curl.display()
+    ));
+    assert_eq!(
+        gate.evaluate_with(&gate_input(&a, "lgtm", "author"), &op),
+        Some(0)
+    );
+    let scratch = gate.dir.join("scratch");
+    let live = |extra: &[&str]| {
+        let mut args = vec!["--scratch-dir", scratch.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        gate.verify(&op, &args)
+    };
+    std::fs::write(&reply, format!(r#"{{"status":"satisfied","head":"{a}"}}"#)).unwrap();
+    let (code, v) = live(&[]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["live"], "checked");
+    // a `blocked` filed after the report was written is seen now
+    std::fs::write(&reply, format!(r#"{{"status":"blocked","head":"{a}"}}"#)).unwrap();
+    let (code, v) = live(&[]);
+    assert_eq!(code, Some(1));
+    assert!(
+        reasons(&v).contains("Herdr says the quorum is blocked"),
+        "{v}"
+    );
+    // Herdr at another head, or not satisfied: not a pass
+    std::fs::write(
+        &reply,
+        format!(r#"{{"status":"satisfied","head":"{}"}}"#, "b".repeat(40)),
+    )
+    .unwrap();
+    assert_eq!(live(&[]).0, Some(1));
+    // an outage blocks (curl fails), and so does an HTTP error
+    script(&gate.dir, "curl", "echo down >&2; exit 7");
+    let (code, v) = live(&[]);
+    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(v["live"], "error");
+    script(&gate.dir, "curl", "printf '{}\\n503'");
+    assert_eq!(live(&[]).0, Some(1));
+    // the operator can switch the live check off for one run
+    assert_eq!(live(&["--no-live"]).0, Some(0));
+    // a Herdr config that the operator left readable by others cannot be used: blocked, not skipped
+    std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(live(&[]).0, Some(1));
+}
+
+#[test]
+fn a_symlinked_or_escaping_report_is_refused() {
+    let gate = Gate::new("rq-symlink");
+    gate.require();
+    let none = gate.dir.join("none.yml");
+    let a = "a".repeat(40);
+    assert_eq!(gate.evaluate(&gate_input(&a, "lgtm", "author")), Some(0));
+    assert_eq!(gate.verify(&none, &[]).0, Some(0));
+    let outside = temp_dir("rq-symlink-out");
+    let moved = outside.join("review-quorum.json");
+    std::fs::rename(gate.report(), &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, gate.report()).unwrap();
+    let (code, v) = gate.verify(&none, &[]);
+    assert_eq!(code, Some(1));
+    assert!(reasons(&v).contains("regular file"), "{v}");
+    // a symlinked directory in the path resolves outside the repo
+    std::fs::remove_file(gate.report()).unwrap();
+    std::fs::remove_dir(gate.dir.join(".autospec/reports")).ok();
+    let moved_dir = outside.join("reports");
+    std::fs::create_dir_all(&moved_dir).unwrap();
+    std::fs::write(
+        moved_dir.join("review-quorum.json"),
+        std::fs::read(&moved).unwrap(),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(gate.dir.join(".autospec/reports")).unwrap();
+    std::os::unix::fs::symlink(&moved_dir, gate.dir.join(".autospec/reports")).unwrap();
+    let (code, v) = gate.verify(&none, &[]);
+    assert_eq!(code, Some(1));
+    assert!(reasons(&v).contains("inside the repository"), "{v}");
+}
+
+#[test]
+fn the_expected_head_must_still_be_live() {
+    let gate = Gate::new("rq-expect-head");
+    gate.require();
+    let none = gate.dir.join("none.yml");
+    let a = "a".repeat(40);
+    assert_eq!(gate.evaluate(&gate_input(&a, "lgtm", "author")), Some(0));
+    assert_eq!(gate.verify(&none, &["--head", &a]).0, Some(0));
+    gate.live(&"b".repeat(40), 7);
+    let (code, v) = gate.verify(&none, &["--head", &a]);
+    assert_eq!(code, Some(1));
+    assert!(reasons(&v).contains("is not the live PR head"), "{v}");
+}
+
+#[test]
+fn forged_linked_or_loose_request_state_is_not_trusted() {
+    let r = Request::new("rq-state", "true");
+    let head = "a".repeat(40);
+    std::fs::create_dir_all(&r.state).unwrap();
+    std::fs::set_permissions(&r.state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // a hand-written "dispatched" marker (no MAC) suppresses nothing: it counts as an unknown claim
+    std::fs::write(r.marker(&head), r#"{"state":"dispatched"}"#).unwrap();
+    std::fs::set_permissions(r.marker(&head), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let out = r.run().1;
+    assert!(
+        out.contains("request_in_progress") && !out.contains("already_requested"),
+        "{out}"
+    );
+    // a symlinked marker is never followed
+    std::fs::remove_file(r.marker(&head)).unwrap();
+    let target = r.dir.join("elsewhere.json");
+    std::fs::write(&target, r#"{"state":"dispatched"}"#).unwrap();
+    std::os::unix::fs::symlink(&target, r.marker(&head)).unwrap();
+    assert!(r.run().1.contains("request_in_progress"));
+    assert_eq!(r.dispatches(), 0);
+    // a marker with a valid MAC but a different MAC key (another install) is not ours either
+    std::fs::remove_file(r.marker(&head)).unwrap();
+    forge_marker(&r.state, &r.marker(&head), &head, "dispatched", 0, 1, 0, 0);
+    std::fs::write(r.state.join(".nonce"), "z".repeat(64)).unwrap();
+    assert!(r.run().1.contains("request_in_progress"));
+    // a group-writable state dir is refused outright, and so is a symlinked one
+    std::fs::set_permissions(&r.state, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(r.run().0, Some(2));
+    std::fs::set_permissions(&r.state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let link = r.dir.join("state-link");
+    std::os::unix::fs::symlink(&r.state, &link).unwrap();
+    let mut a = r.args();
+    let at = a.iter().position(|x| x == "--state-dir").unwrap() + 1;
+    a[at] = link.to_str().unwrap().to_string();
+    assert_eq!(
+        autospec(&a.iter().map(String::as_str).collect::<Vec<_>>()).0,
+        Some(2)
+    );
+}
+
+#[test]
+fn a_dispatch_that_outlives_its_timeout_is_killed_and_backed_off() {
+    let dir = temp_dir("rq-timeout");
+    let pids = dir.join("pids");
+    let r = Request::new(
+        "rq-timeout-run",
+        &format!(
+            "echo $$ >> {p}\nsleep 30 &\necho $! >> {p}\nwait",
+            p = pids.display()
+        ),
+    );
+    let text = std::fs::read_to_string(&r.cfg).unwrap() + "  dispatch_timeout_seconds: 1\n";
+    std::fs::write(&r.cfg, text).unwrap();
+    let started = std::time::Instant::now();
+    let (code, _, err) = r.run();
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("killed"), "{err}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    let listed = std::fs::read_to_string(&pids).unwrap();
+    let alive = |pid: &str| Path::new(&format!("/proc/{}", pid.trim())).exists();
+    for _ in 0..40 {
+        if !listed.lines().any(alive) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        !listed.lines().any(alive),
+        "the whole process group must be dead: {listed}"
+    );
+    let marker: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(r.marker(&"a".repeat(40))).unwrap()).unwrap();
+    assert_eq!(marker["state"], "failed");
+    assert!(
+        marker["detail"].as_str().unwrap().contains("exceeded"),
+        "{marker}"
+    );
+    assert!(r.run().1.contains("request_backoff"));
+    assert_eq!(r.dispatches(), 1);
 }

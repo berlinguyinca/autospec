@@ -73,31 +73,58 @@ herdr:
   same cron/loop that polls the PR) asks Herdr for the quorum and, when `rereview_required` is true for the current head, runs
   `dispatch_command` exactly once per (PR, head) (locked marker per pair; a failed dispatch is retried). Point `dispatch_command`
   at the existing review dispatch (e.g. a wrapper over `independent-review-adapter.sh prepare`).
-- Merge path (fail closed). `autospec review-quorum --input I --write-report R` writes `review-quorum.json` atomically; on ANY
-  evaluation error (bad input, empty `pr_author`, unreadable file) it OVERWRITES the report with a non-pass one
-  (`verdict: invalid_input`, `promotion_ready: false`, head/target kept when readable) and exits 2, so an older pass can never
-  survive a failed re-evaluation. `scripts/autospec-promote-pr.sh` (one line replaced, shell count unchanged) then calls
-  `autospec review-quorum verify-report --repo-root D --pr N [--repo O/R]`, which:
-  - requires, when the quorum is required (`review_quorum: {required: true}` in `.autospec/autospec.yml`), a report that is
-    present, a non-empty JSON object, from this evaluator (`source: head-bound-review-quorum`), `verdict: pass`,
-    `promotion_ready: true`, no blocking findings, whose `head` equals the PR's LIVE head (`gh pr view --json headRefOid,url`)
-    and whose `target_id` equals `pr:<host>/<owner>/<repo>#<n>` of THAT PR; a `gh` failure blocks;
-  - blocks any report that exists but is empty, `{}`, not an object, or malformed, required or not;
-  - keeps the old meaning (verdict pass/pass_with_warnings, no blocking findings) for the Python feature-scoped report when the
-    quorum is NOT required; when `autospec` is not on PATH the script blocks if a report exists or the config mentions
-    `review_quorum`. Exit codes: 0 ok, 1 not trusted (reasons printed as JSON), 2 usage.
+- Merge path (fail closed). `autospec review-quorum --input I --write-report R [--repo-root D] [--operator-config C]` writes
+  `review-quorum.json` atomically with `evaluated_at` (unix seconds) and `votes_digest`; on ANY evaluation error it OVERWRITES
+  the report with a non-pass one (`verdict: invalid_input`, `promotion_ready: false`, head/target kept when readable) and exits
+  2, so an older pass cannot survive a failed re-evaluation. `scripts/autospec-promote-pr.sh` (one line replaced, shell count
+  unchanged) always calls `autospec review-quorum verify-report --repo-root D --pr N [--repo O/R]` and records the verified
+  head as `review_quorum_head` in `promotion-plan.json` / `promotion-result.json`.
+  - **Who requires the quorum is NOT the PR.** `required` comes only from trusted sources: the operator's config
+    (`~/.autospec/autospec.yml`, or `--operator-config`) and the DEFAULT branch's copy of `.autospec/autospec.yml`
+    (`git show refs/remotes/origin/HEAD:...`; falls back to `origin/main`, `origin/master`; no network). The checkout under
+    review can only ADD a requirement, never remove one (a PR that deletes the block and the report is still blocked). A trusted
+    source that exists but cannot be read or parsed means required. The YAML is read with a real parser: anything under
+    `review_quorum:` other than an explicit `required: false` (or `review_quorum: false`) requires it (`"true"`, `yes`,
+    `True`, inline maps, a missing `required`, duplicates, null), and so does an enabled `herdr:` block in the operator config.
+    A repository with no trusted configuration at all has not adopted the gate and keeps the old behaviour.
+  - When required, the report must be present, a non-empty object, a regular file inside the repo (a symlink, or a symlinked
+    directory that resolves outside, is refused), from this evaluator (`source: head-bound-review-quorum`), `verdict: pass`,
+    `promotion_ready: true`, no blocking findings, `evaluated_at` no older than `max_report_age_seconds` (default 900,
+    trusted config) and not in the future, with `head` equal to the PR's LIVE head and `target_id` equal to that PR
+    (`gh pr view --json headRefOid,url`); `--head SHA` additionally requires the live head to still be SHA (use it in any later
+    label/merge step with the recorded `review_quorum_head`). A `gh` failure blocks. A report that exists but is empty or
+    malformed blocks even when not required; the old Python report keeps its meaning when not required.
+  - **Attestation (optional, enforced once configured).** `review_quorum.attestation_key_file: /abs/path` in a TRUSTED config:
+    an absolute, regular (not symlink), 0600, user-owned file of 32..4096 bytes outside the repository and every git worktree.
+    `--write-report` then adds `hmac` = HMAC-SHA256(key, `pr-review-report-v1\0 target \0 head \0 verdict \0 evaluated_at
+    \0 votes_digest`) and `verify-report` requires it (constant-time compare); a bad key file overwrites the report with a
+    non-pass one. Without a key the origin is UNPROVEN (anyone who can write the file can forge it) and `verify-report` prints
+    `"origin":"unattested"` plus a warning. The key must be readable by whoever writes AND verifies reports.
+  - **Live Herdr check.** When the operator config has `herdr.enabled: true` (a 0600 file with the ingest key), `verify-report`
+    re-asks Herdr at verify time (`--no-live` skips it for one run) and blocks unless it answers `satisfied` at the live head,
+    so a `blocked` filed after the report was written is seen; any Herdr error, or an unusable operator Herdr config, blocks.
+  - Exit codes: 0 ok, 1 not trusted (JSON with `reasons`, `warnings`, `origin`, `live`, `live_head`), 2 usage. If the `autospec`
+    binary is missing (or too old to know `verify-report`) the script blocks only when the operator's config mentions
+    `review_quorum`; otherwise it cannot enforce anything and behaves as before. Where labels are cleared: nothing clears
+    `autospec:needs-human-review` when the head later moves; the label is a status hint, the merge step must re-run
+    `verify-report --head <review_quorum_head>`.
   Run `--write-report` after the feature-scoped Python quorum, which writes the same file.
 - Retraction: `publish --retract` (same flags) sends an `edge.remove` for the SAME verdict file's edge with the same key; Herdr
   honours a remove only from the edge's owner, so a mistaken `blocked` is cleared by the same reviewer at the same head and by
   nobody else. After a retraction that exact verdict file cannot be re-published (same ids); file a new verdict.
-- `request` safety. The dedupe is serialised by an exclusive flock on `<state-dir>/.lock` (same host/state dir); the marker
-  per (PR, head) is written whole (temp file + rename) with states `pending` (owner pid, start, token), `dispatched`, `failed`.
-  A `pending` marker with a live owner blocks (`request_in_progress`) until `dispatch_timeout_seconds` (default 900,
-  10..86400) passes; a dead owner, a timed-out claim or a `failed` marker is re-claimed; an unreadable (half-written) marker is
-  treated as pending until it ages out, never as "not dispatched". `dispatch_command` is run as `<cmd> -- <pr-node> <head>`.
-  The PR node is validated (`pr:` + printable ASCII, no shell metacharacters, must contain `#`). Herdr statuses
-  `head_unverified`, `unknown_head`, `unknown_author` are ALERTS: `request` prints `alert:true`, writes an `ALERT` line to
-  stderr and exits 4, never "not needed".
+- `request` safety. The default state dir is the operator's (`~/.autospec/state/review-requests`, scratch in
+  `~/.autospec/state/herdr-scratch`), never inside a repository; created 0700, and an existing one must be a real directory
+  owned by us and not group/other-writable. The dedupe is serialised by an exclusive flock on `<state-dir>/.lock`; each marker
+  per (PR, head) is written whole (0600 temp file + rename) with states `pending` (owner pid, start, token), `dispatched`,
+  `failed` (`failures`, `next_try_at`), and carries an HMAC under a per-install random nonce (`<state-dir>/.nonce`, 0600).
+  A marker that is a symlink, has the wrong owner or mode, fails to parse, or has a bad MAC is NOT trusted: it counts as a
+  pending claim of unknown age (its mtime) until `dispatch_timeout_seconds` + 30 s pass. A live pending owner blocks
+  (`request_in_progress`); a dead owner or an expired claim is re-claimed; a failed dispatch backs off exponentially (30 s,
+  60 s, ... capped at 1 h; `request_backoff`). `dispatch_command` runs as `<cmd> -- <pr-node> <head>` in its own process group
+  and is killed (whole group) when it exceeds `dispatch_timeout_seconds` (default 900, 1..86400); the claim is held until the
+  child is dead. The PR node is validated (`pr:` + printable ASCII, no shell metacharacters, must contain `#`). Herdr
+  statuses `head_unverified`, `unknown_head`, `unknown_author` are ALERTS: `request` prints `alert:true`, writes an `ALERT`
+  line to stderr and exits 4, never "not needed".
 - Config hardening. `herdr.url` is parsed with a URL parser and normalised: https, or http only for exactly `127.0.0.1`,
   `::1` or `localhost`; userinfo, query and fragment are refused. The key header file is created in a private 0700 temp
   directory under `--scratch-dir` that is blanked and removed on every path (success, curl failing to spawn, early error); a
