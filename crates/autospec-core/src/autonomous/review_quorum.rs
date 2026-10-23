@@ -1,52 +1,51 @@
 //! Head-bound post-PR review quorum (Herdr federated workbench, T06).
 //!
-//! An independent review verdict is a statement about one exact commit
-//! (`review_commit` in the executor review receipt, see
-//! `executor_bridge/review_receipt.rs`). A quorum is therefore only ever
-//! evaluated against the CURRENT head of the PR, never against "the feature":
+//! ONE policy, implemented identically here (merge gating) and in Herdr's
+//! `control_plane/review_quorum.py` (workbench read model). Both suites load
+//! `tests/fixtures/review-quorum-vectors.json` (a byte-identical copy lives in
+//! herdr-engineering); change a rule there first.
 //!
-//! 1. A vote whose commit is not exactly the current head is **stale**. It is
-//!    reported, never counted, and never reused after a force-push or repair.
-//! 2. Only distinct, normalised reviewer identities count; the same identity
-//!    voting twice is one voter.
-//! 3. The PR author and any excluded identity (implementer workers) cannot
-//!    supply an `lgtm`; with provider diversity required, a reviewer on the
-//!    implementer's provider (or on an unknown provider) cannot either.
-//! 4. A receipt digest shared by two identities is a replay: neither `lgtm`
-//!    counts.
-//! 5. A vote for another review target (repository + PR) is ignored: the same
-//!    SHA on a stacked or duplicate PR is a different diff against a different base.
-//! 6. Filters only ever remove `lgtm` votes. A current-head `blocked` verdict
-//!    always blocks, whoever filed it (fail closed).
+//! A verdict is a statement about one exact commit of one review target:
 //!
-//! The function is pure and deterministic: no clock, no I/O.
+//! 1. **Blocks are processed first and are never silently dropped.** A `blocked`
+//!    vote at the current head blocks, whoever filed it, unless an
+//!    `eligible_reviewers` list is configured and the voter is not on it. A block
+//!    whose reviewer id is malformed or whose commit is unparseable or a prefix of
+//!    the head FAILS CLOSED (blocks); a block for another head is stale; a block
+//!    for another target is irrelevant.
+//! 2. An `lgtm` counts only if it is for this target and EXACTLY this head, from a
+//!    valid eligible identity that is not the PR author or an excluded worker (nor
+//!    on the implementer's provider when diversity is required), with a 64-hex
+//!    `receipt_digest` whose `receipt_binding` recomputes over
+//!    `(target, commit, reviewer, receipt_digest)`.
+//! 3. Identities are trimmed, lower-cased, and `x[bot]` equals `x`; verdicts and
+//!    digests are case-normalised. Identities in one `reviewer_groups` entry count
+//!    once. One digest backing `lgtm` votes of two groups voids both (replay).
+//! 4. A missing author is an error, never a pass.
+//!
+//! Residual: the binding proves a stored vote was not copied across target, commit
+//! or reviewer; it is not a signature. Two keys held by one person that are not
+//! listed in a group still count twice.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VoteVerdict {
-    Lgtm,
-    Blocked,
-}
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuorumVote {
     pub reviewer: String,
-    /// The review target the verdict was issued for (repository + PR, e.g.
-    /// `owner/repo#12`). A receipt for the same SHA on another PR is not this PR's.
     pub target: String,
     #[serde(default)]
     pub provider: Option<String>,
-    pub verdict: VoteVerdict,
-    /// The commit the verdict was issued for (the receipt's `review_commit`).
+    /// `lgtm` or `blocked`, case-insensitive.
+    pub verdict: String,
     pub commit: String,
-    /// The receipt's `verdict_digest`; required for an `lgtm` to count.
     #[serde(default)]
     pub receipt_digest: Option<String>,
+    #[serde(default)]
+    pub receipt_binding: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +56,15 @@ pub struct QuorumPolicy {
     pub pr_author: String,
     #[serde(default)]
     pub excluded_identities: Vec<String>,
+    /// When non-empty only these identities can approve OR block.
+    #[serde(default)]
+    pub eligible_reviewers: Vec<String>,
+    /// Identities of one person/organisation count once.
+    #[serde(default)]
+    pub reviewer_groups: Vec<Vec<String>>,
+    /// Optional GitHub login of a reviewer identity, to recognise the PR author behind a key.
+    #[serde(default)]
+    pub reviewer_logins: BTreeMap<String, String>,
     #[serde(default)]
     pub implementer_provider: Option<String>,
     #[serde(default)]
@@ -70,10 +78,13 @@ pub enum RejectReason {
     WrongTarget,
     InvalidCommit,
     InvalidReviewer,
+    InvalidVerdict,
+    NotEligible,
     Author,
     ExcludedIdentity,
     ProviderNotDiverse,
-    MissingReceiptDigest,
+    BadReceiptDigest,
+    BadReceiptBinding,
     ReplayedReceipt,
 }
 
@@ -99,26 +110,79 @@ pub struct QuorumOutcome {
     pub counted: Vec<String>,
     pub blocking: Vec<String>,
     pub rejected: Vec<Rejection>,
-    /// Reviewers whose verdict was for an older head and so was not reused.
     pub stale_reviewers: Vec<String>,
-    /// True when the current head still needs fresh independent review.
     pub rereview_required: bool,
     pub rereview_needed: usize,
 }
 
-fn canonical_commit(value: &str) -> Option<String> {
+pub fn canonical_commit(value: &str) -> Option<String> {
     let lower = value.trim().to_ascii_lowercase();
     let ok =
         (lower.len() == 40 || lower.len() == 64) && lower.bytes().all(|b| b.is_ascii_hexdigit());
     ok.then_some(lower)
 }
 
-fn canonical_identity(value: &str) -> Option<String> {
-    let id = value.trim().to_ascii_lowercase();
+pub fn canonical_identity(value: &str) -> Option<String> {
+    let mut id = value.trim().to_ascii_lowercase();
+    if let Some(stripped) = id.strip_suffix("[bot]") {
+        id = stripped.to_string();
+    }
     if id.is_empty() || id.len() > 128 || id.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return None;
     }
     Some(id)
+}
+
+fn canonical_digest(value: &str) -> Option<String> {
+    let lower = value.trim().to_ascii_lowercase();
+    (lower.len() == 64 && lower.bytes().all(|b| b.is_ascii_hexdigit())).then_some(lower)
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The binding a producer attaches to a receipt digest and an evaluator recomputes.
+pub fn receipt_binding(target: &str, commit: &str, reviewer: &str, receipt_digest: &str) -> String {
+    let tuple = format!(
+        "pr-review-receipt-v1\0{}\0{}\0{}\0{}",
+        target.trim().to_ascii_lowercase(),
+        commit.trim().to_ascii_lowercase(),
+        canonical_identity(reviewer).unwrap_or_default(),
+        receipt_digest.trim().to_ascii_lowercase()
+    );
+    Sha256::digest(tuple.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[derive(PartialEq)]
+enum CommitClass {
+    Current,
+    Stale,
+    Invalid,
+}
+
+fn classify_commit(raw: &str, head: &str) -> CommitClass {
+    match canonical_commit(raw) {
+        Some(c) if c == head => CommitClass::Current,
+        Some(_) => CommitClass::Stale,
+        None => {
+            // A prefix of the head (>= 7 hex) is "this head, badly written"; anything
+            // else unparseable is unknowable. Both must fail closed for a block.
+            let lower = raw.trim().to_ascii_lowercase();
+            let hex = !lower.is_empty() && lower.bytes().all(|b| b.is_ascii_hexdigit());
+            if hex && lower.len() >= 7 && head.starts_with(&lower) {
+                CommitClass::Current
+            } else {
+                CommitClass::Invalid
+            }
+        }
+    }
 }
 
 pub fn evaluate_quorum(
@@ -132,20 +196,49 @@ pub fn evaluate_quorum(
     if policy.required == 0 {
         return Err("review quorum requires at least one reviewer".to_string());
     }
-    let author = canonical_identity(&policy.pr_author).ok_or_else(|| {
-        "review quorum pr_author is required and must be a valid identity".to_string()
-    })?;
-    let target = target.trim();
+    let target = target.trim().to_ascii_lowercase();
     if target.is_empty() {
         return Err("review quorum requires a review target".to_string());
     }
-    let mut excluded: BTreeSet<String> = BTreeSet::new();
-    for raw in &policy.excluded_identities {
-        excluded.insert(
-            canonical_identity(raw)
-                .ok_or_else(|| "review quorum excluded identity is invalid".to_string())?,
-        );
+    let author = canonical_identity(&policy.pr_author).ok_or_else(|| {
+        "review quorum pr_author is required and must be a valid identity".to_string()
+    })?;
+    let ident = |raw: &String, what: &str| {
+        canonical_identity(raw).ok_or_else(|| format!("review quorum {what} is invalid"))
+    };
+    let excluded: BTreeSet<String> = policy
+        .excluded_identities
+        .iter()
+        .map(|r| ident(r, "excluded identity"))
+        .collect::<Result<_, _>>()?;
+    let eligible: BTreeSet<String> = policy
+        .eligible_reviewers
+        .iter()
+        .map(|r| ident(r, "eligible reviewer"))
+        .collect::<Result<_, _>>()?;
+    let mut group_of: BTreeMap<String, String> = BTreeMap::new();
+    for group in &policy.reviewer_groups {
+        let members: Vec<String> = group
+            .iter()
+            .map(|r| ident(r, "reviewer group member"))
+            .collect::<Result<_, _>>()?;
+        let key = members
+            .iter()
+            .min()
+            .cloned()
+            .ok_or("review quorum reviewer group is empty")?;
+        for member in members {
+            if group_of.insert(member, key.clone()).is_some() {
+                return Err("review quorum reviewer groups overlap".to_string());
+            }
+        }
     }
+    let logins: BTreeMap<String, String> = policy
+        .reviewer_logins
+        .iter()
+        .filter_map(|(id, login)| Some((canonical_identity(id)?, canonical_identity(login)?)))
+        .collect();
+    let group = |id: &str| group_of.get(id).cloned().unwrap_or_else(|| id.to_string());
     let implementer_provider = policy
         .implementer_provider
         .as_deref()
@@ -154,49 +247,79 @@ pub fn evaluate_quorum(
     let mut rejected: BTreeSet<Rejection> = BTreeSet::new();
     let mut stale: BTreeSet<String> = BTreeSet::new();
     let mut blocking: BTreeSet<String> = BTreeSet::new();
-    // reviewer -> receipt digest, for current-head lgtm votes that passed every filter.
-    let mut lgtm: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let reject = |set: &mut BTreeSet<Rejection>, who: &str, reason| {
+        set.insert(Rejection {
+            reviewer: who.to_string(),
+            reason,
+        });
+    };
 
+    // Phase 1: blocks. Normalise, or fail closed; never drop.
+    let mut approvals: Vec<(&QuorumVote, String)> = Vec::new();
     for vote in votes {
-        let Some(reviewer) = canonical_identity(&vote.reviewer) else {
-            rejected.insert(Rejection {
-                reviewer: "<invalid>".into(),
-                reason: RejectReason::InvalidReviewer,
-            });
-            continue;
-        };
-        let reject = |rejected: &mut BTreeSet<Rejection>, reason| {
-            rejected.insert(Rejection {
-                reviewer: reviewer.clone(),
-                reason,
-            });
-        };
-        if vote.target.trim() != target {
-            reject(&mut rejected, RejectReason::WrongTarget);
+        let verdict = vote.verdict.trim().to_ascii_lowercase();
+        let identity = canonical_identity(&vote.reviewer);
+        let label = identity.clone().unwrap_or_else(|| "<invalid>".to_string());
+        if vote.target.trim().to_ascii_lowercase() != target {
+            reject(&mut rejected, &label, RejectReason::WrongTarget);
             continue;
         }
+        match verdict.as_str() {
+            "blocked" => {
+                if !eligible.is_empty() && !identity.as_ref().is_some_and(|i| eligible.contains(i))
+                {
+                    reject(&mut rejected, &label, RejectReason::NotEligible);
+                    continue;
+                }
+                match classify_commit(&vote.commit, &head) {
+                    CommitClass::Stale => {
+                        stale.insert(label.clone());
+                        reject(&mut rejected, &label, RejectReason::StaleHead);
+                    }
+                    CommitClass::Current => {
+                        blocking.insert(group(&label));
+                    }
+                    CommitClass::Invalid => {
+                        reject(&mut rejected, &label, RejectReason::InvalidCommit);
+                        blocking.insert(group(&label));
+                    }
+                }
+            }
+            "lgtm" => approvals.push((vote, verdict)),
+            _ => reject(&mut rejected, &label, RejectReason::InvalidVerdict),
+        }
+    }
+
+    // Phase 2: approvals.
+    let mut lgtm: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (vote, _) in approvals {
+        let Some(reviewer) = canonical_identity(&vote.reviewer) else {
+            reject(&mut rejected, "<invalid>", RejectReason::InvalidReviewer);
+            continue;
+        };
         match canonical_commit(&vote.commit) {
             None => {
-                reject(&mut rejected, RejectReason::InvalidCommit);
+                reject(&mut rejected, &reviewer, RejectReason::InvalidCommit);
                 continue;
             }
-            Some(commit) if commit != head => {
+            Some(c) if c != head => {
                 stale.insert(reviewer.clone());
-                reject(&mut rejected, RejectReason::StaleHead);
+                reject(&mut rejected, &reviewer, RejectReason::StaleHead);
                 continue;
             }
             Some(_) => {}
         }
-        if vote.verdict == VoteVerdict::Blocked {
-            blocking.insert(reviewer);
+        if !eligible.is_empty() && !eligible.contains(&reviewer) {
+            reject(&mut rejected, &reviewer, RejectReason::NotEligible);
             continue;
         }
-        if author == reviewer {
-            reject(&mut rejected, RejectReason::Author);
+        let login = logins.get(&reviewer);
+        if author == reviewer || login == Some(&author) {
+            reject(&mut rejected, &reviewer, RejectReason::Author);
             continue;
         }
         if excluded.contains(&reviewer) {
-            reject(&mut rejected, RejectReason::ExcludedIdentity);
+            reject(&mut rejected, &reviewer, RejectReason::ExcludedIdentity);
             continue;
         }
         if policy.require_provider_diversity {
@@ -207,43 +330,45 @@ pub fn evaluate_quorum(
             let diverse = matches!((&provider, &implementer_provider),
                 (Some(p), Some(i)) if !p.is_empty() && p != i);
             if !diverse {
-                reject(&mut rejected, RejectReason::ProviderNotDiverse);
+                reject(&mut rejected, &reviewer, RejectReason::ProviderNotDiverse);
                 continue;
             }
         }
-        let Some(digest) = vote
-            .receipt_digest
-            .as_deref()
-            .map(str::trim)
-            .filter(|d| !d.is_empty())
-        else {
-            reject(&mut rejected, RejectReason::MissingReceiptDigest);
+        let Some(digest) = vote.receipt_digest.as_deref().and_then(canonical_digest) else {
+            reject(&mut rejected, &reviewer, RejectReason::BadReceiptDigest);
             continue;
         };
-        lgtm.entry(reviewer).or_default().insert(digest.to_string());
+        let expected = receipt_binding(&target, &head, &reviewer, &digest);
+        if vote
+            .receipt_binding
+            .as_deref()
+            .and_then(canonical_digest)
+            .as_deref()
+            != Some(expected.as_str())
+        {
+            reject(&mut rejected, &reviewer, RejectReason::BadReceiptBinding);
+            continue;
+        }
+        lgtm.entry(group(&reviewer)).or_default().insert(digest);
     }
 
-    // Replay: one digest backing lgtm votes of several identities voids all of them.
-    let mut by_digest: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for (reviewer, digests) in &lgtm {
+    let mut holders: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (who, digests) in &lgtm {
         for digest in digests {
-            by_digest.entry(digest).or_default().insert(reviewer);
+            holders.entry(digest).or_default().insert(who);
         }
     }
-    let replayed: BTreeSet<String> = by_digest
+    let replayed: BTreeSet<String> = holders
         .values()
         .filter(|who| who.len() > 1)
         .flat_map(|who| who.iter().map(|w| w.to_string()))
         .collect();
     let mut counted = Vec::new();
-    for reviewer in lgtm.keys() {
-        if replayed.contains(reviewer) {
-            rejected.insert(Rejection {
-                reviewer: reviewer.clone(),
-                reason: RejectReason::ReplayedReceipt,
-            });
-        } else if !blocking.contains(reviewer) {
-            counted.push(reviewer.clone());
+    for who in lgtm.keys() {
+        if replayed.contains(who) {
+            reject(&mut rejected, who, RejectReason::ReplayedReceipt);
+        } else if !blocking.contains(who) {
+            counted.push(who.clone());
         }
     }
 
