@@ -4,6 +4,12 @@
 //! `commit`, `verdict_digest` -> `receipt_digest`). Exit 0 satisfied, 1
 //! insufficient (fresh review needed), 3 blocked, 2 invalid input.
 //!
+//! `merge-gate` is `verify-report` in strict mode, for the step that actually merges: it needs
+//! `--pr` and `--repo`, treats "no policy stated" as required, demands origin proof for a required
+//! quorum, and prints `merge_head` (the live head the gate verified, only on success) for the
+//! caller to pass to `gh pr merge --match-head-commit`. A failure also clears the stale
+//! `autospec:verified` / `autospec:needs-human-review` labels.
+//!
 //! `verify-report` is the merge gate's check of the report `--write-report` produced: it
 //! binds the report to the LIVE head and target of the PR. `publish` / `request` are the
 //! Herdr producer and consumer (see `herdr.rs`); `request` exits 4 when Herdr cannot vouch
@@ -12,6 +18,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
+use std::process::Command;
 
 mod gate;
 mod herdr;
@@ -38,7 +45,8 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     match args.first().map(String::as_str) {
         Some("publish") => return publish(&args[1..]),
         Some("request") => return request(&args[1..]),
-        Some("verify-report") => return verify_report(&args[1..]),
+        Some("verify-report") => return verify_report(&args[1..], false),
+        Some("merge-gate") => return verify_report(&args[1..], true),
         _ => {}
     }
     let mut input = None;
@@ -46,6 +54,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     let mut report = None;
     let mut operator_config = None;
     let mut repo_root = None;
+    let mut repo = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -64,6 +73,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
                     iter.next().ok_or("--repo-root requires a directory")?,
                 ))
             }
+            "--repo" => repo = Some(iter.next().ok_or("--repo requires OWNER/REPO")?.clone()),
             other => return Err(format!("unknown review-quorum argument: {other}")),
         }
     }
@@ -71,7 +81,11 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     // The attestation key (if the trusted config names one) is resolved before evaluating, so
     // a misconfigured key also overwrites the old report with a non-pass one.
     let key = if report.is_some() {
-        match attestation_key(repo_root.as_deref(), operator_config.as_deref()) {
+        match attestation_key(
+            repo_root.as_deref(),
+            operator_config.as_deref(),
+            repo.as_deref(),
+        ) {
             Ok(key) => key,
             Err(error) => {
                 if let Some(report) = &report {
@@ -129,9 +143,12 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 fn attestation_key(
     repo_root: Option<&std::path::Path>,
     operator: Option<&std::path::Path>,
+    repo: Option<&str>,
 ) -> Result<Option<Vec<u8>>, String> {
     let root = repo_root.map_or_else(|| PathBuf::from("."), PathBuf::from);
-    let trusted = gate::trusted(&root, operator, true);
+    // Without --repo there is no default branch to ask; the operator's config still decides.
+    let base = repo.map_or(gate::Base::None, |r| gate::base_for(Some(r)));
+    let trusted = gate::trusted(&root, operator, &base);
     match trusted.key_file {
         None => Ok(None),
         Some(file) => gate::load_attestation_key(&file, Some(&root)).map(Some),
@@ -229,9 +246,9 @@ fn write_error_report(path: &str, input: &str, error: &str) -> Result<(), String
     write_atomic(path, &body)
 }
 
-/// `verify-report`: may the merge path trust `review-quorum.json`? See `gate.rs`.
-/// Exit 0 yes, 1 no (reasons as JSON), 2 usage.
-fn verify_report(args: &[String]) -> Result<i32, String> {
+/// `verify-report` / `merge-gate`: may the merge path trust `review-quorum.json`? See
+/// `gate.rs`. Exit 0 yes, 1 no (reasons as JSON), 2 usage.
+fn verify_report(args: &[String], strict: bool) -> Result<i32, String> {
     let f = flags(
         args,
         &[
@@ -251,16 +268,10 @@ fn verify_report(args: &[String]) -> Result<i32, String> {
         return Err("--pr must be a PR number".to_string());
     }
     if let Some(repo) = f.get("repo") {
-        let ok = repo.split_once('/').is_some_and(|(o, n)| {
-            [o, n].iter().all(|p| {
-                !p.is_empty()
-                    && p.bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-            })
-        });
-        if !ok {
-            return Err("--repo must be OWNER/REPO".to_string());
-        }
+        gate::parse_repo(repo)?;
+    }
+    if strict && (pr.is_empty() || !f.contains_key("repo")) {
+        return Err("merge-gate requires --pr and --repo".to_string());
     }
     if let Some(head) = f.get("head") {
         if autospec_core::autonomous::review_quorum::canonical_commit(head).is_none() {
@@ -277,9 +288,31 @@ fn verify_report(args: &[String]) -> Result<i32, String> {
         no_live: f.contains_key("no-live"),
         operator_config: f.get("operator-config").map(PathBuf::from),
         scratch: f.get("scratch-dir").map(PathBuf::from),
+        strict,
     });
+    let mut body = body;
+    if strict && !ok {
+        body["labels_cleared"] = clear_labels(&f).into();
+    }
     println!("{body}");
     Ok(i32::from(!ok))
+}
+
+/// A refused merge must not leave a stale "verified" mark on the PR: remove the labels that
+/// `autospec-promote-pr.sh --confirm` added. Best effort; `true` only if every removal worked.
+fn clear_labels(f: &std::collections::BTreeMap<String, String>) -> bool {
+    ["autospec:verified", "autospec:needs-human-review"]
+        .iter()
+        .map(|label| {
+            Command::new("gh")
+                .current_dir("/")
+                .args(["issue", "edit", f["pr"].as_str(), "--repo"])
+                .arg(&f["repo"])
+                .args(["--remove-label", label])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+        .fold(true, |all, ok| all && ok)
 }
 
 fn flags(

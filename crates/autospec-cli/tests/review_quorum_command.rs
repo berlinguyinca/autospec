@@ -413,10 +413,31 @@ impl Gate {
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_autospec"), bin.join("autospec")).unwrap();
         let gate = Self { dir, bin };
         gate.live(&"a".repeat(40), 7);
+        // The fake forge: `pr view` answers `live.json` (and then moves the head to `moved.json`
+        // when it exists, i.e. a push right AFTER the gate looked), `api .../contents/...`
+        // serves `base.yml` as the default branch's config (404 when absent), `pr merge`
+        // behaves like GitHub's `--match-head-commit`, `issue edit` is recorded.
+        let d = gate.dir.display();
         script(
             &gate.bin,
             "gh",
-            &format!("cat {}", gate.dir.join("live.json").display()),
+            &format!(
+                r#"case "$*" in
+*"api "*"contents/.autospec/autospec.yml"*)
+  if [ -f {d}/api_fail ]; then echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; fi
+  if [ -f {d}/base.yml ]; then cat {d}/base.yml; else echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi;;
+*"api "*) if [ -f {d}/repo_fail ]; then echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi; echo '{{}}';;
+*"pr view"*"--json files"*) echo README.md;;
+*"pr view"*"headRefOid,url"*) cat {d}/live.json; if [ -f {d}/moved.json ]; then cp {d}/moved.json {d}/live.json; fi;;
+*"pr view"*) cat {d}/live.json;;
+*"pr merge"*)
+  echo "$*" >> {d}/merge.log
+  want=$(sed -n 's/.*"headRefOid":"\([0-9a-f]*\)".*/\1/p' {d}/live.json)
+  case "$*" in *"--match-head-commit $want"*) echo merged >> {d}/merged;; *"--match-head-commit"*) echo "head moved" >&2; exit 1;; *) echo merged >> {d}/merged;; esac;;
+*"issue edit"*) echo "$*" >> {d}/labels.log;;
+*) echo "unexpected gh $*" >&2; exit 1;;
+esac"#
+            ),
         );
         gate
     }
@@ -476,6 +497,8 @@ impl Gate {
                 "--dry-run",
                 "--repo-root",
                 self.dir.to_str().unwrap(),
+                "--repo",
+                "o/r",
                 "--pr",
                 pr,
             ])
@@ -639,7 +662,10 @@ fn verify_report_can_be_run_directly() {
             String::from_utf8_lossy(&out.stdout).into_owned(),
         )
     };
-    assert_eq!(run(&["--pr", "7"]).0, Some(0));
+    // without --repo the default branch cannot be asked: required, and the reason says why
+    let (code, out) = run(&["--pr", "7"]);
+    assert_eq!(code, Some(1), "{out}");
+    assert!(out.contains("pass --repo OWNER/REPO"), "{out}");
     assert_eq!(run(&["--pr", "7", "--repo", "o/r"]).0, Some(0));
     assert_eq!(
         run(&[]).0,
@@ -1148,6 +1174,7 @@ impl Gate {
     /// Make the repo a git checkout whose default branch (`origin/main`) carries `yaml` as
     /// `.autospec/autospec.yml`; the working tree (the "PR") may then change it freely.
     fn base(&self, yaml: &str) {
+        std::fs::write(self.dir.join("base.yml"), yaml).unwrap();
         run_git(&self.dir, &["init", "-q", "-b", "main"]);
         std::fs::write(self.dir.join(".autospec/autospec.yml"), yaml).unwrap();
         run_git(&self.dir, &["add", ".autospec/autospec.yml"]);
@@ -1203,6 +1230,8 @@ impl Gate {
                 operator.to_str().unwrap(),
                 "--pr",
                 "7",
+                "--repo",
+                "o/r",
             ])
             .args(extra)
             .output()
@@ -1649,4 +1678,352 @@ fn a_dispatch_that_outlives_its_timeout_is_killed_and_backed_off() {
     );
     assert!(r.run().1.contains("request_backoff"));
     assert_eq!(r.dispatches(), 1);
+}
+
+// ---------------------------------------------------------------- T16: the merge path
+impl Gate {
+    /// Run the REAL `autospec-guarded-merge.sh` (fake forge, real `autospec`). `bin` is the
+    /// directory searched first for `gh`/`autospec`.
+    fn guarded_merge(&self, bin: &Path, operator: Option<&Path>) -> (Option<i32>, String) {
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let mut cmd = Command::new("bash");
+        cmd.env("PATH", path).current_dir(&self.dir).args([
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/autospec-guarded-merge.sh"
+            ),
+            "--pr",
+            "7",
+            "--repo",
+            "o/r",
+            "--no-require-checks",
+            "--no-require-local-build",
+        ]);
+        if let Some(op) = operator {
+            cmd.args(["--operator-config", op.to_str().unwrap()]);
+        }
+        let out = cmd.output().unwrap();
+        (
+            out.status.code(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    }
+
+    fn merged(&self) -> bool {
+        self.dir.join("merged").exists()
+    }
+
+    fn merge_log(&self) -> String {
+        std::fs::read_to_string(self.dir.join("merge.log")).unwrap_or_default()
+    }
+
+    fn labels_log(&self) -> String {
+        std::fs::read_to_string(self.dir.join("labels.log")).unwrap_or_default()
+    }
+
+    fn merge_gate(&self, operator: &Path) -> (Option<i32>, serde_json::Value) {
+        let path = format!("{}:/usr/bin:/bin", self.bin.display());
+        let out = Command::new(env!("CARGO_BIN_EXE_autospec"))
+            .env("PATH", path)
+            .args([
+                "review-quorum",
+                "merge-gate",
+                "--repo-root",
+                self.dir.to_str().unwrap(),
+                "--operator-config",
+                operator.to_str().unwrap(),
+                "--pr",
+                "7",
+                "--repo",
+                "o/r",
+            ])
+            .output()
+            .unwrap();
+        (
+            out.status.code(),
+            serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null),
+        )
+    }
+}
+
+/// A PR that is allowed to merge: the operator requires the quorum, attests with a key, and a
+/// genuine pass for the live head `a` exists.
+fn attested_pass(gate: &Gate, name: &str) -> PathBuf {
+    let key = key_file(name);
+    let op = gate.operator(&format!(
+        "review_quorum:\n  required: true\n  attestation_key_file: {}\n",
+        key.display()
+    ));
+    let a = "a".repeat(40);
+    assert_eq!(
+        gate.evaluate_with(&gate_input(&a, "lgtm", "author"), &op),
+        Some(0)
+    );
+    op
+}
+
+#[test]
+fn h4_a_worker_moving_the_local_base_ref_cannot_remove_the_requirement() {
+    let gate = Gate::new("t16-h4-update-ref");
+    // the forge's default branch requires the quorum; there is NO report
+    gate.base("version: 1\nreview_quorum:\n  required: true\n");
+    // the worker commits the deletion of the config, then points every local "base" ref at it
+    // and repoints the remote, exactly as `p4-base-ref.sh` P4b does
+    std::fs::remove_file(gate.dir.join(".autospec/autospec.yml")).unwrap();
+    run_git(&gate.dir, &["add", "-A", ".autospec"]);
+    run_git(&gate.dir, &["commit", "-q", "-m", "drop the gate"]);
+    for r in ["refs/remotes/origin/main", "refs/remotes/origin/master"] {
+        run_git(&gate.dir, &["update-ref", r, "HEAD"]);
+    }
+    run_git(
+        &gate.dir,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+    run_git(
+        &gate.dir,
+        &["config", "remote.origin.url", "/nonexistent/attacker.git"],
+    );
+    let (code, plan) = gate.promote("7");
+    assert_eq!(code, Some(1), "promotion must still be blocked: {plan}");
+    assert!(plan.contains("review-quorum.json is missing"), "{plan}");
+    let none = gate.dir.join("no-operator.yml");
+    let (code, v) = gate.merge_gate(&none);
+    assert_eq!(code, Some(1), "{v}");
+    assert!(v["merge_head"].is_null(), "{v}");
+    let (code, out) = gate.guarded_merge(&gate.bin, Some(&none));
+    assert_ne!(code, Some(0), "{out}");
+    assert!(!gate.merged(), "the guarded merge must not merge: {out}");
+}
+
+#[test]
+fn h4_a_stale_clone_or_an_unusual_default_branch_does_not_hide_the_requirement() {
+    let gate = Gate::new("t16-h4-stale");
+    gate.base("review_quorum:\n  required: true\n");
+    // the local clone has never fetched and knows no origin/* at all (default branch 'develop')
+    run_git(&gate.dir, &["checkout", "-q", "-b", "develop"]);
+    run_git(&gate.dir, &["update-ref", "-d", "refs/remotes/origin/main"]);
+    std::fs::remove_file(gate.dir.join(".autospec/autospec.yml")).unwrap();
+    assert_eq!(gate.promote("7").0, Some(1));
+}
+
+#[test]
+fn h4_an_unreadable_forge_means_required_and_a_404_is_absent_only_for_a_readable_repo() {
+    let gate = Gate::new("t16-h4-forge");
+    let none = gate.dir.join("no-operator.yml");
+    // no base file and the repo readable: a 404 is "absent" -> verify-report (not strict) passes
+    assert_eq!(gate.verify(&none, &[]).0, Some(0));
+    // any non-404 failure is "required", and the report is missing
+    std::fs::write(gate.dir.join("api_fail"), "").unwrap();
+    let (code, v) = gate.verify(&none, &[]);
+    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(v["required"], true, "{v}");
+    assert!(reasons(&v).contains("502"), "{v}");
+    // a 404 on the file whose repository itself cannot be read (token without access) is not
+    // proof that the file is absent
+    std::fs::remove_file(gate.dir.join("api_fail")).unwrap();
+    std::fs::write(gate.dir.join("repo_fail"), "").unwrap();
+    let (code, v) = gate.verify(&none, &[]);
+    assert_eq!(code, Some(1), "{v}");
+    assert!(reasons(&v).contains("not readable"), "{v}");
+    // and a bogus --repo cannot be turned into a path
+    assert_eq!(gate.verify(&none, &["--repo", "o/r/x/y"]).0, Some(2));
+}
+
+#[test]
+fn h3_the_merge_path_has_no_default_that_merges_without_a_review() {
+    let gate = Gate::new("t16-h3-default");
+    // no operator config, no base config, no report: "no policy stated" is required
+    let none = gate.dir.join("no-operator.yml");
+    let (code, v) = gate.merge_gate(&none);
+    assert_eq!(code, Some(1), "{v}");
+    assert!(reasons(&v).contains("states a review_quorum policy"), "{v}");
+    let (code, out) = gate.guarded_merge(&gate.bin, Some(&none));
+    assert_eq!(code, Some(1), "{out}");
+    assert!(out.contains("blocked review_quorum_not_verified"), "{out}");
+    assert!(!gate.merged(), "{out}");
+    // a refused merge also clears the stale marks
+    assert!(
+        gate.labels_log()
+            .contains("--remove-label autospec:verified"),
+        "{}",
+        gate.labels_log()
+    );
+    // the explicit operator opt-out is the only way back, and the merge is still pinned
+    let off = gate.operator("review_quorum:\n  required: false\n");
+    let (code, v) = gate.merge_gate(&off);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["merge_head"], "a".repeat(40).as_str(), "{v}");
+    let (code, out) = gate.guarded_merge(&gate.bin, Some(&off));
+    assert_eq!(code, Some(0), "{out}");
+    assert!(
+        gate.merge_log()
+            .contains(&format!("--match-head-commit {}", "a".repeat(40))),
+        "{}",
+        gate.merge_log()
+    );
+    // ... but not by the base alone being silent about a PR that adds a requirement itself
+    let gate = Gate::new("t16-h3-checkout-adds");
+    gate.require();
+    assert_eq!(gate.merge_gate(&off).0, Some(1));
+}
+
+#[test]
+fn h3_a_required_quorum_needs_a_report_origin_proof_and_the_live_head() {
+    let gate = Gate::new("t16-h3-required");
+    // required but no attestation key and no Herdr: no origin proof, refused even with a report
+    let op = gate.operator("review_quorum:\n  required: true\n");
+    let a = "a".repeat(40);
+    assert_eq!(
+        gate.evaluate_with(&gate_input(&a, "lgtm", "author"), &op),
+        Some(0)
+    );
+    let (code, v) = gate.merge_gate(&op);
+    assert_eq!(code, Some(1), "{v}");
+    assert!(reasons(&v).contains("origin proof"), "{v}");
+    // attested + fresh + head matches: merges, pinned to that head
+    let gate = Gate::new("t16-h3-attested");
+    let op = attested_pass(&gate, "t16-h3-attested");
+    let (code, v) = gate.merge_gate(&op);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["origin"], "attested", "{v}");
+    assert_eq!(v["merge_head"], a.as_str(), "{v}");
+    let (code, out) = gate.guarded_merge(&gate.bin, Some(&op));
+    assert_eq!(code, Some(0), "{out}");
+    assert!(gate.merged(), "{out}");
+    // the head moves BEFORE the gate: the old pass no longer holds
+    let gate = Gate::new("t16-h3-moved-before");
+    let op = attested_pass(&gate, "t16-h3-moved-before");
+    gate.live(&"b".repeat(40), 7);
+    let (code, out) = gate.guarded_merge(&gate.bin, Some(&op));
+    assert_eq!(code, Some(1), "{out}");
+    assert!(!gate.merged(), "{out}");
+    assert!(gate.labels_log().contains("autospec:needs-human-review"));
+}
+
+#[test]
+fn h3_a_head_pushed_after_verification_cannot_merge() {
+    let gate = Gate::new("t16-h3-race");
+    let op = attested_pass(&gate, "t16-h3-race");
+    // the fake forge moves the PR to head B right after it answered the gate's head query
+    std::fs::write(
+        gate.dir.join("moved.json"),
+        format!(
+            r#"{{"headRefOid":"{}","url":"https://github.com/o/r/pull/7"}}"#,
+            "b".repeat(40)
+        ),
+    )
+    .unwrap();
+    let (code, out) = gate.guarded_merge(&gate.bin, Some(&op));
+    assert_ne!(code, Some(0), "{out}");
+    assert!(
+        gate.merge_log()
+            .contains(&format!("--match-head-commit {}", "a".repeat(40))),
+        "the merge must be pinned to the verified head: {}",
+        gate.merge_log()
+    );
+    assert!(
+        !gate.merged(),
+        "a head moved after verification must not merge: {out}"
+    );
+}
+
+#[test]
+fn h3_a_missing_or_too_old_autospec_binary_refuses_instead_of_falling_back() {
+    let gate = Gate::new("t16-h3-binary");
+    let op = attested_pass(&gate, "t16-h3-binary");
+    // PATH without autospec
+    let only_gh = temp_dir("t16-h3-only-gh");
+    std::fs::copy(gate.bin.join("gh"), only_gh.join("gh")).unwrap();
+    let (code, out) = gate.guarded_merge(&only_gh, Some(&op));
+    assert_eq!(code, Some(2), "{out}");
+    assert!(out.contains("autospec binary not found"), "{out}");
+    assert!(!gate.merged(), "{out}");
+    // an autospec that predates `merge-gate` (answers "unknown command" and exits 2)
+    let old = temp_dir("t16-h3-old");
+    std::fs::copy(gate.bin.join("gh"), old.join("gh")).unwrap();
+    script(
+        &old,
+        "autospec",
+        "echo 'unknown autospec command' >&2; exit 2",
+    );
+    let (code, out) = gate.guarded_merge(&old, Some(&op));
+    assert_eq!(code, Some(1), "{out}");
+    assert!(!gate.merged(), "{out}");
+    // promote-pr has no legacy fallback either
+    let (code, plan) = {
+        let out = Command::new("bash")
+            .env("PATH", format!("{}:/usr/bin:/bin", only_gh.display()))
+            .args([
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../scripts/autospec-promote-pr.sh"
+                ),
+                "--dry-run",
+                "--repo-root",
+                gate.dir.to_str().unwrap(),
+                "--repo",
+                "o/r",
+                "--pr",
+                "7",
+            ])
+            .output()
+            .unwrap();
+        (
+            out.status.code(),
+            std::fs::read_to_string(gate.dir.join(".autospec/reports/promotion-plan.json"))
+                .unwrap_or_default(),
+        )
+    };
+    assert_eq!(code, Some(1), "{plan}");
+    assert!(plan.contains("autospec binary unavailable"), "{plan}");
+}
+
+#[test]
+fn h3_a_moved_head_invalidates_the_verified_label_at_the_next_promotion() {
+    let gate = Gate::new("t16-h3-labels");
+    gate.require();
+    let a = "a".repeat(40);
+    assert_eq!(gate.evaluate(&gate_input(&a, "lgtm", "author")), Some(0));
+    let confirm = |gate: &Gate| {
+        let out = Command::new("bash")
+            .env("PATH", format!("{}:/usr/bin:/bin", gate.bin.display()))
+            .args([
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../scripts/autospec-promote-pr.sh"
+                ),
+                "--confirm",
+                "--repo-root",
+                gate.dir.to_str().unwrap(),
+                "--repo",
+                "o/r",
+                "--pr",
+                "7",
+            ])
+            .output()
+            .unwrap();
+        out.status.code()
+    };
+    assert_eq!(confirm(&gate), Some(0));
+    assert!(gate.labels_log().contains("--add-label autospec:verified"));
+    assert!(!gate
+        .labels_log()
+        .contains("--remove-label autospec:verified"));
+    // the PR head moves; the stale report no longer holds and the mark is removed
+    gate.live(&"b".repeat(40), 7);
+    assert_eq!(confirm(&gate), Some(1));
+    assert!(
+        gate.labels_log()
+            .contains("--remove-label autospec:verified"),
+        "{}",
+        gate.labels_log()
+    );
 }

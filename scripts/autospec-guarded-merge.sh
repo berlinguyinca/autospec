@@ -29,42 +29,27 @@
 #       [--verify-evidence FILE]     # full-suite evidence gate (issue #3523)
 #       [--build-dir DIR]            # checkout the local-build gate builds (default: cwd)
 #       [--no-require-local-build]   # skip the local buildability gate (default: on)
+#       [--operator-config FILE]     # review-quorum operator config (default: ~/.autospec/autospec.yml)
 #
-# CI-conclusion gate (issue #3220). `main` carries no branch protection, so no
-# check is "required" and a PR whose checks are pending or failing reports
-# mergeStateStatus UNSTABLE. The Phase 4 loop treats UNSTABLE as ready and
-# breaks straight to merge, so its `wait_for_ci_green` never runs on the normal
-# path — #3148 and #3216 both merged before their run reported, and #3148's
-# `build-test` was already failing. Enforcing it here, at the chokepoint every
-# auto-implement merge routes through, makes "merge before CI reports" require
-# deliberately passing --no-require-checks rather than merely reaching the merge
-# by a path whose prose forgot to wait.
+# CI-conclusion gate (issue #3220). `main` carries no branch protection, so a PR with pending or
+# failing checks reports UNSTABLE and the Phase 4 loop merged it anyway (#3148, #3216). Enforcing
+# it here, at the chokepoint every auto-implement merge routes through, makes "merge before CI
+# reports" require deliberately passing --no-require-checks.
 #
-# Local buildability gate (issue #4108). The CI-conclusion gate above reads
-# what CI reports; this gate reads what the compiler says, locally, at merge
-# time: `cargo build --workspace --all-targets` against the PR's EXACT head
-# commit, with the exit status as the verdict — never a scan of output text
-# for "FAILED" (the #4105 failure mode, where a broken build was "counted" as
-# green because no line matched). Default-on; warn-skip (the CI gate remains
-# the authority) when no local build of the head is possible — no Cargo.toml
-# at the build dir, not a git worktree, no cargo on PATH, or the head commit
-# not present locally (no network fetch is attempted: in production the
-# monitor merges from the worktree the implementer pushed, so the head is
-# already there). An actual failed build of the head commit fails closed.
-# --build-dir DIR points the gate at a known checkout and makes those
-# prerequisites mandatory (an operator error then fails closed);
-# --no-require-local-build is the explicit opt-out. The compensating
-# controls that make "no branch protection on main" survivable are
-# documented in docs/runbooks/compensating-controls-main-protection.md.
+# Local buildability gate (issue #4108). Reads what the compiler says, at merge time:
+# `cargo build --workspace --all-targets` against the PR's EXACT head commit, exit status as the
+# verdict (never a scan of output text, the #4105 failure mode). Default-on; warn-skip when no
+# local build of the head is possible (no Cargo.toml, not a worktree, no cargo, head not present
+# locally; no network fetch). A failed build fails closed. --build-dir DIR makes those
+# prerequisites mandatory; --no-require-local-build is the explicit opt-out. See
+# docs/runbooks/compensating-controls-main-protection.md.
 #
-# Full-suite evidence gate (issue #3523). "The full suite passed, on the
-# commit being merged" was enforced only by prose; nothing recorded that the
-# suite ran, and nothing at merge time read which commit it ran against. This
-# gate closes that: with --verify-evidence FILE, a file whose head_sha no
-# longer names the PR head OID, or whose status is non-zero, always refuses
-# the merge. An ABSENT file warns on stderr (verify-evidence-absent) and
-# merges, so the gate ships inert until Phase 4 records evidence — silence and
-# staleness must not read alike. An unparseable file fails closed (exit 2).
+# Full-suite evidence gate (issue #3523). With --verify-evidence FILE, a head_sha that no longer
+# names the PR head OID, or a non-zero status, refuses the merge. An ABSENT file warns on stderr
+# (verify-evidence-absent) and merges; an unparseable file fails closed (exit 2).
+#
+# Review-quorum gate (T16 H3/H4): `autospec review-quorum merge-gate` must pass and the merge is
+# pinned to the head it verified (--match-head-commit). Missing/old `autospec` refuses.
 
 # Exit codes:
 #   0  merged (allowed, or fenced-but-overridden)
@@ -91,6 +76,7 @@ VERIFY_EVIDENCE=""
 BUILD_DIR="."
 _BUILD_DIR_EXPLICIT=0
 REQUIRE_LOCAL_BUILD=1
+OPERATOR_CONFIG=""
 
 _die() {
     printf 'autospec-guarded-merge: %s\n' "$1" >&2
@@ -124,6 +110,7 @@ while [ "$#" -gt 0 ]; do
         --verify-evidence) VERIFY_EVIDENCE="${2:-}"; shift 2 ;;
         --build-dir) BUILD_DIR="${2:-}"; _BUILD_DIR_EXPLICIT=1; shift 2 ;;
         --no-require-local-build) REQUIRE_LOCAL_BUILD=0; shift 1 ;;
+        --operator-config) OPERATOR_CONFIG="${2:-}"; shift 2 ;;
         -h|--help) sed -n 's/^# \?//p' "$0" | head -40; exit 0 ;;
         *) _die "unknown option: $1" ;;
     esac
@@ -423,8 +410,17 @@ if [ -n "$VERIFY_EVIDENCE" ]; then
     fi
 fi
 
-# 7. Allowed (or overridden) and green: perform the admin merge.
+# 7. Review-quorum gate (T16 H3/H4). Fail closed: no `autospec` (or one without `review-quorum
+#    merge-gate`) refuses. `required` comes from the operator config and the default branch as
+#    the forge serves it NOW (never local refs); the live head read here is what the merge is
+#    pinned to, so a head pushed after verification cannot merge.
 _cleanup
+command -v autospec >/dev/null 2>&1 || _die "autospec binary not found; the review quorum cannot be checked (fail-closed, not merged)"
+_oc=(); if [ -n "$OPERATOR_CONFIG" ]; then _oc=(--operator-config "$OPERATOR_CONFIG"); fi
+if ! _qg="$(autospec review-quorum merge-gate --repo-root "$BUILD_DIR" --pr "$PR" --repo "$REPO" ${_oc[@]+"${_oc[@]}"})" || ! _qhead="$(printf '%s' "$_qg" | jq -er .merge_head)"; then
+    printf 'guarded-merge: PR #%s review quorum not verified: %s\nblocked review_quorum_not_verified\n' "$PR" "$_qg"
+    exit 1
+fi
 # shellcheck disable=SC2086
-gh pr merge "$PR" --repo "$REPO" $MERGE_ARGS
+gh pr merge "$PR" --repo "$REPO" $MERGE_ARGS --match-head-commit "$_qhead"
 printf 'merged fenced_surface_ok\n'

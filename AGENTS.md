@@ -130,6 +130,7 @@ Admin-merge `auto-implement` PRs (`gh pr merge <#> --admin --squash --delete-bra
 - All **non-advisory** required CI checks pass — checks matching `AUTOSPEC_PR_ADVISORY_CHECKS` (default `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`; e.g. self-hosted TeamCity) are advisory and may be pending **or failing** once the full local suite is green.
 - The self-review subagent returned `LGTM`.
 - PR closes an `auto-implement` issue from a `feat/*` branch.
+- The merge goes through `scripts/autospec-guarded-merge.sh` (never a bare `gh pr merge`): it runs `autospec review-quorum merge-gate` and merges with `--match-head-commit` on the head that gate verified.
 
 Spec PRs (head branch matches `feat/spec-*` OR body contains a `Source spec` line
 referencing `docs/specs/`) carry the same admin-merge authority: orchestrators run

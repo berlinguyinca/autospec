@@ -269,7 +269,7 @@ JSON
     ;;
 esac
 EOF
-  chmod +x "$TEST_TMP/bin/gh"
+  chmod +x "$TEST_TMP/bin/gh"; printf '#!/bin/sh\necho "{\\"merge_head\\":\\"abc\\"}"\n' > "$TEST_TMP/bin/autospec"; chmod +x "$TEST_TMP/bin/autospec"
 
   PATH="$TEST_TMP/bin:$PATH" \
   AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=10 \

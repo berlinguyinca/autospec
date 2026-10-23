@@ -295,7 +295,7 @@ JSON
   run jq -r '.policy_traceability.status' "$TEST_TMPDIR/repo/.autospec/reports/verifier-report.json"
   [ "$output" = "pass" ]
 
-  run bash "$PROMOTE" --repo-root "$TEST_TMPDIR/repo" --dry-run --pr 7
+  printf '#!/bin/sh\necho {}\n' > "$TEST_TMPDIR/autospec"; chmod +x "$TEST_TMPDIR/autospec"; PATH="$TEST_TMPDIR:$PATH" run bash "$PROMOTE" --repo-root "$TEST_TMPDIR/repo" --dry-run --pr 7 --repo example/repo
   [ "$status" -eq 0 ]
   run jq -r '.policy_traceability_status' "$TEST_TMPDIR/repo/.autospec/reports/promotion-plan.json"
   [ "$output" = "pass" ]
