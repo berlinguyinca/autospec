@@ -292,6 +292,7 @@ fn autonomous_executor_bridge_merged_reconciliation_is_exact_and_fail_closed() {
     fs::write(&gh, "#!/bin/sh\nset -eu\ncat \"$MERGED_OBSERVATION\"\n").expect("gh");
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
     let adapter = bridge::DraftPrAdapter {
+        quorum_operator_config: None,
         gh,
         environment: BTreeMap::from([(
             "MERGED_OBSERVATION".into(),

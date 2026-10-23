@@ -79,6 +79,7 @@ pub(super) fn draft_pr_adapter_fixture(
          exit 64\n",
     );
     bridge::DraftPrAdapter {
+        quorum_operator_config: None,
         gh,
         environment: BTreeMap::from([
             ("GH_CALLS".into(), calls.into_os_string()),

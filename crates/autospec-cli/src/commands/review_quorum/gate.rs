@@ -41,7 +41,7 @@ pub struct Opinion {
 
 fn plain_scalar(node: &yaml_edit::YamlNode) -> Option<String> {
     let scalar = node.as_scalar()?;
-    (!scalar.is_quoted()).then(|| scalar.value().trim().to_string())
+    (!scalar.is_quoted()).then(|| herdr::ws(&scalar.value()).to_string())
 }
 
 fn is_explicit_false(node: &yaml_edit::YamlNode) -> bool {
@@ -57,7 +57,7 @@ fn is_explicit_false(node: &yaml_edit::YamlNode) -> bool {
 /// a missing `required`, a duplicate key, a null.
 pub fn read_opinion(text: &str) -> Result<Opinion, String> {
     let blank = text.lines().all(|l| {
-        let t = l.trim();
+        let t = herdr::ws(l);
         t.is_empty() || t.starts_with('#') || t == "---"
     });
     if blank {
@@ -101,7 +101,7 @@ pub fn read_opinion(text: &str) -> Result<Opinion, String> {
                 op.key_file = single("attestation_key_file")?.filter(|s| !s.is_empty());
                 op.max_age = single("max_report_age_seconds")?
                     .map(|v| {
-                        v.trim()
+                        herdr::ws(&v)
                             .parse::<u64>()
                             .ok()
                             .filter(|n| (1..=604_800).contains(n))
@@ -116,19 +116,12 @@ pub fn read_opinion(text: &str) -> Result<Opinion, String> {
     if entries.is_empty() && text.contains("review_quorum") {
         op.required = true;
     }
-    let herdr_blocks: Vec<_> = map.find_all_entries_by_key("herdr").collect();
-    if herdr_blocks.len() > 1 {
-        op.herdr_enabled = true;
-    }
-    if let Some(entry) = herdr_blocks.first() {
-        if let Some(node) = entry.value_node() {
-            if let Some(block) = node.as_mapping() {
-                op.herdr_enabled = block.find_all_entries_by_key("enabled").any(|e| {
-                    e.value_node().and_then(|n| plain_scalar(&n)).as_deref() == Some("true")
-                }) || op.herdr_enabled;
-            }
-        }
-    }
+    // ONE parser decides whether Herdr is enabled: the strict reader `herdr` itself uses. A
+    // `herdr:` block it cannot read is treated as enabled (fail closed), never as absent.
+    op.herdr_enabled = match herdr::parse_config(text) {
+        Ok(cfg) => cfg.enabled,
+        Err(_) => true,
+    };
     // Live re-evaluation against Herdr is part of the requirement once the operator enabled it.
     op.required = op.required || op.herdr_enabled;
     Ok(op)
@@ -141,8 +134,14 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(|u| u.dir)
 }
 
+/// The operator's config: under `$HOME` when it is set (the same file the shell scripts read,
+/// so the two cannot disagree), else under the passwd home.
 pub fn default_operator_config() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".autospec/autospec.yml"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute())
+        .or_else(home_dir)
+        .map(|h| h.join(".autospec/autospec.yml"))
 }
 
 /// The operator's state directory root (outside every repository and worktree).
@@ -170,6 +169,34 @@ fn read_operator(path: &Path) -> Source {
     }
 }
 
+/// How to run `gh`. Every call is scrubbed: `GH_HOST`, `GH_REPO`, `GH_CONFIG_DIR`, the
+/// enterprise token variables and every `GIT_*` variable are removed so the process
+/// environment cannot re-point the query at another host or repository; `GH_TOKEN` /
+/// `GITHUB_TOKEN` pass through unchanged because they are how `gh` authenticates here. The
+/// repository and host always come from the explicit `--repo`.
+#[derive(Clone, Default, Debug)]
+pub struct Gh {
+    pub program: Option<PathBuf>,
+    pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+}
+
+pub fn gh_cmd(gh: &Gh) -> Command {
+    let mut cmd = Command::new(gh.program.as_deref().unwrap_or(Path::new("gh")));
+    for (name, _) in std::env::vars_os() {
+        let n = name.to_string_lossy();
+        if n.starts_with("GIT_")
+            || matches!(
+                n.as_ref(),
+                "GH_HOST" | "GH_REPO" | "GH_CONFIG_DIR" | "GH_ENTERPRISE_TOKEN" | "GITHUB_ENTERPRISE_TOKEN"
+            )
+        {
+            cmd.env_remove(&name);
+        }
+    }
+    cmd.envs(gh.env.iter().map(|(k, v)| (k, v)));
+    cmd
+}
+
 /// Where the default branch's copy of the config is read from.
 #[derive(Debug, Clone)]
 pub enum Base {
@@ -180,6 +207,7 @@ pub enum Base {
         host: String,
         owner: String,
         name: String,
+        gh: Gh,
     },
     /// The base cannot be established: treated as "required".
     Unavailable(String),
@@ -205,9 +233,14 @@ pub fn parse_repo(repo: &str) -> Result<(String, String, String), String> {
     }
 }
 
-pub fn base_for(repo: Option<&str>) -> Base {
+pub fn base_for(repo: Option<&str>, gh: &Gh) -> Base {
     match repo.map(parse_repo) {
-        Some(Ok((host, owner, name))) => Base::Forge { host, owner, name },
+        Some(Ok((host, owner, name))) => Base::Forge {
+            host,
+            owner,
+            name,
+            gh: gh.clone(),
+        },
         Some(Err(e)) => Base::Unavailable(e),
         None => Base::Unavailable(
             "cannot fetch the default branch's config: pass --repo OWNER/REPO".to_string(),
@@ -215,8 +248,8 @@ pub fn base_for(repo: Option<&str>) -> Base {
     }
 }
 
-fn gh_api(host: &str, path: &str, raw: bool) -> Result<std::process::Output, String> {
-    let mut cmd = Command::new("gh");
+fn gh_api(gh: &Gh, host: &str, path: &str, raw: bool) -> Result<std::process::Output, String> {
+    let mut cmd = gh_cmd(gh);
     // Neutral cwd: nothing in the checkout under review can steer which repository is asked.
     cmd.current_dir("/").args(["api", "--hostname", host]);
     if raw {
@@ -231,13 +264,18 @@ fn gh_api(host: &str, path: &str, raw: bool) -> Result<std::process::Output, Str
 /// the file only means "absent" if the repository itself is readable (a token without access
 /// also answers 404); every other failure is unreadable, hence "required".
 fn read_base(base: &Base) -> Source {
-    let (host, owner, name) = match base {
+    let (host, owner, name, gh) = match base {
         Base::None => return Source::Absent,
         Base::Unavailable(why) => return Source::Unreadable(why.clone()),
-        Base::Forge { host, owner, name } => (host, owner, name),
+        Base::Forge {
+            host,
+            owner,
+            name,
+            gh,
+        } => (host, owner, name, gh),
     };
     let file = format!("repos/{owner}/{name}/contents/.autospec/autospec.yml");
-    let out = match gh_api(host, &file, true) {
+    let out = match gh_api(gh, host, &file, true) {
         Ok(out) => out,
         Err(e) => return Source::Unreadable(format!("default branch config: {e}")),
     };
@@ -245,8 +283,8 @@ fn read_base(base: &Base) -> Source {
         return Source::Text(String::from_utf8_lossy(&out.stdout).into_owned());
     }
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    if stderr.contains("404") {
-        return match gh_api(host, &format!("repos/{owner}/{name}"), false) {
+    if stderr.contains("HTTP 404") {
+        return match gh_api(gh, host, &format!("repos/{owner}/{name}"), false) {
             Ok(repo) if repo.status.success() => Source::Absent,
             _ => Source::Unreadable(format!(
                 "default branch config: {owner}/{name} is not readable from the forge"
@@ -282,14 +320,32 @@ pub fn load_attestation_key(path: &str, repo_root: Option<&Path>) -> Result<Vec<
             return Err("attestation key must live outside the repository".to_string());
         }
     }
-    let is_worktree = |dir: &Path| match fs::symlink_metadata(dir.join(".git")) {
-        Ok(m) if m.file_type().is_file() => true, // a linked worktree's `.git` pointer file
-        Ok(m) if m.file_type().is_dir() => dir.join(".git/HEAD").exists(),
-        Ok(_) => true,
-        Err(_) => false,
-    };
-    if real.ancestors().skip(1).any(is_worktree) {
-        return Err("attestation key must live outside every git worktree".to_string());
+    // Only a key that is TRACKED by an enclosing repository is refused (it would travel with
+    // a push); an untracked key under e.g. a dotfiles-repo $HOME is fine. Inside the PR's own
+    // repository root it is refused above, whatever git says.
+    for dir in real.ancestors().skip(1) {
+        if fs::symlink_metadata(dir.join(".git")).is_err()
+            || !Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-parse", "--git-dir"])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        {
+            continue; // no repository here (an empty `.git` stub is not one)
+        }
+        let tracked = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["ls-files", "--error-unmatch", "--"])
+            .arg(real.strip_prefix(dir).unwrap_or(&real))
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output();
+        match tracked {
+            Ok(o) if o.status.code() == Some(1) => {} // git answered: not tracked here
+            _ => return Err("attestation key must not be tracked by a git repository".to_string()),
+        }
     }
     let raw = fs::read(&real).map_err(|e| format!("attestation key: {e}"))?;
     let key: Vec<u8> = raw
@@ -391,8 +447,8 @@ pub fn evaluated_now() -> u64 {
     now_secs()
 }
 
-fn live_pr(root: &Path, pr: &str, repo: Option<&str>) -> Result<(String, String), String> {
-    let mut cmd = Command::new("gh");
+fn live_pr(root: &Path, pr: &str, repo: Option<&str>, gh: &Gh) -> Result<(String, String), String> {
+    let mut cmd = gh_cmd(gh);
     cmd.args(["pr", "view", pr, "--json", "headRefOid,url"]);
     match repo {
         // An explicit repo needs no checkout: do not let the checkout's remotes steer gh.
@@ -449,12 +505,13 @@ pub struct VerifyArgs {
     /// The merge path: no stated policy means required, a required quorum must be attested
     /// (or confirmed live by Herdr), and the live head is always read and returned.
     pub strict: bool,
+    pub gh: Gh,
 }
 
 /// Returns (ok, JSON). Never errors: every problem is a reason.
 pub fn verify(args: &VerifyArgs) -> (bool, serde_json::Value) {
     let root = fs::canonicalize(&args.root).unwrap_or_else(|_| args.root.clone());
-    let base = base_for(args.repo.as_deref());
+    let base = base_for(args.repo.as_deref(), &args.gh);
     let trusted = trusted(&root, args.operator_config.as_deref(), &base);
     let required = args.force_required || trusted.required || (args.strict && !trusted.stated);
     let mut reasons: Vec<String> = trusted.problems.clone();
@@ -464,7 +521,7 @@ pub fn verify(args: &VerifyArgs) -> (bool, serde_json::Value) {
     // The live head is read ONCE here and is what the report is bound to and what the merge
     // must be pinned to (`gh pr merge --match-head-commit`).
     let live_res: Option<Result<(String, String), String>> =
-        (!args.pr.is_empty()).then(|| live_pr(&root, &args.pr, args.repo.as_deref()));
+        (!args.pr.is_empty()).then(|| live_pr(&root, &args.pr, args.repo.as_deref(), &args.gh));
     let mut warnings: Vec<String> = Vec::new();
     let report_path = args
         .report
@@ -475,7 +532,11 @@ pub fn verify(args: &VerifyArgs) -> (bool, serde_json::Value) {
     let mut live_head: Option<String> = None;
     let mut report_head: Option<String> = None;
 
+    // A repository whose trusted config explicitly opts out does not read a stray report: it
+    // cannot force the head-bound checks ("ours") nor block, in either direction.
+    let opted_out = !required && trusted.stated && trusted.problems.is_empty();
     let loaded: Option<serde_json::Value> = match fs::symlink_metadata(&report_path) {
+        _ if opted_out => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if required {
                 reasons.push(
@@ -655,7 +716,17 @@ pub fn verify(args: &VerifyArgs) -> (bool, serde_json::Value) {
             Some(Err(e)) if !reasons.iter().any(|r| r.contains("live PR head")) => {
                 reasons.push(format!("cannot verify the live PR head: {e}"));
             }
-            Some(Ok((head, _))) => live_head = Some(head.clone()),
+            Some(Ok((head, _))) => {
+                if let Some(expect) = &args.expect_head {
+                    let msg = format!("live PR head {head} is not the expected head {expect}");
+                    if canonical_commit(expect).as_deref() != Some(head.as_str())
+                        && !reasons.contains(&msg)
+                    {
+                        reasons.push(msg);
+                    }
+                }
+                live_head = Some(head.clone());
+            }
             Some(Err(_)) => {}
         }
     } else if live_head.is_none() {
@@ -776,5 +847,36 @@ mod tests {
         ] {
             assert!(read_opinion(bad).is_err(), "{bad:?}");
         }
+    }
+}
+
+/// The merge gate for in-process merges (the executor bridge): the same strict check
+/// `merge-gate` runs, with the caller's `gh`. `Ok` only when the quorum is satisfied (or
+/// explicitly not required) at exactly `head`.
+pub fn executor_gate(
+    root: &Path,
+    repo: &str,
+    pr: u64,
+    head: &str,
+    operator_config: Option<&Path>,
+    gh: Gh,
+) -> Result<(), String> {
+    let (ok, body) = verify(&VerifyArgs {
+        root: root.to_path_buf(),
+        report: None,
+        pr: pr.to_string(),
+        repo: Some(repo.to_string()),
+        expect_head: Some(head.to_string()),
+        force_required: false,
+        no_live: false,
+        operator_config: operator_config.map(Path::to_path_buf),
+        scratch: None,
+        strict: true,
+        gh,
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(body["reasons"].to_string())
     }
 }

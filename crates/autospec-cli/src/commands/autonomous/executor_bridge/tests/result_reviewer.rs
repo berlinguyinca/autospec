@@ -97,6 +97,7 @@ fn autonomous_executor_bridge_reviewer_rejects_forged_github_comment() {
     .expect("gh");
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
     let adapter = bridge::DraftPrAdapter {
+        quorum_operator_config: None,
         gh,
         environment: BTreeMap::from([("API_CALLS".into(), api_calls.clone().into_os_string())]),
     };
@@ -288,6 +289,7 @@ fn autonomous_executor_bridge_merge_revalidates_result_ci_and_review() {
     .expect("gh");
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
     let adapter = bridge::DraftPrAdapter {
+        quorum_operator_config: None,
         gh,
         environment: BTreeMap::from([
             ("PR_STATE".into(), pr_state.clone().into_os_string()),

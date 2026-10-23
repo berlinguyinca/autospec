@@ -33,16 +33,23 @@ pub struct HerdrConfig {
     pub dispatch_timeout_seconds: u64,
 }
 
+/// ASCII-only trim. `str::trim` also strips Unicode spaces (NBSP...), which made
+/// `enabled: false<NBSP>` read as `false` here while a YAML parser reads a different string;
+/// a value that is not exactly what we expect must fail, not be normalised into an opt-out.
+pub(super) fn ws(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_ascii_whitespace())
+}
+
 /// Remove a trailing ` # comment` from a scalar. A quoted scalar ends at its closing quote,
 /// so a `#` inside quotes is data; anything after it must be blank or a comment.
 fn scalar_value(raw: &str, line_no: usize) -> Result<String, String> {
-    let raw = raw.trim();
+    let raw = ws(raw);
     for quote in ['"', '\''] {
         if let Some(rest) = raw.strip_prefix(quote) {
             let end = rest
                 .find(quote)
                 .ok_or_else(|| format!("config line {line_no}: unterminated quote"))?;
-            let tail = rest[end + 1..].trim();
+            let tail = ws(&rest[end + 1..]);
             if !tail.is_empty() && !tail.starts_with('#') {
                 return Err(format!("config line {line_no}: text after a quoted value"));
             }
@@ -53,7 +60,7 @@ fn scalar_value(raw: &str, line_no: usize) -> Result<String, String> {
         .match_indices('#')
         .find(|(i, _)| *i == 0 || raw[..*i].ends_with([' ', '\t']))
         .map_or(raw.len(), |(i, _)| i);
-    Ok(raw[..cut].trim().to_string())
+    Ok(ws(&raw[..cut]).to_string())
 }
 
 /// Strict reader for the one block we use: a top-level `herdr:` mapping of scalar keys.
@@ -70,7 +77,7 @@ pub fn parse_config(text: &str) -> Result<HerdrConfig, String> {
     let mut indent_of_keys: Option<usize> = None;
     for (n, line) in text.lines().enumerate() {
         let n = n + 1;
-        let trimmed = line.trim();
+        let trimmed = ws(line);
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed == "---" || trimmed == "..." {
             continue;
         }
@@ -80,7 +87,7 @@ pub fn parse_config(text: &str) -> Result<HerdrConfig, String> {
         }
         if indent == 0 {
             let (name, rest) = trimmed.split_once(':').unwrap_or((trimmed, "x"));
-            in_block = name.trim() == "herdr";
+            in_block = ws(name) == "herdr";
             if in_block {
                 if !scalar_value(rest, n)?.is_empty() {
                     return Err(format!("config line {n}: `herdr:` must open a mapping"));
@@ -107,7 +114,7 @@ pub fn parse_config(text: &str) -> Result<HerdrConfig, String> {
             .split_once(':')
             .ok_or_else(|| format!("config line {n}: expected `key: value`"))?;
         if values
-            .insert(key.trim().to_string(), scalar_value(value, n)?)
+            .insert(ws(key).to_string(), scalar_value(value, n)?)
             .is_some()
         {
             return Err(format!("config line {n}: duplicate key"));

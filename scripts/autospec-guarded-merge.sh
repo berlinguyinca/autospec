@@ -53,13 +53,12 @@
 
 # Exit codes:
 #   0  merged (allowed, or fenced-but-overridden)
-#   1  refused — NOT merged (fenced surface without override, non-advisory
-#      checks not green, stale / failing full-suite evidence, or a local
-#      build failure of the PR head commit)
+#   3  review quorum refused — NOT merged (quorum not verified, head moved, stale script)
+#   1  refused — NOT merged (fenced surface without override, checks not green,
+#      stale / failing full-suite evidence, or a local build failure)
 #   2  invocation / classifier / evidence-parse error — fail-closed, NOT merged
 #
-# Engineering rules (AGENTS.md): set -euo pipefail; if/then/fi (no one-sided
-# && short-circuits); no RETURN traps (inline cleanup).
+# Rules (AGENTS.md): set -euo pipefail; if/then/fi; no RETURN traps (inline cleanup).
 
 set -euo pipefail
 
@@ -129,6 +128,12 @@ fi
 
 _TMPDIR="$(mktemp -d -t guarded-merge.XXXXXX)"
 _cleanup() { rm -rf "$_TMPDIR" 2>/dev/null || true; }
+
+# 0. Pin the head BEFORE anything is classified: the fence verdict, the quorum and the merge all
+#    describe this one commit. A caller-supplied --match-head-commit in --merge-args is the pin
+#    when present; the gate then refuses (exit 3) if the live head is not exactly it.
+_pin="$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null)" || _die "could not read the PR head for PR #$PR (fail-closed, not merged)"
+case " $MERGE_ARGS " in *" --match-head-commit "*) _pin="${MERGE_ARGS##*--match-head-commit }"; _pin="${_pin%% *}" ;; esac
 
 # 1. Fetch the PR's actual changed files. gh failure is fail-closed.
 _changed="$_TMPDIR/changed.txt"
@@ -417,9 +422,9 @@ fi
 _cleanup
 command -v autospec >/dev/null 2>&1 || _die "autospec binary not found; the review quorum cannot be checked (fail-closed, not merged)"
 _oc=(); if [ -n "$OPERATOR_CONFIG" ]; then _oc=(--operator-config "$OPERATOR_CONFIG"); fi
-if ! _qg="$(autospec review-quorum merge-gate --repo-root "$BUILD_DIR" --pr "$PR" --repo "$REPO" ${_oc[@]+"${_oc[@]}"})" || ! _qhead="$(printf '%s' "$_qg" | jq -er .merge_head)"; then
+if ! _qg="$(autospec review-quorum merge-gate --repo-root "$BUILD_DIR" --pr "$PR" --repo "$REPO" --head "$_pin" --script-version 2 ${_oc[@]+"${_oc[@]}"})" || ! _qhead="$(printf '%s' "$_qg" | jq -er .merge_head)"; then
     printf 'guarded-merge: PR #%s review quorum not verified: %s\nblocked review_quorum_not_verified\n' "$PR" "$_qg"
-    exit 1
+    exit 3
 fi
 # shellcheck disable=SC2086
 gh pr merge "$PR" --repo "$REPO" $MERGE_ARGS --match-head-commit "$_qhead"

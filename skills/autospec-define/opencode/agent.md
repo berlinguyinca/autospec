@@ -464,7 +464,7 @@ case "$STATE" in
     PR_NUM="$(printf '%s' "$VERDICT" | jq -r .pr)"
     # Spec PR already open — validate CI + merge; skip re-commit.
     gh pr checks "$PR_NUM" --repo {repo} --watch
-    gh pr merge "$PR_NUM" --admin --squash --delete-branch --repo {repo}
+    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr "$PR_NUM" --repo {repo}
     ;;
   branch-only)
     # Branch exists but no PR — adopt in a fresh worktree and continue.
@@ -478,8 +478,8 @@ case "$STATE" in
         --title "docs: ${SLUG} design spec" \
         --body "Source spec: docs/specs/${SLUG}-design.md"
     gh pr checks --watch --repo {repo} "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
-    gh pr merge --admin --squash --delete-branch --repo {repo} \
-        "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
+    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --repo {repo} \
+        --pr "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
     git worktree remove "$WT" 2>/dev/null || true
     git worktree prune
     ;;
@@ -498,8 +498,8 @@ case "$STATE" in
         --body "Source spec: docs/specs/${SLUG}-design.md"
     gh pr checks --watch --repo {repo} "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
     if [ "${AUTOSPEC_NO_AUTOMERGE_SPEC:-0}" != "1" ]; then
-        gh pr merge --admin --squash --delete-branch --repo {repo} \
-            "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
+        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --repo {repo} \
+            --pr "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
     else
         # Env var set — pause and ask user to merge before continuing.
         echo "AUTOSPEC_NO_AUTOMERGE_SPEC=1: merge the spec PR manually, then continue."

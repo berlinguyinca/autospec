@@ -125,16 +125,16 @@ top GPT" at call time so the skill survives model-family churn.
 
 ## Auto-merge authority for auto-implement PRs
 
-Admin-merge `auto-implement` PRs (`gh pr merge <#> --admin --squash --delete-branch`) when:
+Admin-merge `auto-implement` PRs (through `scripts/autospec-guarded-merge.sh`) when:
 - The full target-repo validation/test suite has passed locally after the branch is current with `main`.
 - All **non-advisory** required CI checks pass — checks matching `AUTOSPEC_PR_ADVISORY_CHECKS` (default `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`; e.g. self-hosted TeamCity) are advisory and may be pending **or failing** once the full local suite is green.
 - The self-review subagent returned `LGTM`.
 - PR closes an `auto-implement` issue from a `feat/*` branch.
-- The merge goes through `scripts/autospec-guarded-merge.sh` (never a bare `gh pr merge`): it runs `autospec review-quorum merge-gate` and merges with `--match-head-commit` on the head that gate verified.
+- The merge goes through `scripts/autospec-guarded-merge.sh` (or, for the in-process executor, the same Rust gate): it runs `autospec review-quorum merge-gate` and merges with `--match-head-commit` on the head that gate verified. A bare `gh pr merge` is a defect; `crates/autospec-cli/tests/bare_merge_ratchet.rs` fails when a new one appears.
 
 Spec PRs (head branch matches `feat/spec-*` OR body contains a `Source spec` line
 referencing `docs/specs/`) carry the same admin-merge authority: orchestrators run
-`gh pr merge <#> --admin --squash --delete-branch` once required CI checks pass and
+`scripts/autospec-guarded-merge.sh` once required CI checks pass and
 the body matches one of those criteria.
 Escape hatch: set `AUTOSPEC_NO_AUTOMERGE_SPEC=1` to short-circuit the auto-merge and
 fall back to "open PR + ask user".

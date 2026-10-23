@@ -1,0 +1,26 @@
+# T16: ceilings for `gh pr merge` mentions (see crates/autospec-cli/tests/bare_merge_ratchet.rs). Counts may fall, never rise.
+crates/autospec-cli/src/commands/review_quorum.rs 1
+crates/autospec-cli/src/commands/review_quorum/gate.rs 1
+crates/autospec-cli/tests/bare_merge_ratchet.rs 3
+crates/autospec-core/src/agent/contract.rs 1
+crates/autospec-core/src/execution/patch_pipeline.rs 3
+crates/autospec-core/src/safety/mod.rs 1
+crates/autospec-core/src/validation/external.rs 1
+crates/autospec-core/src/validation/structural.rs 1
+scripts/autospec-autonomous-run-drain.sh 1
+scripts/autospec-guarded-merge.sh 2
+scripts/lib/autospec-loop.sh 2
+skills/autospec-compose-normalize/SKILL.md 1
+skills/autospec-compose-normalize/codex/prompt.md 1
+skills/autospec-compose-normalize/opencode/agent.md 1
+skills/autospec-explore/SKILL.md 1
+skills/autospec-explore/codex/prompt.md 1
+skills/autospec-explore/opencode/agent.md 1
+skills/autospec-run/SKILL.md 7
+skills/autospec-run/codex/prompt.md 7
+skills/autospec-run/opencode/agent.md 7
+skills/autospec-run/prompts/implementer-contract.md 2
+skills/autospec-run/prompts/phase4-implementer.md 5
+skills/autospec-split/SKILL.md 1
+skills/autospec-split/codex/prompt.md 1
+skills/autospec-split/opencode/agent.md 1

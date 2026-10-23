@@ -48,6 +48,7 @@ fn autonomous_executor_bridge_claim_takeover_blocks_admin_merge() {
          exit 0\nfi\nexit 64\n"),
     );
     let adapter = bridge::DraftPrAdapter {
+        quorum_operator_config: None,
         gh,
         environment: BTreeMap::from([("GH_CALLS".into(), calls.clone().into_os_string())]),
     };
@@ -100,11 +101,13 @@ fn autonomous_executor_bridge_merge_failure_resumes_from_accepted_evidence() {
         &gh,
         &format!(
             "#!/bin/sh\nset -eu\n\
+             case \" $* \" in *headRefOid,url*) printf '%s\\n' '{{\"headRefOid\":\"{head}\",\"url\":\"https://github.com/o/r/pull/17\"}}'; exit 0;; esac\n\
              if [ \"$1 $2\" = 'pr view' ]; then\n\
                if [ -e \"$MERGED\" ]; then printf '%s\\n' '{{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":{{\"oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"body\":{body}}}';\n\
                else printf '%s\\n' '{{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":null,\"body\":{body}}}'; fi\n\
                exit 0\n\
              fi\n\
+             if [ \"$1\" = 'api' ]; then exit 0; fi\n\
              if [ \"$1 $2\" = 'pr merge' ]; then\n\
                case \" $* \" in *\" --match-head-commit {head} \"*) ;; *) exit 74 ;; esac\n\
                if [ -e \"$FAIL_ONCE\" ]; then rm \"$FAIL_ONCE\"; exit 73; fi\n\
@@ -113,7 +116,10 @@ fn autonomous_executor_bridge_merge_failure_resumes_from_accepted_evidence() {
              exit 64\n"
         ),
     );
+    let operator = fixture.root.join("operator.yml");
+    fs::write(&operator, "review_quorum:\n  required: false\n").unwrap();
     let adapter = bridge::DraftPrAdapter {
+        quorum_operator_config: Some(operator),
         gh,
         environment: BTreeMap::from([
             ("FAIL_ONCE".into(), fail_once.into_os_string()),
@@ -193,6 +199,7 @@ fn autonomous_executor_bridge_recovers_merged_pr_after_branch_deletion_and_base_
         ),
     );
     let adapter = bridge::DraftPrAdapter {
+        quorum_operator_config: None,
         gh,
         environment: BTreeMap::new(),
     };

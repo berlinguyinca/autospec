@@ -20,7 +20,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
 
-mod gate;
+pub(crate) mod gate;
 mod herdr;
 
 use gate::REPORT_SOURCE;
@@ -147,7 +147,7 @@ fn attestation_key(
 ) -> Result<Option<Vec<u8>>, String> {
     let root = repo_root.map_or_else(|| PathBuf::from("."), PathBuf::from);
     // Without --repo there is no default branch to ask; the operator's config still decides.
-    let base = repo.map_or(gate::Base::None, |r| gate::base_for(Some(r)));
+    let base = repo.map_or(gate::Base::None, |r| gate::base_for(Some(r), &gate::Gh::default()));
     let trusted = gate::trusted(&root, operator, &base);
     match trusted.key_file {
         None => Ok(None),
@@ -261,8 +261,13 @@ fn verify_report(args: &[String], strict: bool) -> Result<i32, String> {
             "no-live",
             "operator-config",
             "scratch-dir",
+            "script-version",
         ],
     )?;
+    // The merge path refuses a caller script that predates this gate's contract.
+    if strict && f.get("script-version").and_then(|v| v.parse::<u32>().ok()) < Some(2) {
+        return Err("merge-gate needs --script-version 2 or newer: the guarded-merge script is stale; run `bash <autospec-repo>/install.sh --update`".to_string());
+    }
     let pr = f.get("pr").cloned().unwrap_or_default();
     if !pr.is_empty() && !(pr.len() <= 9 && pr.bytes().all(|b| b.is_ascii_digit())) {
         return Err("--pr must be a PR number".to_string());
@@ -289,13 +294,15 @@ fn verify_report(args: &[String], strict: bool) -> Result<i32, String> {
         operator_config: f.get("operator-config").map(PathBuf::from),
         scratch: f.get("scratch-dir").map(PathBuf::from),
         strict,
+        gh: gate::Gh::default(),
     });
     let mut body = body;
     if strict && !ok {
         body["labels_cleared"] = clear_labels(&f).into();
     }
     println!("{body}");
-    Ok(i32::from(!ok))
+    // 3 = the quorum refused (1 stays the blast-radius fence's code in the guarded merge)
+    Ok(if ok { 0 } else if strict { 3 } else { 1 })
 }
 
 /// A refused merge must not leave a stale "verified" mark on the PR: remove the labels that
@@ -304,7 +311,7 @@ fn clear_labels(f: &std::collections::BTreeMap<String, String>) -> bool {
     ["autospec:verified", "autospec:needs-human-review"]
         .iter()
         .map(|label| {
-            Command::new("gh")
+            gate::gh_cmd(&gate::Gh::default())
                 .current_dir("/")
                 .args(["issue", "edit", f["pr"].as_str(), "--repo"])
                 .arg(&f["repo"])

@@ -596,14 +596,16 @@ fi
 # refuse to merge a fenced-surface diff (the wrapper applies the human-review
 # quarantine label and comments) unless the PR carries the
 # `autospec:fenced-approved` override label. Call the wrapper INSTEAD of a bare
-# `gh pr merge --admin`. exit 1 = quarantined (NOT merged); exit 2 =
-# fail-closed error.
+# `gh pr merge --admin`. exit 1 = quarantined (NOT merged); exit 3 = review
+# quorum refused (NOT merged); exit 2 = fail-closed error.
 # This replaces the historical bare `gh pr merge <PR> --admin --squash --delete-branch`.
 if bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo <repo>; then
     :
 else
     gm_rc=$?
-    if [ "$gm_rc" -eq 1 ]; then
+    if [ "$gm_rc" -eq 3 ]; then
+        echo "review quorum not verified (rc=3) — needs review/quorum or an operator review_quorum policy; PR NOT merged"
+    elif [ "$gm_rc" -eq 1 ]; then
         echo "quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
     else
         echo "guarded-merge fail-closed (rc=$gm_rc) — PR NOT merged; pausing for operator review"

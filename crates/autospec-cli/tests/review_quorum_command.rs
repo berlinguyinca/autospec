@@ -425,10 +425,12 @@ impl Gate {
                 r#"case "$*" in
 *"api "*"contents/.autospec/autospec.yml"*)
   if [ -f {d}/api_fail ]; then echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; fi
+  if [ -f {d}/api_noise ]; then echo "gh: HTTP 500 (request id 4041-404)" >&2; exit 1; fi
   if [ -f {d}/base.yml ]; then cat {d}/base.yml; else echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi;;
 *"api "*) if [ -f {d}/repo_fail ]; then echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi; echo '{{}}';;
 *"pr view"*"--json files"*) echo README.md;;
-*"pr view"*"headRefOid,url"*) cat {d}/live.json; if [ -f {d}/moved.json ]; then cp {d}/moved.json {d}/live.json; fi;;
+*"pr view"*"--json headRefOid --jq"*) sed -n 's/.*"headRefOid":"\([0-9a-f]*\)".*/\1/p' {d}/live.json;;
+*"pr view"*"headRefOid,url"*) if [ -f {d}/pr_fail ]; then echo "gh: HTTP 502" >&2; exit 1; fi; cat {d}/live.json; if [ -f {d}/moved.json ]; then cp {d}/moved.json {d}/live.json; fi;;
 *"pr view"*) cat {d}/live.json;;
 *"pr merge"*)
   echo "$*" >> {d}/merge.log
@@ -1444,14 +1446,6 @@ fn an_attestation_key_must_be_private_absolute_and_outside_the_repo() {
     std::fs::copy(&good, &inside).unwrap();
     std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o600)).unwrap();
     fail(&inside, "inside the repo");
-    // inside some other git worktree
-    let wt = temp_dir("rq-attest-wt");
-    std::fs::create_dir_all(wt.join(".git")).unwrap();
-    std::fs::write(wt.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-    let in_wt = wt.join("attest.key");
-    std::fs::copy(&good, &in_wt).unwrap();
-    std::fs::set_permissions(&in_wt, std::fs::Permissions::from_mode(0o600)).unwrap();
-    fail(&in_wt, "inside a worktree");
     // too short
     let short = good.parent().unwrap().join("short.key");
     std::fs::write(&short, "tiny").unwrap();
@@ -1740,6 +1734,8 @@ impl Gate {
                 "7",
                 "--repo",
                 "o/r",
+                "--script-version",
+                "2",
             ])
             .output()
             .unwrap();
@@ -1796,7 +1792,7 @@ fn h4_a_worker_moving_the_local_base_ref_cannot_remove_the_requirement() {
     assert!(plan.contains("review-quorum.json is missing"), "{plan}");
     let none = gate.dir.join("no-operator.yml");
     let (code, v) = gate.merge_gate(&none);
-    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(code, Some(3), "{v}");
     assert!(v["merge_head"].is_null(), "{v}");
     let (code, out) = gate.guarded_merge(&gate.bin, Some(&none));
     assert_ne!(code, Some(0), "{out}");
@@ -1843,10 +1839,14 @@ fn h3_the_merge_path_has_no_default_that_merges_without_a_review() {
     // no operator config, no base config, no report: "no policy stated" is required
     let none = gate.dir.join("no-operator.yml");
     let (code, v) = gate.merge_gate(&none);
-    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(code, Some(3), "{v}");
     assert!(reasons(&v).contains("states a review_quorum policy"), "{v}");
     let (code, out) = gate.guarded_merge(&gate.bin, Some(&none));
-    assert_eq!(code, Some(1), "{out}");
+    assert_eq!(
+        code,
+        Some(3),
+        "a quorum refusal has its own exit code: {out}"
+    );
     assert!(out.contains("blocked review_quorum_not_verified"), "{out}");
     assert!(!gate.merged(), "{out}");
     // a refused merge also clears the stale marks
@@ -1872,7 +1872,7 @@ fn h3_the_merge_path_has_no_default_that_merges_without_a_review() {
     // ... but not by the base alone being silent about a PR that adds a requirement itself
     let gate = Gate::new("t16-h3-checkout-adds");
     gate.require();
-    assert_eq!(gate.merge_gate(&off).0, Some(1));
+    assert_eq!(gate.merge_gate(&off).0, Some(3));
 }
 
 #[test]
@@ -1886,7 +1886,7 @@ fn h3_a_required_quorum_needs_a_report_origin_proof_and_the_live_head() {
         Some(0)
     );
     let (code, v) = gate.merge_gate(&op);
-    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(code, Some(3), "{v}");
     assert!(reasons(&v).contains("origin proof"), "{v}");
     // attested + fresh + head matches: merges, pinned to that head
     let gate = Gate::new("t16-h3-attested");
@@ -1903,7 +1903,7 @@ fn h3_a_required_quorum_needs_a_report_origin_proof_and_the_live_head() {
     let op = attested_pass(&gate, "t16-h3-moved-before");
     gate.live(&"b".repeat(40), 7);
     let (code, out) = gate.guarded_merge(&gate.bin, Some(&op));
-    assert_eq!(code, Some(1), "{out}");
+    assert_eq!(code, Some(3), "{out}");
     assert!(!gate.merged(), "{out}");
     assert!(gate.labels_log().contains("autospec:needs-human-review"));
 }
@@ -1955,7 +1955,7 @@ fn h3_a_missing_or_too_old_autospec_binary_refuses_instead_of_falling_back() {
         "echo 'unknown autospec command' >&2; exit 2",
     );
     let (code, out) = gate.guarded_merge(&old, Some(&op));
-    assert_eq!(code, Some(1), "{out}");
+    assert_eq!(code, Some(3), "{out}");
     assert!(!gate.merged(), "{out}");
     // promote-pr has no legacy fallback either
     let (code, plan) = {
@@ -2026,4 +2026,194 @@ fn h3_a_moved_head_invalidates_the_verified_label_at_the_next_promotion() {
         "{}",
         gate.labels_log()
     );
+}
+
+// ---------------------------------------------------------------- T16 review round 2
+impl Gate {
+    fn guarded_merge_with(&self, merge_args: &str, operator: &Path) -> (Option<i32>, String) {
+        let out = Command::new("bash")
+            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+            .current_dir(&self.dir)
+            .args([
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../scripts/autospec-guarded-merge.sh"
+                ),
+                "--pr",
+                "7",
+                "--repo",
+                "o/r",
+                "--no-require-checks",
+                "--no-require-local-build",
+                "--merge-args",
+                merge_args,
+                "--operator-config",
+                operator.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        (
+            out.status.code(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    }
+}
+
+#[test]
+fn the_merge_is_pinned_to_the_callers_head_and_never_silently_overridden() {
+    let gate = Gate::new("t16-r2-pin");
+    let off = gate.operator("review_quorum:\n  required: false\n");
+    // the caller pinned head B, the PR is at A: refused with the quorum code, nothing merges
+    let b = "b".repeat(40);
+    let (code, out) = gate.guarded_merge_with(
+        &format!("--admin --squash --delete-branch --match-head-commit {b}"),
+        &off,
+    );
+    assert_eq!(code, Some(3), "{out}");
+    assert!(out.contains("not the expected head"), "{out}");
+    assert!(!gate.merged(), "{out}");
+    // the caller pinned the head it saw: merges, and the pin is still that head
+    let a = "a".repeat(40);
+    let (code, out) = gate.guarded_merge_with(
+        &format!("--admin --squash --delete-branch --match-head-commit {a}"),
+        &off,
+    );
+    assert_eq!(code, Some(0), "{out}");
+    assert!(gate
+        .merge_log()
+        .contains(&format!("--match-head-commit {a}")));
+}
+
+#[test]
+fn a_stale_caller_script_is_refused_with_the_update_hint() {
+    let gate = Gate::new("t16-r2-stale");
+    let off = gate.operator("review_quorum:\n  required: false\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_autospec"))
+        .env("PATH", format!("{}:/usr/bin:/bin", gate.bin.display()))
+        .args([
+            "review-quorum",
+            "merge-gate",
+            "--repo-root",
+            gate.dir.to_str().unwrap(),
+            "--operator-config",
+            off.to_str().unwrap(),
+            "--pr",
+            "7",
+            "--repo",
+            "o/r",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("install.sh --update"));
+}
+
+#[test]
+fn read_and_trim_traps_do_not_turn_into_an_opt_out() {
+    let gate = Gate::new("t16-r2-yaml");
+    gate.base("version: 1\n");
+    // NBSP after `false` is not `false`
+    let nbsp = gate.operator("review_quorum:\n  required: false\u{a0}\n");
+    let (code, v) = gate.verify(&nbsp, &[]);
+    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(v["required"], true, "{v}");
+    // a blank line after `herdr:` does not hide an enabled block
+    let herdr = gate.operator(
+        "review_quorum:\n  required: false\nherdr:\n\n  enabled: true\n  url: https://h.example\n  ingest_key: k\n",
+    );
+    let (_, v) = gate.verify(&herdr, &[]);
+    assert_eq!(
+        v["required"], true,
+        "an enabled herdr block requires the quorum: {v}"
+    );
+    // NBSP-padded `true` is an unreadable herdr block: fail closed, not "disabled"
+    let odd = gate.operator("review_quorum:\n  required: false\nherdr:\n  enabled: true\u{a0}\n");
+    assert_eq!(gate.verify(&odd, &[]).1["required"], true);
+}
+
+#[test]
+fn a_404_is_only_a_404_and_a_stray_report_cannot_override_an_opt_out() {
+    let gate = Gate::new("t16-r2-404");
+    let none = gate.dir.join("no-operator.yml");
+    // an error that merely contains the digits 404 is not "file absent"
+    std::fs::write(gate.dir.join("api_noise"), "").unwrap();
+    let (code, v) = gate.verify(&none, &[]);
+    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(v["required"], true, "{v}");
+    // an opted-out repository ignores a stray (even failing) head-bound report
+    let gate = Gate::new("t16-r2-stray");
+    let off = gate.operator("review_quorum:\n  required: false\n");
+    gate.live(&"a".repeat(40), 7);
+    std::fs::write(
+        gate.report(),
+        r#"{"source":"head-bound-review-quorum","verdict":"blocked","promotion_ready":false,"head":"cccccccccccccccccccccccccccccccccccccccc"}"#,
+    )
+    .unwrap();
+    let (code, v) = gate.merge_gate(&off);
+    assert_eq!(code, Some(0), "{v}");
+}
+
+#[test]
+fn an_untracked_key_in_an_enclosing_repo_is_fine_a_tracked_one_is_not() {
+    let gate = Gate::new("t16-r2-key");
+    let home = temp_dir("t16-r2-dotfiles");
+    run_git(&home, &["init", "-q", "-b", "main"]);
+    let key = home.join("attest.key");
+    std::fs::copy(key_file("t16-r2-key-src"), &key).unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let op = gate.operator(&format!(
+        "review_quorum:\n  required: true\n  attestation_key_file: {}\n",
+        key.display()
+    ));
+    let a = "a".repeat(40);
+    assert_eq!(
+        gate.evaluate_with(&gate_input(&a, "lgtm", "author"), &op),
+        Some(0)
+    );
+    run_git(&home, &["add", "-f", "attest.key"]);
+    assert_eq!(
+        gate.evaluate_with(&gate_input(&a, "lgtm", "author"), &op),
+        Some(2)
+    );
+}
+
+#[test]
+fn surviving_mutants_a_failed_head_read_and_the_pass_checks() {
+    // not required (explicit opt-out) but the live head cannot be read: nothing to pin, refuse
+    let gate = Gate::new("t16-r2-m1");
+    let off = gate.operator("review_quorum:\n  required: false\n");
+    std::fs::write(gate.dir.join("pr_fail"), "").unwrap();
+    let (code, v) = gate.merge_gate(&off);
+    assert_eq!(code, Some(3), "{v}");
+    assert!(reasons(&v).contains("live PR head"), "{v}");
+    assert!(v["merge_head"].is_null(), "{v}");
+
+    // required, no key: a report whose verdict is pass but promotion_ready is false is refused
+    let gate = Gate::new("t16-r2-m2");
+    gate.require();
+    let a = "a".repeat(40);
+    assert_eq!(gate.evaluate(&gate_input(&a, "lgtm", "author")), Some(0));
+    gate.rewrite_report(|v| v["promotion_ready"] = serde_json::json!(false));
+    let (code, plan) = gate.promote("7");
+    assert_eq!(code, Some(1), "{plan}");
+    assert!(plan.contains("not a head-bound pass"), "{plan}");
+    // ... and pass_with_warnings is not a head-bound pass either
+    assert_eq!(gate.evaluate(&gate_input(&a, "lgtm", "author")), Some(0));
+    gate.rewrite_report(|v| v["verdict"] = serde_json::json!("pass_with_warnings"));
+    let (code, plan) = gate.promote("7");
+    assert_eq!(code, Some(1), "{plan}");
+    assert!(plan.contains("not a head-bound pass"), "{plan}");
+
+    // NOT required and no stated policy (legacy): a report from our evaluator still has to be
+    // a head-bound pass (the `|| ours` branch)
+    let gate = Gate::new("t16-r2-m3");
+    assert_eq!(gate.evaluate(&gate_input(&a, "lgtm", "author")), Some(0));
+    gate.rewrite_report(|v| v["promotion_ready"] = serde_json::json!(false));
+    let (code, plan) = gate.promote("7");
+    assert_eq!(code, Some(1), "{plan}");
+    assert!(plan.contains("not a head-bound pass"), "{plan}");
 }

@@ -300,7 +300,7 @@ same session id (a fresh session gets a new id), and `--force` overrides it.
 
 Record this durable preference in `AGENTS.md` (idempotent — skip if already present):
 
-> **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) the full target-repo validation/test suite has passed locally after the branch is current with `main`, (b) all **non-advisory** required CI checks pass — checks matching `AUTOSPEC_PR_ADVISORY_CHECKS` (default `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`; e.g. self-hosted TeamCity) are advisory and may be pending **or failing** once the full local suite is green, (c) the self-review subagent returned `LGTM`, (d) PR closes an `auto-implement` issue from a `feat/*` branch.
+> **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (through `autospec-guarded-merge.sh`, never a bare `gh pr merge`) when (a) the full target-repo validation/test suite has passed locally after the branch is current with `main`, (b) all **non-advisory** required CI checks pass — checks matching `AUTOSPEC_PR_ADVISORY_CHECKS` (default `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`; e.g. self-hosted TeamCity) are advisory and may be pending **or failing** once the full local suite is green, (c) the self-review subagent returned `LGTM`, (d) PR closes an `auto-implement` issue from a `feat/*` branch.
 
 **Off-peak tip:** For queues of 10+ issues (8+ hour runs), consider launching at night or on weekends. Usage limits are shared across all sessions — running long batches off-peak preserves daytime tokens for interactive work.
 
@@ -1591,7 +1591,7 @@ do not fall back to an inline label-swap path.
 >    # `autospec:fenced-approved` override label; otherwise
 >    # it performs the same admin squash-merge. Call it INSTEAD of a bare `gh pr merge --admin`
 >    # so "merge without the fence check" requires deliberately bypassing the wrapper.
->    # exit 0 = merged (allowed/overridden); 1 = quarantined (NOT merged); 2 = fail-closed error.
+>    # exit 0 = merged (allowed/overridden); 1 = quarantined (NOT merged); 3 = review quorum refused (NOT merged); 2 = fail-closed error.
 >    # This replaces the historical bare `gh pr merge <PR> --admin --squash --delete-branch`.
 >    # pr-size-guarded-merge-exec:begin
 >    run_guarded_pr_size_merge() {
@@ -1604,9 +1604,13 @@ do not fall back to an inline label-swap path.
 >      :
 >    else
 >      _gm_rc=$?
->      if [ "$_gm_rc" -eq 1 ]; then
+>      if [ "$_gm_rc" -eq 1 ] || [ "$_gm_rc" -eq 3 ]; then
 >        "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" --state needs-human --branch "<BRANCH>" --pr "<PR>" || true
->        echo "[monitor] #<ISSUE> quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
+>        if [ "$_gm_rc" -eq 3 ]; then
+          echo "[monitor] #<ISSUE> review quorum not verified (rc=3) — needs review/quorum or an operator review_quorum policy; PR NOT merged"
+        else
+          echo "[monitor] #<ISSUE> quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
+        fi
 >      else
 >        echo "[monitor] #<ISSUE> guarded-merge fail-closed (rc=$_gm_rc) — PR NOT merged; pausing for operator review"
 >      fi
