@@ -617,6 +617,15 @@ fn executor_gate_a_quorum_refusal_never_merges_and_is_not_retried() {
     );
     assert!(!merged.exists(), "gh pr merge must not run");
     assert_ne!(phase, bridge::BridgePhase::Merged);
+    // the closest real entry: the conductor's receipt for this failure is Blocked, never Retryable
+    let receipt = crate::commands::autonomous::ExecutorReceipt::failed(&failure);
+    assert_eq!(
+        receipt.outcome,
+        autospec_core::coordination::ConductorOutcome::Blocked(
+            "executor_receipt_failed".to_string()
+        ),
+        "a quorum refusal blocks the conductor; it is not retried"
+    );
 }
 
 #[cfg(unix)]

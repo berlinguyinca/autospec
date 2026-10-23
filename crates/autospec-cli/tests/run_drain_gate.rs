@@ -118,3 +118,21 @@ fn d2_the_merge_is_pinned_to_the_head_the_gate_returned() {
         "{log}\n{out}{err}"
     );
 }
+
+#[test]
+fn the_conductor_rollup_gate_logs_its_output_instead_of_discarding_it() {
+    let text = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/lib/autospec-loop.sh"
+    ))
+    .unwrap();
+    for line in text
+        .lines()
+        .filter(|l| l.contains("review-quorum merge-gate"))
+    {
+        assert!(
+            !line.contains("2>/dev/null"),
+            "a gate refusal must reach the log: {line}"
+        );
+    }
+}

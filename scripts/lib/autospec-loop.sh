@@ -850,7 +850,7 @@ _autospec_conductor_handle_promote() {
     # No --delete-branch (reset recreates the integration branch). T16: the review-quorum gate
     # must pass and the merge is pinned to the head it verified; any failure refuses.
     printf '[conductor] promote: merging roll-up PR #%s (issue #%s)\n' "$rollup_pr" "$issue" >&2
-    if ! _rq_head="$(autospec review-quorum merge-gate --repo-root "$repo_root" --pr "$rollup_pr" --repo "$repo" --script-version 2 2>/dev/null | jq -er .merge_head)" || ! gh pr merge "$rollup_pr" --repo "$repo" --admin --squash --match-head-commit "$_rq_head" >/dev/null 2>&1; then
+    if ! _rq_head="$(autospec review-quorum merge-gate --repo-root "$repo_root" --pr "$rollup_pr" --repo "$repo" --script-version 2 | tee >(sed "s/^/[conductor] promote review-quorum: /" >&2) | jq -er .merge_head)" || ! gh pr merge "$rollup_pr" --repo "$repo" --admin --squash --match-head-commit "$_rq_head" >/dev/null 2>&1; then
         gh issue comment "$issue" --repo "$repo" \
             --body "promote: failed to merge roll-up PR #${rollup_pr}. Re-apply autospec:promote to retry." \
             >/dev/null 2>&1 || true

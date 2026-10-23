@@ -2490,3 +2490,77 @@ fn m4_the_wrapper_has_no_operator_config_or_no_live_flag() {
         assert!(!gate.merged());
     }
 }
+
+fn merge_gate_raw(gate: &Gate, extra: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_autospec"))
+        .env("PATH", format!("{}:/usr/bin:/bin", gate.bin.display()))
+        .args([
+            "review-quorum",
+            "merge-gate",
+            "--repo-root",
+            gate.dir.to_str().unwrap(),
+            "--script-version",
+            "2",
+        ])
+        .args(extra)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn r6_merge_gate_requires_both_pr_and_repo() {
+    let gate = Gate::new("t16-r3-r6");
+    let off = gate.operator_named("off.yml", "review_quorum:\n  required: false\n");
+    let op = off.to_str().unwrap();
+    let ok = merge_gate_raw(
+        &gate,
+        &["--operator-config", op, "--pr", "7", "--repo", "o/r"],
+    );
+    assert_eq!(ok.status.code(), Some(0), "control: {ok:?}");
+    for extra in [
+        vec!["--operator-config", op, "--pr", "7"],
+        vec!["--operator-config", op, "--repo", "o/r"],
+    ] {
+        let out = merge_gate_raw(&gate, &extra);
+        assert_eq!(out.status.code(), Some(2), "{extra:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("requires --pr and --repo"));
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("merge_head"));
+    }
+}
+
+#[test]
+fn r7_the_head_pin_must_be_a_canonical_full_sha() {
+    let gate = Gate::new("t16-r3-r7");
+    let off = gate.operator_named("off.yml", "review_quorum:\n  required: false\n");
+    let op = off.to_str().unwrap();
+    let base = [
+        "--operator-config",
+        op,
+        "--pr",
+        "7",
+        "--repo",
+        "o/r",
+        "--head",
+    ];
+    for bad in ["abc123", "main", &"g".repeat(40), &"a".repeat(41)] {
+        let mut args = base.to_vec();
+        args.push(bad);
+        let out = merge_gate_raw(&gate, &args);
+        assert_eq!(out.status.code(), Some(2), "{bad}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("full commit sha"),
+            "{bad}"
+        );
+    }
+    // an upper-case or padded sha is canonicalised, then compared with the live head
+    let upper = format!(" {} ", "A".repeat(40));
+    let mut args = base.to_vec();
+    args.push(&upper);
+    let out = merge_gate_raw(&gate, &args);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    // a canonical sha that is not the live head is a policy refusal
+    let other = "b".repeat(40);
+    let mut args = base.to_vec();
+    args.push(&other);
+    assert_eq!(merge_gate_raw(&gate, &args).status.code(), Some(3));
+}

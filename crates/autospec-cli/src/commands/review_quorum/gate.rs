@@ -312,6 +312,16 @@ fn read_base(base: &Base) -> Source {
 /// Validate and read an attestation key: absolute, a regular file (not a link), mode 0600 or
 /// tighter, owned by us, and outside the repository and every git worktree.
 pub fn load_attestation_key(path: &str, repo_root: Option<&Path>) -> Result<Vec<u8>, String> {
+    load_attestation_key_as(path, repo_root, nix::unistd::Uid::current().as_raw())
+}
+
+/// The same, with the uid the key must belong to injected (a seam so the owner check is testable
+/// without a second account).
+pub fn load_attestation_key_as(
+    path: &str,
+    repo_root: Option<&Path>,
+    owner_uid: u32,
+) -> Result<Vec<u8>, String> {
     let file = Path::new(path);
     if !file.is_absolute() {
         return Err("attestation_key_file must be an absolute path".to_string());
@@ -323,7 +333,7 @@ pub fn load_attestation_key(path: &str, repo_root: Option<&Path>) -> Result<Vec<
     if meta.permissions().mode() & 0o077 != 0 {
         return Err("attestation key must be chmod 600".to_string());
     }
-    if meta.uid() != nix::unistd::Uid::current().as_raw() {
+    if meta.uid() != owner_uid {
         return Err("attestation key must be owned by the current user".to_string());
     }
     let real = fs::canonicalize(file).map_err(|e| format!("attestation key: {e}"))?;
@@ -921,4 +931,25 @@ pub fn executor_gate(
 pub enum GateError {
     Refused(String),
     Unavailable(String),
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_key_must_belong_to_the_expected_uid() {
+        let dir = std::env::temp_dir().join(format!("gate-owner-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("k.key");
+        fs::write(&key, "k".repeat(40)).unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+        let me = nix::unistd::Uid::current().as_raw();
+        let path = key.to_str().unwrap();
+        assert!(load_attestation_key_as(path, None, me).is_ok());
+        let err = load_attestation_key_as(path, None, me.wrapping_add(1)).unwrap_err();
+        assert!(err.contains("owned by the current user"), "{err}");
+        fs::remove_dir_all(&dir).ok();
+    }
 }
