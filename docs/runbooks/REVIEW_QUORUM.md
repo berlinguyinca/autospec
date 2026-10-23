@@ -80,7 +80,7 @@ herdr:
   unchanged) always calls `autospec review-quorum verify-report --repo-root D --pr N [--repo O/R]` and records the verified
   head as `review_quorum_head` in `promotion-plan.json` / `promotion-result.json`.
   - **Who requires the quorum is NOT the PR.** `required` comes only from trusted sources: the operator's config
-    (`~/.autospec/autospec.yml`, or `--operator-config`) and the DEFAULT branch's copy of `.autospec/autospec.yml`, fetched
+    (`~/.autospec/autospec.yml` under the account's passwd home) and the DEFAULT branch's copy of `.autospec/autospec.yml`, fetched
     FRESH from the forge at gate time (`gh api repos/O/R/contents/.autospec/autospec.yml`, run outside the checkout, for the
     explicit `--repo`; never a local `refs/remotes/*`, which a worker with `.git` write access can move with `git update-ref`,
     nor `remote.origin.url`). A forge answer that is not a 404, a 404 for a repository that cannot itself be read, and a missing
@@ -91,8 +91,8 @@ herdr:
     `True`, inline maps, a missing `required`, duplicates, null), and so does an enabled `herdr:` block in the operator config.
     `verify-report` (label promotion) keeps the old reading for a repository with no trusted configuration at all; the MERGE
     path does not (see `merge-gate`).
-  - **`merge-gate` (the merge path, T16 H3/H4).** `autospec review-quorum merge-gate --repo-root D --pr N --repo O/R
-    [--operator-config C]` is `verify-report` in strict mode and is what `scripts/autospec-guarded-merge.sh` and the run-drain
+  - **`merge-gate` (the merge path, T16 H3/H4).** `autospec review-quorum merge-gate --repo-root D --pr N --repo O/R`
+    is `verify-report` in strict mode and is what `scripts/autospec-guarded-merge.sh` and the run-drain
     recovery merge call. It differs: (1) no trusted source stating a `review_quorum` policy means REQUIRED, and only an explicit
     `review_quorum: {required: false}` in a trusted config opts out; (2) a required quorum needs origin proof, an
     `attestation_key_file` or an enabled Herdr live check; (3) the live head is read once and printed as `merge_head` (only on
@@ -115,7 +115,7 @@ herdr:
     non-pass one. Without a key the origin is UNPROVEN (anyone who can write the file can forge it) and `verify-report` prints
     `"origin":"unattested"` plus a warning. The key must be readable by whoever writes AND verifies reports.
   - **Live Herdr check.** When the operator config has `herdr.enabled: true` (a 0600 file with the ingest key), `verify-report`
-    re-asks Herdr at verify time (`--no-live` skips it for one run) and blocks unless it answers `satisfied` at the live head,
+    re-asks Herdr at verify time (`--no-live` skips it for one run of `verify-report` only; `merge-gate` rejects it) and blocks unless it answers `satisfied` at the live head,
     so a `blocked` filed after the report was written is seen; any Herdr error, or an unusable operator Herdr config, blocks.
   - Exit codes: 0 ok, 1 not trusted (JSON with `reasons`, `warnings`, `origin`, `live`, `live_head`), 2 usage. If the `autospec`
     binary is missing (or too old to know `verify-report`) `autospec-promote-pr.sh` blocks.
@@ -146,3 +146,13 @@ herdr:
   verdict exactly `lgtm`/`blocked`, and a request that names a PR (`pr`/`pr_node`/`target`) to name `--pr-node`.
 
 The Python feature-scoped `review-quorum` is unchanged and is a porting candidate (#4447).
+
+  - **`merge-gate` trust anchor and exit codes (T16 review round 3).** A release build reads the operator config from the
+    account's passwd home only and rejects `--operator-config` / `--no-live` on `merge-gate`; those flags and the `$HOME`
+    override exist for debug (test) builds. The wrappers accept neither. A trusted config that does not parse cleanly (a tab,
+    unbalanced `{}` / `[]`, a stray closer) states no policy, so the quorum is required. Exit codes: 0 pass, 3 refused by policy
+    (needs a human: set up the quorum, a policy or a report), 4 could not determine (every reason is a `gh` failure; retry),
+    2 usage or no `autospec` binary. The executor treats a refusal as needs-human and retries only a 4. `install.sh` runs
+    `autospec review-quorum config-check` and prints a warning with the exact `review_quorum: {required: false}` line when
+    no policy is stated; it never writes the policy for you. Fresh-repo exemption: define and split may commit the very first
+    spec to the default branch directly (no PR exists yet); every later change goes through the guarded merge.

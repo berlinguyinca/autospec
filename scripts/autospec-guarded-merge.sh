@@ -29,7 +29,6 @@
 #       [--verify-evidence FILE]     # full-suite evidence gate (issue #3523)
 #       [--build-dir DIR]            # checkout the local-build gate builds (default: cwd)
 #       [--no-require-local-build]   # skip the local buildability gate (default: on)
-#       [--operator-config FILE]     # review-quorum operator config (default: ~/.autospec/autospec.yml)
 #
 # CI-conclusion gate (issue #3220). `main` carries no branch protection, so a PR with pending or
 # failing checks reports UNSTABLE and the Phase 4 loop merged it anyway (#3148, #3216). Enforcing
@@ -75,7 +74,6 @@ VERIFY_EVIDENCE=""
 BUILD_DIR="."
 _BUILD_DIR_EXPLICIT=0
 REQUIRE_LOCAL_BUILD=1
-OPERATOR_CONFIG=""
 
 _die() {
     printf 'autospec-guarded-merge: %s\n' "$1" >&2
@@ -109,7 +107,6 @@ while [ "$#" -gt 0 ]; do
         --verify-evidence) VERIFY_EVIDENCE="${2:-}"; shift 2 ;;
         --build-dir) BUILD_DIR="${2:-}"; _BUILD_DIR_EXPLICIT=1; shift 2 ;;
         --no-require-local-build) REQUIRE_LOCAL_BUILD=0; shift 1 ;;
-        --operator-config) OPERATOR_CONFIG="${2:-}"; shift 2 ;;
         -h|--help) sed -n 's/^# \?//p' "$0" | head -40; exit 0 ;;
         *) _die "unknown option: $1" ;;
     esac
@@ -133,7 +130,8 @@ _cleanup() { rm -rf "$_TMPDIR" 2>/dev/null || true; }
 #    describe this one commit. A caller-supplied --match-head-commit in --merge-args is the pin
 #    when present; the gate then refuses (exit 3) if the live head is not exactly it.
 _pin="$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null)" || _die "could not read the PR head for PR #$PR (fail-closed, not merged)"
-case " $MERGE_ARGS " in *" --match-head-commit "*) _pin="${MERGE_ARGS##*--match-head-commit }"; _pin="${_pin%% *}" ;; esac
+MERGE_ARGS="${MERGE_ARGS//--match-head-commit=/--match-head-commit }"
+case " $MERGE_ARGS " in *" --match-head-commit "*) _pin="${MERGE_ARGS##*--match-head-commit }"; _pin="${_pin%% *}"; MERGE_ARGS="${MERGE_ARGS/--match-head-commit $_pin/}" ;; esac
 
 # 1. Fetch the PR's actual changed files. gh failure is fail-closed.
 _changed="$_TMPDIR/changed.txt"
@@ -421,9 +419,10 @@ fi
 #    pinned to, so a head pushed after verification cannot merge.
 _cleanup
 command -v autospec >/dev/null 2>&1 || _die "autospec binary not found; the review quorum cannot be checked (fail-closed, not merged)"
-_oc=(); if [ -n "$OPERATOR_CONFIG" ]; then _oc=(--operator-config "$OPERATOR_CONFIG"); fi
-if ! _qg="$(autospec review-quorum merge-gate --repo-root "$BUILD_DIR" --pr "$PR" --repo "$REPO" --head "$_pin" --script-version 2 ${_oc[@]+"${_oc[@]}"})" || ! _qhead="$(printf '%s' "$_qg" | jq -er .merge_head)"; then
+_qrc=0; _qg="$(autospec review-quorum merge-gate --repo-root "$BUILD_DIR" --pr "$PR" --repo "$REPO" --head "$_pin" --script-version 2)" || _qrc=$?
+if [ "$_qrc" -ne 0 ] || ! _qhead="$(printf '%s' "$_qg" | jq -er .merge_head)"; then
     printf 'guarded-merge: PR #%s review quorum not verified: %s\nblocked review_quorum_not_verified\n' "$PR" "$_qg"
+    [ "$_qrc" -eq 4 ] && exit 4 # could not determine (gh failure): retry; 3 = refused by policy; 2 = no binary
     exit 3
 fi
 # shellcheck disable=SC2086

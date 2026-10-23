@@ -47,6 +47,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         Some("request") => return request(&args[1..]),
         Some("verify-report") => return verify_report(&args[1..], false),
         Some("merge-gate") => return verify_report(&args[1..], true),
+        Some("config-check") => return config_check(&args[1..]),
         _ => {}
     }
     let mut input = None;
@@ -264,6 +265,11 @@ fn verify_report(args: &[String], strict: bool) -> Result<i32, String> {
             "script-version",
         ],
     )?;
+    // The trust anchor is not caller-chosen on the merge path: `--operator-config` and
+    // `--no-live` exist for the test harness (debug builds) only.
+    if strict && !cfg!(debug_assertions) && (f.contains_key("operator-config") || f.contains_key("no-live")) {
+        return Err("merge-gate does not accept --operator-config or --no-live".to_string());
+    }
     // The merge path refuses a caller script that predates this gate's contract.
     if strict && f.get("script-version").and_then(|v| v.parse::<u32>().ok()) < Some(2) {
         return Err("merge-gate needs --script-version 2 or newer: the guarded-merge script is stale; run `bash <autospec-repo>/install.sh --update`".to_string());
@@ -302,7 +308,8 @@ fn verify_report(args: &[String], strict: bool) -> Result<i32, String> {
     }
     println!("{body}");
     // 3 = the quorum refused (1 stays the blast-radius fence's code in the guarded merge)
-    Ok(if ok { 0 } else if strict { 3 } else { 1 })
+    // 3 = refused by policy, 4 = could not determine (gh/transport failure; retry)
+    Ok(if ok { 0 } else if strict { if body["retry"] == true { 4 } else { 3 } } else { 1 })
 }
 
 /// A refused merge must not leave a stale "verified" mark on the PR: remove the labels that
@@ -495,4 +502,29 @@ fn request(args: &[String]) -> Result<i32, String> {
         return Ok(4);
     }
     Ok(0)
+}
+
+/// `config-check`: is a review-quorum policy stated in the operator's config? Prints a loud
+/// warning with the exact line to add when it is not (the guarded merge refuses until it is).
+/// Never writes anything. Exit 0 stated, 1 not stated.
+fn config_check(args: &[String]) -> Result<i32, String> {
+    let f = flags(args, &["operator-config"])?;
+    let path = f
+        .get("operator-config")
+        .map(PathBuf::from)
+        .or_else(gate::default_operator_config)
+        .ok_or("cannot find the operator's home directory")?;
+    let stated = fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| gate::read_opinion(&t).ok())
+        .is_some_and(|o| o.stated);
+    if stated {
+        println!("review quorum policy found in {}", path.display());
+        return Ok(0);
+    }
+    eprintln!(
+        "WARNING: no review_quorum policy in {p}.\n  autospec-guarded-merge.sh and the executor now REFUSE every merge until one is stated.\n  To opt out explicitly add to {p}:\n      review_quorum:\n        required: false\n  or set up the quorum (see docs/runbooks/REVIEW_QUORUM.md).",
+        p = path.display()
+    );
+    Ok(1)
 }

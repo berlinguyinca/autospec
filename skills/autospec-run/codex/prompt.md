@@ -1603,12 +1603,14 @@ do not fall back to an inline label-swap path.
 >      if [ "$_gm_rc" -eq 1 ] || [ "$_gm_rc" -eq 3 ]; then
 >        "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" --state needs-human --branch "<BRANCH>" --pr "<PR>" || true
 >        if [ "$_gm_rc" -eq 3 ]; then
-          echo "[monitor] #<ISSUE> review quorum not verified (rc=3) — needs review/quorum or an operator review_quorum policy; PR NOT merged"
-        else
-          echo "[monitor] #<ISSUE> quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
-        fi
+>          echo "[monitor] #<ISSUE> review quorum REFUSED (rc=3): needs review/quorum or an operator review_quorum policy; PR NOT merged, left needs-human"
+>        else
+>          echo "[monitor] #<ISSUE> quarantined by blast-radius fence: fenced surface, left needs-human; PR NOT merged"
+>        fi
+>      elif [ "$_gm_rc" -eq 4 ]; then
+>        echo "[monitor] #<ISSUE> review quorum could not be checked (rc=4, gh/transport failure): PR NOT merged; retry later"
 >      else
->        echo "[monitor] #<ISSUE> guarded-merge fail-closed (rc=$_gm_rc) — PR NOT merged; pausing for operator review"
+>        echo "[monitor] #<ISSUE> guarded-merge fail-closed (rc=$_gm_rc): PR NOT merged; pausing for operator review"
 >      fi
 >      rm -f "/tmp/issue-<ISSUE>-body.md" || true
 >      exit 0

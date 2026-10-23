@@ -255,7 +255,7 @@ JSON
   "issue view 1545 --repo berlinguyinca/autospec --json state,labels"*)
     printf '{"state":"OPEN","labels":[{"name":"in-progress-by-bot"}]}\n'
     ;;
-  "pr merge 1578 --repo berlinguyinca/autospec --admin --squash --delete-branch"*)
+  "pr merge 1578 --repo berlinguyinca/autospec --admin --squash --delete-branch --match-head-commit abc")
     printf '{"state":"MERGED"}\n' > "$HOME/pr-1578.json"
     ;;
   "pr view 1578 --repo berlinguyinca/autospec --json state,mergedAt"*)
@@ -278,7 +278,7 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"stale wait handle recovery merged PR #1578 for issue #1545"* ]]
-  grep -q "gh pr merge 1578" "$HOME/gh.log"
+  grep -q "gh pr merge 1578 .*--match-head-commit abc" "$HOME/gh.log"
 }
 
 @test "run-drain: escalates to KILL for a TERM-resistant descendant" {

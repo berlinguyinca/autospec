@@ -1676,26 +1676,41 @@ fn a_dispatch_that_outlives_its_timeout_is_killed_and_backed_off() {
 
 // ---------------------------------------------------------------- T16: the merge path
 impl Gate {
+    /// A fake `$HOME` whose `.autospec/autospec.yml` is a copy of `operator` (or absent): the
+    /// wrapper takes no `--operator-config`, so the harness states the operator policy the way
+    /// the product does, through the home directory (honored by debug builds only).
+    fn home_with(&self, operator: Option<&Path>) -> PathBuf {
+        let name = operator
+            .map(|o| o.file_name().unwrap().to_string_lossy().into_owned())
+            .unwrap_or_else(|| "none".into());
+        let home = self.dir.join(format!("home-{name}"));
+        std::fs::create_dir_all(home.join(".autospec")).unwrap();
+        if let Some(op) = operator.filter(|o| o.exists()) {
+            std::fs::copy(op, home.join(".autospec/autospec.yml")).unwrap();
+        }
+        home
+    }
+
     /// Run the REAL `autospec-guarded-merge.sh` (fake forge, real `autospec`). `bin` is the
     /// directory searched first for `gh`/`autospec`.
     fn guarded_merge(&self, bin: &Path, operator: Option<&Path>) -> (Option<i32>, String) {
         let path = format!("{}:/usr/bin:/bin", bin.display());
         let mut cmd = Command::new("bash");
-        cmd.env("PATH", path).current_dir(&self.dir).args([
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../scripts/autospec-guarded-merge.sh"
-            ),
-            "--pr",
-            "7",
-            "--repo",
-            "o/r",
-            "--no-require-checks",
-            "--no-require-local-build",
-        ]);
-        if let Some(op) = operator {
-            cmd.args(["--operator-config", op.to_str().unwrap()]);
-        }
+        cmd.env("PATH", path)
+            .env("HOME", self.home_with(operator))
+            .current_dir(&self.dir)
+            .args([
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../scripts/autospec-guarded-merge.sh"
+                ),
+                "--pr",
+                "7",
+                "--repo",
+                "o/r",
+                "--no-require-checks",
+                "--no-require-local-build",
+            ]);
         let out = cmd.output().unwrap();
         (
             out.status.code(),
@@ -2033,6 +2048,7 @@ impl Gate {
     fn guarded_merge_with(&self, merge_args: &str, operator: &Path) -> (Option<i32>, String) {
         let out = Command::new("bash")
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+            .env("HOME", self.home_with(Some(operator)))
             .current_dir(&self.dir)
             .args([
                 concat!(
@@ -2047,8 +2063,6 @@ impl Gate {
                 "--no-require-local-build",
                 "--merge-args",
                 merge_args,
-                "--operator-config",
-                operator.to_str().unwrap(),
             ])
             .output()
             .unwrap();
@@ -2188,7 +2202,11 @@ fn surviving_mutants_a_failed_head_read_and_the_pass_checks() {
     let off = gate.operator("review_quorum:\n  required: false\n");
     std::fs::write(gate.dir.join("pr_fail"), "").unwrap();
     let (code, v) = gate.merge_gate(&off);
-    assert_eq!(code, Some(3), "{v}");
+    assert_eq!(
+        code,
+        Some(4),
+        "a failed read is retryable, not a policy refusal: {v}"
+    );
     assert!(reasons(&v).contains("live PR head"), "{v}");
     assert!(v["merge_head"].is_null(), "{v}");
 
@@ -2216,4 +2234,259 @@ fn surviving_mutants_a_failed_head_read_and_the_pass_checks() {
     let (code, plan) = gate.promote("7");
     assert_eq!(code, Some(1), "{plan}");
     assert!(plan.contains("not a head-bound pass"), "{plan}");
+}
+
+// ---- Round 3 (re-review of 1045dcd5) ---------------------------------------------------
+
+impl Gate {
+    fn merge_gate_env(&self, operator: &Path, env: &[(&str, &str)]) -> std::process::Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_autospec"));
+        cmd.env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()));
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.args([
+            "review-quorum",
+            "merge-gate",
+            "--repo-root",
+            self.dir.to_str().unwrap(),
+            "--operator-config",
+            operator.to_str().unwrap(),
+            "--pr",
+            "7",
+            "--repo",
+            "o/r",
+            "--script-version",
+            "2",
+        ])
+        .output()
+        .unwrap()
+    }
+}
+
+#[test]
+fn m6_a_trusted_config_the_parser_might_half_read_is_required_not_opted_out() {
+    let gate = Gate::new("t16-r3-m6");
+    let control = gate.operator_named("control.yml", "review_quorum:\n  required: false\n");
+    assert_eq!(gate.merge_gate(&control).0, Some(0), "the control opts out");
+    for (name, yaml) in [
+        ("trailing.yml", "review_quorum:\n  required: false\n}}}\n"),
+        (
+            "tab-line.yml",
+            "review_quorum:\n  required: false\n\tfoo: 1\n",
+        ),
+        ("tab-sep.yml", "review_quorum:\n  required:\tfalse\n"),
+        ("open-flow.yml", "review_quorum: {required: false\n"),
+        (
+            "open-list.yml",
+            "review_quorum:\n  required: false\nother: [1, 2\n",
+        ),
+    ] {
+        let op = gate.operator_named(name, yaml);
+        let (code, body) = gate.merge_gate(&op);
+        assert_eq!(code, Some(3), "{name} must not opt out: {body}");
+        assert!(body.is_null() || body["ok"] != true, "{name}");
+    }
+}
+
+#[test]
+fn m7_could_not_determine_is_exit_4_and_a_policy_refusal_is_exit_3() {
+    let gate = Gate::new("t16-r3-m7");
+    let off = gate.operator_named("off.yml", "review_quorum:\n  required: false\n");
+    std::fs::write(gate.dir.join("pr_fail"), "").unwrap();
+    let out = gate.merge_gate_env(&off, &[]);
+    assert_eq!(out.status.code(), Some(4), "{out:?}");
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(body["retry"], true, "{body}");
+    std::fs::remove_file(gate.dir.join("pr_fail")).unwrap();
+    // a policy refusal (a required quorum with no report) is not retryable
+    let req = gate.operator_named("req.yml", "review_quorum:\n  required: true\n");
+    let out = gate.merge_gate_env(&req, &[]);
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(body["retry"], false, "{body}");
+    // a mixed failure (a transport error AND a policy reason) is a refusal
+    std::fs::write(gate.dir.join("pr_fail"), "").unwrap();
+    let out = gate.merge_gate_env(&req, &[]);
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+}
+
+#[test]
+fn m7_the_wrapper_passes_exit_4_and_3_through_and_merges_nothing() {
+    let gate = Gate::new("t16-r3-m7-wrap");
+    let off = gate.operator_named("off.yml", "review_quorum:\n  required: false\n");
+    // the wrapper's own head read succeeds; only the gate's PR view fails
+    std::fs::write(gate.dir.join("pr_fail"), "").unwrap();
+    let (code, out) = gate.guarded_merge(&gate.bin, Some(&off));
+    assert!(!gate.merged(), "{out}");
+    assert!(
+        matches!(code, Some(4) | Some(3) | Some(2)),
+        "{code:?} {out}"
+    );
+    std::fs::remove_file(gate.dir.join("pr_fail")).unwrap();
+    let (code, out) = gate.guarded_merge(&gate.bin, None);
+    assert_eq!(code, Some(3), "no policy at all is a refusal: {out}");
+    assert!(!gate.merged());
+}
+
+#[test]
+fn config_check_warns_loudly_with_the_exact_line_and_never_writes() {
+    let gate = Gate::new("t16-r3-cfgcheck");
+    let run = |op: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_autospec"))
+            .args([
+                "review-quorum",
+                "config-check",
+                "--operator-config",
+                op.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+    };
+    let missing = gate.dir.join("absent.yml");
+    let out = run(&missing);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("WARNING") && err.contains("required: false"),
+        "{err}"
+    );
+    assert!(!missing.exists(), "the check must not seed a policy");
+    let stated = gate.operator_named("stated.yml", "review_quorum:\n  required: true\n");
+    assert_eq!(run(&stated).status.code(), Some(0));
+    let broken = gate.operator_named("broken.yml", "review_quorum:\n  required: false\n}}}\n");
+    assert_eq!(
+        run(&broken).status.code(),
+        Some(1),
+        "unparseable is not a policy"
+    );
+}
+
+#[test]
+fn m5_both_spellings_of_the_caller_pin_are_one_pin() {
+    let gate = Gate::new("t16-r3-pin-eq");
+    let off = gate.operator_named("off.yml", "review_quorum:\n  required: false\n");
+    let a = "a".repeat(40);
+    let (code, out) = gate.guarded_merge_with(
+        &format!("--admin --squash --delete-branch --match-head-commit={a}"),
+        &off,
+    );
+    assert_eq!(code, Some(0), "{out}");
+    let log = gate.merge_log();
+    assert_eq!(log.matches("--match-head-commit").count(), 1, "{log}");
+    assert!(log.contains(&format!("--match-head-commit {a}")), "{log}");
+    // a differing caller pin (= form) is refused and nothing merges
+    let gate = Gate::new("t16-r3-pin-eq2");
+    let off = gate.operator_named("off.yml", "review_quorum:\n  required: false\n");
+    let b = "b".repeat(40);
+    let (code, out) =
+        gate.guarded_merge_with(&format!("--admin --squash --match-head-commit={b}"), &off);
+    assert_eq!(code, Some(3), "{out}");
+    assert!(!gate.merged());
+}
+
+#[test]
+fn g30_the_gate_runs_gh_from_root_with_the_ambient_gh_environment_scrubbed() {
+    let gate = Gate::new("t16-r3-env");
+    // a recording gh in front of the fake forge
+    let rec = gate.dir.join("rec");
+    std::fs::create_dir_all(&rec).unwrap();
+    let real = gate.bin.join("gh");
+    let log = gate.dir.join("ghenv.log");
+    script(
+        &rec,
+        "gh",
+        &format!(
+            "pwd >> {l}\nenv | sort >> {l}\nexec {r} \"$@\"",
+            l = log.display(),
+            r = real.display()
+        ),
+    );
+    std::os::unix::fs::symlink(gate.bin.join("autospec"), rec.join("autospec")).unwrap();
+    let off = gate.operator_named("off.yml", "review_quorum:\n  required: false\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_autospec"))
+        .env("PATH", format!("{}:/usr/bin:/bin", rec.display()))
+        .env("GH_HOST", "evil.example")
+        .env("GH_REPO", "evil/x")
+        .env("GH_CONFIG_DIR", "/nonexistent-gh")
+        .env("GH_ENTERPRISE_TOKEN", "x")
+        .env("GITHUB_ENTERPRISE_TOKEN", "x")
+        .env("GIT_DIR", "/nonexistent-git")
+        .env("GIT_WORK_TREE", "/nonexistent-wt")
+        .args([
+            "review-quorum",
+            "merge-gate",
+            "--repo-root",
+            gate.dir.to_str().unwrap(),
+            "--operator-config",
+            off.to_str().unwrap(),
+            "--pr",
+            "7",
+            "--repo",
+            "o/r",
+            "--script-version",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let seen = std::fs::read_to_string(&log).unwrap();
+    for name in [
+        "GH_HOST",
+        "GH_REPO",
+        "GH_CONFIG_DIR",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+    ] {
+        assert!(
+            !seen.lines().any(|l| l.starts_with(&format!("{name}="))),
+            "{name} leaked into gh: {seen}"
+        );
+    }
+    let cwds: Vec<&str> = seen
+        .lines()
+        .filter(|l| l.starts_with('/') && !l.contains('='))
+        .collect();
+    assert!(
+        !cwds.is_empty() && cwds.iter().all(|c| *c == "/"),
+        "gh must run from /: {cwds:?}"
+    );
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn m4_a_release_build_refuses_a_caller_chosen_trust_anchor() {
+    let gate = Gate::new("t16-r3-m4");
+    let off = gate.operator_named("off.yml", "review_quorum:\n  required: false\n");
+    let out = gate.merge_gate_env(&off, &[]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("does not accept"));
+}
+
+#[test]
+fn m4_the_wrapper_has_no_operator_config_or_no_live_flag() {
+    let gate = Gate::new("t16-r3-m4w");
+    for flag in ["--operator-config", "--no-live"] {
+        let out = Command::new("bash")
+            .env("PATH", format!("{}:/usr/bin:/bin", gate.bin.display()))
+            .current_dir(&gate.dir)
+            .args([
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../scripts/autospec-guarded-merge.sh"
+                ),
+                "--pr",
+                "7",
+                "--repo",
+                "o/r",
+                flag,
+                "/tmp/x",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{flag}");
+        assert!(!gate.merged());
+    }
 }

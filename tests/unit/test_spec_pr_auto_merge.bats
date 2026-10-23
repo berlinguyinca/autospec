@@ -38,19 +38,16 @@ setup() {
 # Happy path — autospec-define trio
 # ---------------------------------------------------------------------------
 
-@test "autospec-define/SKILL.md: contains gh pr merge --admin --squash --delete-branch" {
-    grep -q 'gh pr merge.*--admin.*--squash.*--delete-branch' \
-        "$REPO_ROOT/skills/autospec-define/SKILL.md"
+@test "autospec-define/SKILL.md: merges through autospec-guarded-merge.sh, no bare gh pr merge" {
+    grep -q 'autospec-guarded-merge.sh.*--pr' "$REPO_ROOT/skills/autospec-define/SKILL.md" && ! grep -q 'gh pr merge' "$REPO_ROOT/skills/autospec-define/SKILL.md"
 }
 
-@test "autospec-define/opencode/agent.md: contains gh pr merge --admin --squash --delete-branch" {
-    grep -q 'gh pr merge.*--admin.*--squash.*--delete-branch' \
-        "$REPO_ROOT/skills/autospec-define/opencode/agent.md"
+@test "autospec-define/opencode/agent.md: merges through autospec-guarded-merge.sh, no bare gh pr merge" {
+    grep -q 'autospec-guarded-merge.sh.*--pr' "$REPO_ROOT/skills/autospec-define/opencode/agent.md" && ! grep -q 'gh pr merge' "$REPO_ROOT/skills/autospec-define/opencode/agent.md"
 }
 
-@test "autospec-define/codex/prompt.md: contains gh pr merge --admin --squash --delete-branch" {
-    grep -q 'gh pr merge.*--admin.*--squash.*--delete-branch' \
-        "$REPO_ROOT/skills/autospec-define/codex/prompt.md"
+@test "autospec-define/codex/prompt.md: merges through autospec-guarded-merge.sh, no bare gh pr merge" {
+    grep -q 'autospec-guarded-merge.sh.*--pr' "$REPO_ROOT/skills/autospec-define/codex/prompt.md" && ! grep -q 'gh pr merge' "$REPO_ROOT/skills/autospec-define/codex/prompt.md"
 }
 
 # ---------------------------------------------------------------------------

@@ -63,6 +63,16 @@ pub fn read_opinion(text: &str) -> Result<Opinion, String> {
     if blank {
         return Ok(Opinion::default());
     }
+    // A trusted file the parser might half-read is "required", not "opted out": tabs (even as
+    // a separator), unbalanced flow brackets and stray closers are refused outright.
+    if text.contains('\t') {
+        return Err("tabs are not allowed in a trusted config".to_string());
+    }
+    for (open, close) in [('{', '}'), ('[', ']')] {
+        if text.matches(open).count() != text.matches(close).count() {
+            return Err(format!("unbalanced `{open}{close}` in a trusted config"));
+        }
+    }
     let parsed = yaml_edit::YamlFile::parse(text);
     if !parsed.errors().is_empty() {
         return Err(format!("not valid YAML: {}", parsed.errors().join("; ")));
@@ -137,11 +147,13 @@ pub fn home_dir() -> Option<PathBuf> {
 /// The operator's config: under `$HOME` when it is set (the same file the shell scripts read,
 /// so the two cannot disagree), else under the passwd home.
 pub fn default_operator_config() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|h| h.is_absolute())
-        .or_else(home_dir)
-        .map(|h| h.join(".autospec/autospec.yml"))
+    // Release builds read the passwd home only: a process environment is not a trust anchor.
+    // Debug builds (the test harness) also honor `$HOME` so fixtures can state a policy.
+    let env_home = cfg!(debug_assertions)
+        .then(|| std::env::var_os("HOME").map(PathBuf::from))
+        .flatten()
+        .filter(|h| h.is_absolute());
+    env_home.or_else(home_dir).map(|h| h.join(".autospec/autospec.yml"))
 }
 
 /// The operator's state directory root (outside every repository and worktree).
@@ -376,6 +388,8 @@ pub struct Trusted {
     pub operator_config: Option<PathBuf>,
     /// At least one trusted source has a `review_quorum` key (so a policy is stated).
     pub stated: bool,
+    /// A readable trusted source (or the checkout) says `required: true`.
+    pub explicit_required: bool,
 }
 
 pub fn trusted(root: &Path, operator: Option<&Path>, base: &Base) -> Trusted {
@@ -395,6 +409,7 @@ pub fn trusted(root: &Path, operator: Option<&Path>, base: &Base) -> Trusted {
         problems: Vec::new(),
         operator_config: operator_path,
         stated: false,
+        explicit_required: false,
     };
     let mut ages = Vec::new();
     for (name, source) in sources {
@@ -410,6 +425,7 @@ pub fn trusted(root: &Path, operator: Option<&Path>, base: &Base) -> Trusted {
         match read_opinion(&text) {
             Ok(op) => {
                 out.required |= op.required;
+                out.explicit_required |= op.required;
                 out.stated |= op.stated;
                 if name == "operator" {
                     out.herdr_enabled = op.herdr_enabled;
@@ -432,6 +448,7 @@ pub fn trusted(root: &Path, operator: Option<&Path>, base: &Base) -> Trusted {
     if let Ok(text) = fs::read_to_string(root.join(".autospec/autospec.yml")) {
         if read_opinion(&text).is_ok_and(|op| op.required) {
             out.required = true;
+            out.explicit_required = true;
         }
     }
     out
@@ -733,12 +750,27 @@ pub fn verify(args: &VerifyArgs) -> (bool, serde_json::Value) {
         live_head = live_res.and_then(Result::ok).map(|(head, _)| head);
     }
     let ok = reasons.is_empty();
+    // "could not determine" (a gh/transport failure) is distinct from "refused by policy"
+    let transient = |r: &str| {
+        r.contains("gh pr view failed")
+            || r.contains("cannot run gh")
+            || r.starts_with("default branch config of ")
+            || r.starts_with("default branch config: cannot run")
+            || r.contains("live Herdr check failed")
+    };
+    // Retry when every reason is a transport failure, or when the only trusted-source problems
+    // are transport failures and nothing readable demands the quorum: the remaining reasons
+    // (no report, no key) are then just the fail-closed default for an unreadable forge.
+    let outage_only = !trusted.problems.is_empty()
+        && trusted.problems.iter().all(|p| transient(p))
+        && !trusted.explicit_required;
+    let retry = !ok && (reasons.iter().all(|r| transient(r)) || (outage_only && reasons.iter().any(|r| transient(r))));
     // The only head a caller may pin a merge to: set when, and only when, the gate passed.
     let merge_head = if ok { live_head.clone() } else { None };
     (
         ok,
         serde_json::json!({"ok": ok, "required": required, "origin": origin, "live": live,
-            "live_head": live_head, "merge_head": merge_head, "report_head": report_head,
+            "live_head": live_head, "merge_head": merge_head, "report_head": report_head, "retry": retry,
             "reasons": reasons, "warnings": warnings}),
     )
 }
@@ -860,7 +892,7 @@ pub fn executor_gate(
     head: &str,
     operator_config: Option<&Path>,
     gh: Gh,
-) -> Result<(), String> {
+) -> Result<(), GateError> {
     let (ok, body) = verify(&VerifyArgs {
         root: root.to_path_buf(),
         report: None,
@@ -876,7 +908,17 @@ pub fn executor_gate(
     });
     if ok {
         Ok(())
+    } else if body["retry"] == true {
+        Err(GateError::Unavailable(body["reasons"].to_string()))
     } else {
-        Err(body["reasons"].to_string())
+        Err(GateError::Refused(body["reasons"].to_string()))
     }
+}
+
+/// Why the in-process gate said no: `Refused` is policy (needs a human), `Unavailable` is a
+/// transport failure that may succeed on retry.
+#[derive(Debug)]
+pub enum GateError {
+    Refused(String),
+    Unavailable(String),
 }

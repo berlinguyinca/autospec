@@ -248,7 +248,7 @@ recover_green_in_progress_pr() {
             continue
         fi
         # T16 H3: review-quorum gate, fail closed; merge pinned to the verified head
-        _qh="$(autospec review-quorum merge-gate --repo-root "$REPO_DIR" --pr "$_pr" --repo "$_repo" --script-version 2 2>/dev/null | jq -er .merge_head)" || continue
+        _qo="$(autospec review-quorum merge-gate --repo-root "$REPO_DIR" --pr "$_pr" --repo "$_repo" --script-version 2 2>&1)" && _qh="$(printf '%s' "$_qo" | jq -er .merge_head)" || { printf 'run-drain: PR #%s not merged, review quorum: %s\n' "$_pr" "$_qo" >&2; continue; }
         gh pr merge "$_pr" --repo "$_repo" --admin --squash --delete-branch --match-head-commit "$_qh" >/dev/null 2>&1 || true
         if pr_is_merged "$_repo" "$_pr"; then
             gh issue edit "$_issue" --repo "$_repo" --remove-label in-progress-by-bot >/dev/null 2>&1 || true

@@ -597,18 +597,23 @@ fi
 # quarantine label and comments) unless the PR carries the
 # `autospec:fenced-approved` override label. Call the wrapper INSTEAD of a bare
 # `gh pr merge --admin`. exit 1 = quarantined (NOT merged); exit 3 = review
-# quorum refused (NOT merged); exit 2 = fail-closed error.
+# quorum refused by policy (NOT merged); exit 4 = quorum could not be checked, retry; exit 2 = fail-closed error.
 # This replaces the historical bare `gh pr merge <PR> --admin --squash --delete-branch`.
 if bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo <repo>; then
     :
 else
     gm_rc=$?
-    if [ "$gm_rc" -eq 3 ]; then
-        echo "review quorum not verified (rc=3) — needs review/quorum or an operator review_quorum policy; PR NOT merged"
-    elif [ "$gm_rc" -eq 1 ]; then
-        echo "quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
+    if [ "$gm_rc" -eq 1 ] || [ "$gm_rc" -eq 3 ]; then
+        "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo <REPO> --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" --state needs-human --branch "$branch_name" --pr "$pr_number" || true
+        if [ "$gm_rc" -eq 3 ]; then
+            echo "review quorum REFUSED (rc=3): needs review/quorum or an operator review_quorum policy; PR NOT merged, left needs-human"
+        else
+            echo "quarantined by blast-radius fence: fenced surface, left needs-human; PR NOT merged"
+        fi
+    elif [ "$gm_rc" -eq 4 ]; then
+        echo "review quorum could not be checked (rc=4, gh/transport failure): PR NOT merged; retry later"
     else
-        echo "guarded-merge fail-closed (rc=$gm_rc) — PR NOT merged; pausing for operator review"
+        echo "guarded-merge fail-closed (rc=$gm_rc): PR NOT merged; pausing for operator review"
     fi
     exit 0
 fi

@@ -203,7 +203,7 @@ Run a structured brainstorm — one question at a time, get explicit approval af
 
 Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`. Self-review for placeholders, contradictions, ambiguity, scope. The spec must be implementable end-to-end by an agent reading only the spec.
 
-If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file.
+If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file. This is the ONLY exemption from `autospec-guarded-merge.sh` (T16 H3): a brand-new repo has no reviewed base and no PR to gate, and the commit is the spec document alone. Every later change merges through a PR and the guarded merge.
 
 For an existing repo, land the spec via a short-lived PR so CI can validate it:
 1. Create branch `feat/spec-<topic>`, commit `docs/specs/...design.md`, push.

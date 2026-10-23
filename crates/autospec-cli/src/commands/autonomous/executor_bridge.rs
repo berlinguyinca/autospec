@@ -13963,7 +13963,15 @@ where
                 .collect(),
         },
     )
-    .map_err(|why| BridgeRunFailure::transient(format!("review quorum not verified: {why}")))?;
+    .map_err(|why| match why {
+        crate::commands::review_quorum::gate::GateError::Unavailable(why) => {
+            BridgeRunFailure::transient(format!("review quorum could not be checked: {why}"))
+        }
+        // a policy refusal is not retried: it needs an operator (config, report or review)
+        crate::commands::review_quorum::gate::GateError::Refused(why) => {
+            BridgeRunFailure::invariant(format!("review quorum refused the merge: {why}"))
+        }
+    })?;
     let output = Command::new(&adapter.gh)
         .args([
             "pr",
