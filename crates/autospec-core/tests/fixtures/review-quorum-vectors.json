@@ -1,1226 +1,1378 @@
 {
- "version": 1,
- "binding": "sha256('pr-review-receipt-v1\\0'+lower(target)+'\\0'+commit+'\\0'+reviewer+'\\0'+receipt_digest)",
- "cases": [
-  {
-   "name": "two_distinct_reviewers_satisfy",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
+  "version": 1,
+  "binding": "sha256('pr-review-receipt-v1\\0'+lower(target)+'\\0'+commit+'\\0'+reviewer+'\\0'+receipt_digest)",
+  "cases": [
     {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+      "name": "two_distinct_reviewers_satisfy",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        }
+      ],
+      "expect": {
+        "status": "satisfied",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": []
+      }
     },
     {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+      "name": "older_head_never_counts",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "01df34897933043a8937f7dddd2a19fb7f756172927cc06efffec34583cf7608"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "8eb81d218b39baef9f6eb4b53101ef94496293e57fb9f89715950c8a2d70ad1e"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [],
+        "blocking": []
+      }
+    },
+    {
+      "name": "uppercase_verdict_is_normalised",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "LGTM",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": " Lgtm ",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        }
+      ],
+      "expect": {
+        "status": "satisfied",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "uppercase_digest_and_binding_are_normalised",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "E70EF71CE8692F75B5BE47A1A6648EDDC113D295D6A074BFE53C81D9DA96AF99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        }
+      ],
+      "expect": {
+        "status": "satisfied",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "non_hex_digest_does_not_count",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "x1"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r2"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "binding_for_another_target_does_not_count",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "08d832831c01244884064ab9cac0b7f2e50a16fbf30217faf109e594a41b9de6"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r2"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "binding_for_another_reviewer_does_not_count",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "cd4f513be3e489b239577fcbcede12602c82d0a8da07f3931501d708c96c1bf5"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r2"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "missing_binding_does_not_count",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r2"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "shared_digest_voids_both",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "receipt_binding": "e4513fef233a5d4413aaff0fcd271312c4fab35e9ca2d0ad5ba00de54e705a38"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "receipt_binding": "578d160dbe7ae53b72bc616b9a86ffe95de65e84ac1439f61ee9f4d65906b650"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [],
+        "blocking": []
+      }
+    },
+    {
+      "name": "same_identity_twice_counts_once",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "8a69c6de2bced310b91efd1622b52d09240027110b645fd5b36a455df433e9ef"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r1"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "bot_alias_matches_author",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "dependabot[bot]"
+      },
+      "votes": [
+        {
+          "reviewer": "dependabot",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "f351c5f7bea1fcc0b124ada0257b4264a3803c8c43561b3c7f96a8c30477815e"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r2"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "author_login_excluded",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login",
+        "reviewer_logins": {
+          "key:human": "Author-Login"
+        }
+      },
+      "votes": [
+        {
+          "reviewer": "key:human",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "a3f5153b56b1538beeb25cc4628ca763ae6ac65cc85bd68a43758fb4126eb508"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r2"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "reviewer_group_counts_once",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 3,
+        "pr_author": "author-login",
+        "reviewer_groups": [
+          [
+            "key:r1",
+            "key:r2"
+          ],
+          [
+            "key:r3"
+          ]
+        ]
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "key:r3",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "receipt_binding": "51d2ec244307248337f1ee6b4abd311b38d97d7233f28bc42a108e498ef31690"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r1",
+          "key:r3"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "reviewer_group_still_reaches_quorum_with_two_groups",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login",
+        "reviewer_groups": [
+          [
+            "key:r1",
+            "key:r2"
+          ]
+        ]
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "key:r3",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "receipt_binding": "51d2ec244307248337f1ee6b4abd311b38d97d7233f28bc42a108e498ef31690"
+        }
+      ],
+      "expect": {
+        "status": "satisfied",
+        "counted": [
+          "key:r1",
+          "key:r3"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "block_at_head_blocks",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "key:r3",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "blocked",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "receipt_binding": "51d2ec244307248337f1ee6b4abd311b38d97d7233f28bc42a108e498ef31690"
+        }
+      ],
+      "expect": {
+        "status": "blocked",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": [
+          "key:r3"
+        ]
+      }
+    },
+    {
+      "name": "uppercase_block_still_blocks",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "key:r3",
+          "target": "pr:github.com/o/r#7",
+          "verdict": " BLOCKED",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "receipt_binding": "51d2ec244307248337f1ee6b4abd311b38d97d7233f28bc42a108e498ef31690"
+        }
+      ],
+      "expect": {
+        "status": "blocked",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": [
+          "key:r3"
+        ]
+      }
+    },
+    {
+      "name": "block_for_older_head_is_ignored",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "key:r3",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "blocked",
+          "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "receipt_binding": "76458c48030ae0ed59caeea84662c329028923e142bac35ee11795902b614ee6"
+        }
+      ],
+      "expect": {
+        "status": "satisfied",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "approve_and_block_by_one_reviewer_blocks",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 1,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "blocked",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "8a69c6de2bced310b91efd1622b52d09240027110b645fd5b36a455df433e9ef"
+        }
+      ],
+      "expect": {
+        "status": "blocked",
+        "counted": [],
+        "blocking": [
+          "key:r1"
+        ]
+      }
+    },
+    {
+      "name": "block_with_short_commit_fails_closed",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "key:r3",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "blocked",
+          "commit": "aaaaaaaaaaaa"
+        }
+      ],
+      "expect": {
+        "status": "blocked",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": [
+          "key:r3"
+        ]
+      }
+    },
+    {
+      "name": "block_with_garbage_commit_fails_closed",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "key:r3",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "blocked",
+          "commit": "zzz-not-hex"
+        }
+      ],
+      "expect": {
+        "status": "blocked",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": [
+          "key:r3"
+        ]
+      }
+    },
+    {
+      "name": "block_from_ineligible_principal_is_ignored",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login",
+        "eligible_reviewers": [
+          "key:r1",
+          "key:r2",
+          "key:r3"
+        ]
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "key:x",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "blocked",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ],
+      "expect": {
+        "status": "satisfied",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "lgtm_from_ineligible_principal_does_not_count",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login",
+        "eligible_reviewers": [
+          "key:r1",
+          "key:r2"
+        ]
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:x",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r1"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "vote_for_another_target_is_ignored",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#8",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "key:r3",
+          "target": "pr:github.com/o/r#8",
+          "verdict": "blocked",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "receipt_binding": "51d2ec244307248337f1ee6b4abd311b38d97d7233f28bc42a108e498ef31690"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r1"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "missing_author_fails_closed",
+      "why": "",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": ""
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        }
+      ],
+      "expect": {
+        "status": "unknown_author",
+        "counted": [],
+        "blocking": []
+      }
+    },
+    {
+      "name": "block_from_anyone_when_no_eligible_list_is_the_merge_gate_rule",
+      "why": "Herdr always has a configured reviewer list",
+      "applies": [
+        "rust"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "key:x",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "blocked",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ],
+      "expect": {
+        "status": "blocked",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": [
+          "key:x"
+        ]
+      }
+    },
+    {
+      "name": "block_with_malformed_reviewer_id_fails_closed",
+      "why": "principal ids are server-made in Herdr",
+      "applies": [
+        "rust"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "  bad id\t",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "blocked",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "expect": {
+        "status": "blocked",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": [
+          "<invalid>"
+        ]
+      }
+    },
+    {
+      "name": "block_for_target_differing_only_in_case_still_blocks",
+      "why": "Herdr targets the PR node itself",
+      "applies": [
+        "rust"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r2",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
+        },
+        {
+          "reviewer": "key:r3",
+          "target": "PR:GITHUB.COM/O/R#7",
+          "verdict": "blocked",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "expect": {
+        "status": "blocked",
+        "counted": [
+          "key:r1",
+          "key:r2"
+        ],
+        "blocking": [
+          "key:r3"
+        ]
+      }
+    },
+    {
+      "name": "uppercase_reviewer_id_is_the_same_identity",
+      "why": "Herdr principal ids are canonical",
+      "applies": [
+        "rust"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "KEY:R1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "8a69c6de2bced310b91efd1622b52d09240027110b645fd5b36a455df433e9ef"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r1"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "non_ascii_target_is_rejected",
+      "why": "target compares ASCII-only; no unicode case folding (Kelvin sign)",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7K",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "KEY:R1",
+          "target": "pr:github.com/o/r#7K",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7K",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "8a69c6de2bced310b91efd1622b52d09240027110b645fd5b36a455df433e9ef"
+        }
+      ],
+      "expect": {
+        "status": "invalid_target",
+        "counted": [],
+        "blocking": []
+      }
+    },
+    {
+      "name": "non_ascii_dotted_i_target_is_rejected",
+      "why": "dotted capital I must not fold to i",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:gİthub.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "KEY:R1",
+          "target": "pr:gİthub.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r1",
+          "target": "pr:gİthub.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "8a69c6de2bced310b91efd1622b52d09240027110b645fd5b36a455df433e9ef"
+        }
+      ],
+      "expect": {
+        "status": "invalid_target",
+        "counted": [],
+        "blocking": []
+      }
+    },
+    {
+      "name": "kelvin_sign_reviewer_is_not_ascii_k",
+      "why": "non-ASCII ids are invalid, never folded onto an ASCII id",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "Key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "8a69c6de2bced310b91efd1622b52d09240027110b645fd5b36a455df433e9ef"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r1"
+        ],
+        "blocking": []
+      }
+    },
+    {
+      "name": "nbsp_in_reviewer_id_is_invalid",
+      "why": "only ASCII blanks are trimmed",
+      "applies": [
+        "rust",
+        "herdr"
+      ],
+      "target": "pr:github.com/o/r#7",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy": {
+        "required": 2,
+        "pr_author": "author-login"
+      },
+      "votes": [
+        {
+          "reviewer": "key:r1 ",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
+        },
+        {
+          "reviewer": "key:r1",
+          "target": "pr:github.com/o/r#7",
+          "verdict": "lgtm",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "receipt_binding": "8a69c6de2bced310b91efd1622b52d09240027110b645fd5b36a455df433e9ef"
+        }
+      ],
+      "expect": {
+        "status": "insufficient",
+        "counted": [
+          "key:r1"
+        ],
+        "blocking": []
+      }
     }
-   ],
-   "expect": {
-    "status": "satisfied",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "older_head_never_counts",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "01df34897933043a8937f7dddd2a19fb7f756172927cc06efffec34583cf7608"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "8eb81d218b39baef9f6eb4b53101ef94496293e57fb9f89715950c8a2d70ad1e"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [],
-    "blocking": []
-   }
-  },
-  {
-   "name": "uppercase_verdict_is_normalised",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "LGTM",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": " Lgtm ",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    }
-   ],
-   "expect": {
-    "status": "satisfied",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "uppercase_digest_and_binding_are_normalised",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "E70EF71CE8692F75B5BE47A1A6648EDDC113D295D6A074BFE53C81D9DA96AF99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    }
-   ],
-   "expect": {
-    "status": "satisfied",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "non_hex_digest_does_not_count",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "x1"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [
-     "key:r2"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "binding_for_another_target_does_not_count",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "08d832831c01244884064ab9cac0b7f2e50a16fbf30217faf109e594a41b9de6"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [
-     "key:r2"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "binding_for_another_reviewer_does_not_count",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "cd4f513be3e489b239577fcbcede12602c82d0a8da07f3931501d708c96c1bf5"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [
-     "key:r2"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "missing_binding_does_not_count",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [
-     "key:r2"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "shared_digest_voids_both",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "5555555555555555555555555555555555555555555555555555555555555555",
-     "receipt_binding": "e4513fef233a5d4413aaff0fcd271312c4fab35e9ca2d0ad5ba00de54e705a38"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "5555555555555555555555555555555555555555555555555555555555555555",
-     "receipt_binding": "578d160dbe7ae53b72bc616b9a86ffe95de65e84ac1439f61ee9f4d65906b650"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [],
-    "blocking": []
-   }
-  },
-  {
-   "name": "same_identity_twice_counts_once",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "8a69c6de2bced310b91efd1622b52d09240027110b645fd5b36a455df433e9ef"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [
-     "key:r1"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "bot_alias_matches_author",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "dependabot[bot]"
-   },
-   "votes": [
-    {
-     "reviewer": "dependabot",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "f351c5f7bea1fcc0b124ada0257b4264a3803c8c43561b3c7f96a8c30477815e"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [
-     "key:r2"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "author_login_excluded",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login",
-    "reviewer_logins": {
-     "key:human": "Author-Login"
-    }
-   },
-   "votes": [
-    {
-     "reviewer": "key:human",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "a3f5153b56b1538beeb25cc4628ca763ae6ac65cc85bd68a43758fb4126eb508"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [
-     "key:r2"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "reviewer_group_counts_once",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 3,
-    "pr_author": "author-login",
-    "reviewer_groups": [
-     [
-      "key:r1",
-      "key:r2"
-     ],
-     [
-      "key:r3"
-     ]
-    ]
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "key:r3",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
-     "receipt_binding": "51d2ec244307248337f1ee6b4abd311b38d97d7233f28bc42a108e498ef31690"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [
-     "key:r1",
-     "key:r3"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "reviewer_group_still_reaches_quorum_with_two_groups",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login",
-    "reviewer_groups": [
-     [
-      "key:r1",
-      "key:r2"
-     ]
-    ]
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "key:r3",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
-     "receipt_binding": "51d2ec244307248337f1ee6b4abd311b38d97d7233f28bc42a108e498ef31690"
-    }
-   ],
-   "expect": {
-    "status": "satisfied",
-    "counted": [
-     "key:r1",
-     "key:r3"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "block_at_head_blocks",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "key:r3",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "blocked",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
-     "receipt_binding": "51d2ec244307248337f1ee6b4abd311b38d97d7233f28bc42a108e498ef31690"
-    }
-   ],
-   "expect": {
-    "status": "blocked",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": [
-     "key:r3"
-    ]
-   }
-  },
-  {
-   "name": "uppercase_block_still_blocks",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "key:r3",
-     "target": "pr:github.com/o/r#7",
-     "verdict": " BLOCKED",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
-     "receipt_binding": "51d2ec244307248337f1ee6b4abd311b38d97d7233f28bc42a108e498ef31690"
-    }
-   ],
-   "expect": {
-    "status": "blocked",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": [
-     "key:r3"
-    ]
-   }
-  },
-  {
-   "name": "block_for_older_head_is_ignored",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "key:r3",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "blocked",
-     "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-     "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
-     "receipt_binding": "76458c48030ae0ed59caeea84662c329028923e142bac35ee11795902b614ee6"
-    }
-   ],
-   "expect": {
-    "status": "satisfied",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "approve_and_block_by_one_reviewer_blocks",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 1,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "blocked",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "8a69c6de2bced310b91efd1622b52d09240027110b645fd5b36a455df433e9ef"
-    }
-   ],
-   "expect": {
-    "status": "blocked",
-    "counted": [],
-    "blocking": [
-     "key:r1"
-    ]
-   }
-  },
-  {
-   "name": "block_with_short_commit_fails_closed",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "key:r3",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "blocked",
-     "commit": "aaaaaaaaaaaa"
-    }
-   ],
-   "expect": {
-    "status": "blocked",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": [
-     "key:r3"
-    ]
-   }
-  },
-  {
-   "name": "block_with_garbage_commit_fails_closed",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "key:r3",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "blocked",
-     "commit": "zzz-not-hex"
-    }
-   ],
-   "expect": {
-    "status": "blocked",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": [
-     "key:r3"
-    ]
-   }
-  },
-  {
-   "name": "block_from_ineligible_principal_is_ignored",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login",
-    "eligible_reviewers": [
-     "key:r1",
-     "key:r2",
-     "key:r3"
-    ]
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "key:x",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "blocked",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    }
-   ],
-   "expect": {
-    "status": "satisfied",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "lgtm_from_ineligible_principal_does_not_count",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login",
-    "eligible_reviewers": [
-     "key:r1",
-     "key:r2"
-    ]
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:x",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [
-     "key:r1"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "vote_for_another_target_is_ignored",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#8",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "key:r3",
-     "target": "pr:github.com/o/r#8",
-     "verdict": "blocked",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "3333333333333333333333333333333333333333333333333333333333333333",
-     "receipt_binding": "51d2ec244307248337f1ee6b4abd311b38d97d7233f28bc42a108e498ef31690"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [
-     "key:r1"
-    ],
-    "blocking": []
-   }
-  },
-  {
-   "name": "missing_author_fails_closed",
-   "why": "",
-   "applies": [
-    "rust",
-    "herdr"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": ""
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    }
-   ],
-   "expect": {
-    "status": "unknown_author",
-    "counted": [],
-    "blocking": []
-   }
-  },
-  {
-   "name": "block_from_anyone_when_no_eligible_list_is_the_merge_gate_rule",
-   "why": "Herdr always has a configured reviewer list",
-   "applies": [
-    "rust"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "key:x",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "blocked",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    }
-   ],
-   "expect": {
-    "status": "blocked",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": [
-     "key:x"
-    ]
-   }
-  },
-  {
-   "name": "block_with_malformed_reviewer_id_fails_closed",
-   "why": "principal ids are server-made in Herdr",
-   "applies": [
-    "rust"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "  bad id\t",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "blocked",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    }
-   ],
-   "expect": {
-    "status": "blocked",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": [
-     "<invalid>"
-    ]
-   }
-  },
-  {
-   "name": "block_for_target_differing_only_in_case_still_blocks",
-   "why": "Herdr targets the PR node itself",
-   "applies": [
-    "rust"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r2",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "9475f5129dd96c1cee207dc43e5620d930fc6e548fbc4793b7623ac3a8573230"
-    },
-    {
-     "reviewer": "key:r3",
-     "target": "PR:GITHUB.COM/O/R#7",
-     "verdict": "blocked",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    }
-   ],
-   "expect": {
-    "status": "blocked",
-    "counted": [
-     "key:r1",
-     "key:r2"
-    ],
-    "blocking": [
-     "key:r3"
-    ]
-   }
-  },
-  {
-   "name": "uppercase_reviewer_id_is_the_same_identity",
-   "why": "Herdr principal ids are canonical",
-   "applies": [
-    "rust"
-   ],
-   "target": "pr:github.com/o/r#7",
-   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "policy": {
-    "required": 2,
-    "pr_author": "author-login"
-   },
-   "votes": [
-    {
-     "reviewer": "KEY:R1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-     "receipt_binding": "e70ef71ce8692f75b5be47a1a6648eddc113d295d6a074bfe53c81d9da96af99"
-    },
-    {
-     "reviewer": "key:r1",
-     "target": "pr:github.com/o/r#7",
-     "verdict": "lgtm",
-     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-     "receipt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
-     "receipt_binding": "8a69c6de2bced310b91efd1622b52d09240027110b645fd5b36a455df433e9ef"
-    }
-   ],
-   "expect": {
-    "status": "insufficient",
-    "counted": [
-     "key:r1"
-    ],
-    "blocking": []
-   }
-  }
- ]
+  ]
 }

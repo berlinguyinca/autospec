@@ -35,6 +35,9 @@ Rules (fail closed):
   is non-empty and the voter is not on it (Herdr always has such a list). A block with a malformed reviewer id, an unparseable
   commit or a prefix of the head fails closed (blocks); a block for another head is stale; for another target, ignored.
   Targets compare case-insensitively.
+- Matching is ASCII-only (identical in Herdr): whitespace is the six ASCII blanks, case folding touches only A-Z, and
+  targets/ids must be printable ASCII. A non-ASCII target is an error; a non-ASCII reviewer id is invalid (a non-ASCII
+  `blocked` still blocks). No Unicode folding (Kelvin sign, dotted I, NBSP).
 - An `lgtm` counts only for this target and EXACTLY this head, from a valid eligible identity that is not the author
   (`x[bot]` equals `x`; `reviewer_logins` maps a key to a login) nor an excluded worker, with a 64-hex `receipt_digest` and a
   `receipt_binding` that recomputes: `sha256("pr-review-receipt-v1\0" lower(target) "\0" commit "\0" reviewer "\0" digest)`.
@@ -58,7 +61,8 @@ herdr:
   url: https://herdr.example.test
   ingest_key: <this reviewer's own ingest key>
   curl: curl
-  dispatch_command: /path/to/your/review-dispatch   # called as: <cmd> <pr-node> <head>
+  dispatch_command: /path/to/your/review-dispatch   # called as: <cmd> -- <pr-node> <head>
+  dispatch_timeout_seconds: 900                     # a pending claim older than this is re-claimed
 ```
 
 - Producer: `autospec review-quorum publish --config C --request R --verdict V --pr-node pr:github.com/o/r#7` after
@@ -67,10 +71,40 @@ herdr:
   make a re-publish a Herdr `duplicate`.
 - Consumer: `autospec review-quorum request --config C --pr-node pr:github.com/o/r#7 [--state-dir D]` (run it from the
   same cron/loop that polls the PR) asks Herdr for the quorum and, when `rereview_required` is true for the current head, runs
-  `dispatch_command` exactly once per (PR, head) (marker file per pair; a failed dispatch is retried). Point `dispatch_command`
+  `dispatch_command` exactly once per (PR, head) (locked marker per pair; a failed dispatch is retried). Point `dispatch_command`
   at the existing review dispatch (e.g. a wrapper over `independent-review-adapter.sh prepare`).
-- Merge path: `--write-report` writes the `review-quorum.json` that `scripts/autospec-promote-pr.sh` already gates on, so
-  promotion is blocked unless THIS evaluator says `pass`; no shell changed (the per-file shell ratchet only falls). Run it
-  after the feature-scoped Python quorum, which writes the same file.
+- Merge path (fail closed). `autospec review-quorum --input I --write-report R` writes `review-quorum.json` atomically; on ANY
+  evaluation error (bad input, empty `pr_author`, unreadable file) it OVERWRITES the report with a non-pass one
+  (`verdict: invalid_input`, `promotion_ready: false`, head/target kept when readable) and exits 2, so an older pass can never
+  survive a failed re-evaluation. `scripts/autospec-promote-pr.sh` (one line replaced, shell count unchanged) then calls
+  `autospec review-quorum verify-report --repo-root D --pr N [--repo O/R]`, which:
+  - requires, when the quorum is required (`review_quorum: {required: true}` in `.autospec/autospec.yml`), a report that is
+    present, a non-empty JSON object, from this evaluator (`source: head-bound-review-quorum`), `verdict: pass`,
+    `promotion_ready: true`, no blocking findings, whose `head` equals the PR's LIVE head (`gh pr view --json headRefOid,url`)
+    and whose `target_id` equals `pr:<host>/<owner>/<repo>#<n>` of THAT PR; a `gh` failure blocks;
+  - blocks any report that exists but is empty, `{}`, not an object, or malformed, required or not;
+  - keeps the old meaning (verdict pass/pass_with_warnings, no blocking findings) for the Python feature-scoped report when the
+    quorum is NOT required; when `autospec` is not on PATH the script blocks if a report exists or the config mentions
+    `review_quorum`. Exit codes: 0 ok, 1 not trusted (reasons printed as JSON), 2 usage.
+  Run `--write-report` after the feature-scoped Python quorum, which writes the same file.
+- Retraction: `publish --retract` (same flags) sends an `edge.remove` for the SAME verdict file's edge with the same key; Herdr
+  honours a remove only from the edge's owner, so a mistaken `blocked` is cleared by the same reviewer at the same head and by
+  nobody else. After a retraction that exact verdict file cannot be re-published (same ids); file a new verdict.
+- `request` safety. The dedupe is serialised by an exclusive flock on `<state-dir>/.lock` (same host/state dir); the marker
+  per (PR, head) is written whole (temp file + rename) with states `pending` (owner pid, start, token), `dispatched`, `failed`.
+  A `pending` marker with a live owner blocks (`request_in_progress`) until `dispatch_timeout_seconds` (default 900,
+  10..86400) passes; a dead owner, a timed-out claim or a `failed` marker is re-claimed; an unreadable (half-written) marker is
+  treated as pending until it ages out, never as "not dispatched". `dispatch_command` is run as `<cmd> -- <pr-node> <head>`.
+  The PR node is validated (`pr:` + printable ASCII, no shell metacharacters, must contain `#`). Herdr statuses
+  `head_unverified`, `unknown_head`, `unknown_author` are ALERTS: `request` prints `alert:true`, writes an `ALERT` line to
+  stderr and exits 4, never "not needed".
+- Config hardening. `herdr.url` is parsed with a URL parser and normalised: https, or http only for exactly `127.0.0.1`,
+  `::1` or `localhost`; userinfo, query and fragment are refused. The key header file is created in a private 0700 temp
+  directory under `--scratch-dir` that is blanked and removed on every path (success, curl failing to spawn, early error); a
+  SIGKILL cannot run the cleanup, but leaves only a 0700 directory. The YAML reader accepts comments, `---`, and other
+  top-level blocks (skipped unread); inside `herdr:` it rejects tabs, nesting, misalignment, duplicate and unknown keys, and a
+  second `herdr:` block; lists, anchors and multi-line scalars are not supported.
+- Receipts: `publish` requires the request and verdict files to be JSON objects, both commits full-length and equal, the
+  verdict exactly `lgtm`/`blocked`, and a request that names a PR (`pr`/`pr_node`/`target`) to name `--pr-node`.
 
 The Python feature-scoped `review-quorum` is unchanged and is a porting candidate (#4447).

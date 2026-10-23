@@ -29,7 +29,7 @@ done
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
 
 python3 - "$REPO_ROOT" "$CONFIRM" "$GH_REPO" "$PR" "$ISSUE" <<'PY'
-import json, os, subprocess, sys
+import json, os, shutil, subprocess, sys
 
 repo_root, confirm, gh_repo, pr, issue = os.path.realpath(sys.argv[1]), sys.argv[2] == "1", sys.argv[3], sys.argv[4], sys.argv[5]
 reports = os.path.join(repo_root, ".autospec", "reports")
@@ -72,10 +72,10 @@ policy_traceability_required = bool(policy_traceability) or "policy_traceability
 blocked = []
 if verdict not in {"pass", "pass_with_warnings"}: blocked.append(f"verifier verdict is {verdict or 'missing'}")
 quorum_verdict = quorum.get("verdict", "")
-if quorum and quorum_verdict not in {"pass", "pass_with_warnings"}:
-    blocked.append(f"review quorum verdict is {quorum_verdict or 'missing'}")
-if quorum and quorum.get("blocking_findings"):
-    blocked.append("blocking specialist finding")
+cfg = os.path.join(repo_root, ".autospec", "autospec.yml")
+qneed = os.path.exists(os.path.join(reports, "review-quorum.json")) or (os.path.exists(cfg) and "review_quorum" in open(cfg).read())
+qv = subprocess.run(["autospec", "review-quorum", "verify-report", "--repo-root", repo_root, "--pr", pr] + (["--repo", gh_repo] if gh_repo else []), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE) if qneed and shutil.which("autospec") else None
+if qneed and (qv is None or qv.returncode != 0): blocked.append("review quorum not verified: " + ((qv.stdout.strip() or qv.stderr.strip()) if qv else "autospec binary not found"))
 if policy_traceability_required and policy_traceability_status in {"fail", "unknown"}: blocked.append("policy traceability is missing or failed")
 if policy_traceability_required and quality_gate_status == "fail": blocked.append("blocking quality gate finding")
 if dimensions.get("validation_evidence", {}).get("status") == "fail": blocked.append("missing validation for code changes")

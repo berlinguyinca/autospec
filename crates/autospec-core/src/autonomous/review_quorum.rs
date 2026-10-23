@@ -115,26 +115,43 @@ pub struct QuorumOutcome {
     pub rereview_needed: usize,
 }
 
+/// ASCII-only normalisation, identical in Herdr: whitespace is the six ASCII blanks and case
+/// folding touches only A-Z. Unicode folding (Kelvin sign, dotted I, ...) is deliberately NOT
+/// applied, so the two implementations cannot disagree on who a name is.
+fn ascii_trim(value: &str) -> &str {
+    value.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'))
+}
+
+fn printable_ascii(value: &str) -> bool {
+    value.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
+/// A review target (`pr:host/owner/repo#n`): printable ASCII only, lower-cased.
+pub fn canonical_target(value: &str) -> Option<String> {
+    let lower = ascii_trim(value).to_ascii_lowercase();
+    (!lower.is_empty() && printable_ascii(&lower)).then_some(lower)
+}
+
 pub fn canonical_commit(value: &str) -> Option<String> {
-    let lower = value.trim().to_ascii_lowercase();
+    let lower = ascii_trim(value).to_ascii_lowercase();
     let ok =
         (lower.len() == 40 || lower.len() == 64) && lower.bytes().all(|b| b.is_ascii_hexdigit());
     ok.then_some(lower)
 }
 
 pub fn canonical_identity(value: &str) -> Option<String> {
-    let mut id = value.trim().to_ascii_lowercase();
+    let mut id = ascii_trim(value).to_ascii_lowercase();
     if let Some(stripped) = id.strip_suffix("[bot]") {
         id = stripped.to_string();
     }
-    if id.is_empty() || id.len() > 128 || id.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    if id.is_empty() || id.len() > 128 || !printable_ascii(&id) {
         return None;
     }
     Some(id)
 }
 
 fn canonical_digest(value: &str) -> Option<String> {
-    let lower = value.trim().to_ascii_lowercase();
+    let lower = ascii_trim(value).to_ascii_lowercase();
     (lower.len() == 64 && lower.bytes().all(|b| b.is_ascii_hexdigit())).then_some(lower)
 }
 
@@ -149,10 +166,10 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 pub fn receipt_binding(target: &str, commit: &str, reviewer: &str, receipt_digest: &str) -> String {
     let tuple = format!(
         "pr-review-receipt-v1\0{}\0{}\0{}\0{}",
-        target.trim().to_ascii_lowercase(),
-        commit.trim().to_ascii_lowercase(),
+        canonical_target(target).unwrap_or_default(),
+        ascii_trim(commit).to_ascii_lowercase(),
         canonical_identity(reviewer).unwrap_or_default(),
-        receipt_digest.trim().to_ascii_lowercase()
+        ascii_trim(receipt_digest).to_ascii_lowercase()
     );
     Sha256::digest(tuple.as_bytes())
         .iter()
@@ -174,7 +191,7 @@ fn classify_commit(raw: &str, head: &str) -> CommitClass {
         None => {
             // A prefix of the head (>= 7 hex) is "this head, badly written"; anything
             // else unparseable is unknowable. Both must fail closed for a block.
-            let lower = raw.trim().to_ascii_lowercase();
+            let lower = ascii_trim(raw).to_ascii_lowercase();
             let hex = !lower.is_empty() && lower.bytes().all(|b| b.is_ascii_hexdigit());
             if hex && lower.len() >= 7 && head.starts_with(&lower) {
                 CommitClass::Current
@@ -196,10 +213,8 @@ pub fn evaluate_quorum(
     if policy.required == 0 {
         return Err("review quorum requires at least one reviewer".to_string());
     }
-    let target = target.trim().to_ascii_lowercase();
-    if target.is_empty() {
-        return Err("review quorum requires a review target".to_string());
-    }
+    let target = canonical_target(target)
+        .ok_or_else(|| "review quorum target must be non-empty printable ASCII".to_string())?;
     let author = canonical_identity(&policy.pr_author).ok_or_else(|| {
         "review quorum pr_author is required and must be a valid identity".to_string()
     })?;
@@ -242,7 +257,7 @@ pub fn evaluate_quorum(
     let implementer_provider = policy
         .implementer_provider
         .as_deref()
-        .map(|p| p.trim().to_ascii_lowercase());
+        .map(|p| ascii_trim(p).to_ascii_lowercase());
 
     let mut rejected: BTreeSet<Rejection> = BTreeSet::new();
     let mut stale: BTreeSet<String> = BTreeSet::new();
@@ -257,10 +272,10 @@ pub fn evaluate_quorum(
     // Phase 1: blocks. Normalise, or fail closed; never drop.
     let mut approvals: Vec<(&QuorumVote, String)> = Vec::new();
     for vote in votes {
-        let verdict = vote.verdict.trim().to_ascii_lowercase();
+        let verdict = ascii_trim(&vote.verdict).to_ascii_lowercase();
         let identity = canonical_identity(&vote.reviewer);
         let label = identity.clone().unwrap_or_else(|| "<invalid>".to_string());
-        if vote.target.trim().to_ascii_lowercase() != target {
+        if canonical_target(&vote.target).as_deref() != Some(target.as_str()) {
             reject(&mut rejected, &label, RejectReason::WrongTarget);
             continue;
         }
@@ -326,7 +341,7 @@ pub fn evaluate_quorum(
             let provider = vote
                 .provider
                 .as_deref()
-                .map(|p| p.trim().to_ascii_lowercase());
+                .map(|p| ascii_trim(p).to_ascii_lowercase());
             let diverse = matches!((&provider, &implementer_provider),
                 (Some(p), Some(i)) if !p.is_empty() && p != i);
             if !diverse {

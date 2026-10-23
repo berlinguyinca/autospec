@@ -51,6 +51,7 @@ fn shared_conformance_vectors() {
                 o.blocking,
             ),
             Err(e) if e.contains("pr_author") => ("unknown_author".into(), vec![], vec![]),
+            Err(e) if e.contains("ASCII") => ("invalid_target".into(), vec![], vec![]),
             Err(e) => panic!("{}: unexpected error {e}", case.name),
         };
         assert_eq!(status, case.expect.status, "{}", case.name);
