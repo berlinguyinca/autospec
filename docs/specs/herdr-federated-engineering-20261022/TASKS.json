@@ -1,0 +1,167 @@
+{
+  "program": "herdr-federated-engineering-20261022",
+  "tasks": [
+    {
+      "id": "T00",
+      "title": "Audit current six repositories and document exact reuse map",
+      "depends_on": [],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T01",
+      "title": "Reconcile event IDs, provenance, authorization and replay contracts",
+      "depends_on": [
+        "T00"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T02",
+      "title": "Extend Pi worker spawn, handoff, session rollover and checkpoint events",
+      "depends_on": [
+        "T01"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T03",
+      "title": "Standalone Pi complexity planning and optional Plannotator review",
+      "depends_on": [
+        "T01"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T04",
+      "title": "Optional AutoSpec DAG, Constitution, Baselines and Design integration",
+      "depends_on": [
+        "T03"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T05",
+      "title": "Canonical GitHub issue/PR linking, dependency graph and reconciliation",
+      "depends_on": [
+        "T01"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T06",
+      "title": "Independent post-PR AI review, repair, quorum and stale-head invalidation",
+      "depends_on": [
+        "T02",
+        "T05"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T07",
+      "title": "HCN room-to-workspace and mission linking with scoped membership",
+      "depends_on": [
+        "T01"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T08",
+      "title": "Native primary-agent tabs and spawned-subagent panes",
+      "depends_on": [
+        "T02",
+        "T07"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T09",
+      "title": "Interactive lineage graph, Gantt timeline, replay and inspectors",
+      "depends_on": [
+        "T02",
+        "T05",
+        "T08"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T10",
+      "title": "External coworker/remote agent enrollment and virtual tabs",
+      "depends_on": [
+        "T07",
+        "T08"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T11",
+      "title": "HCN bounded task delegation and artifact proposals over MCP/A2A",
+      "depends_on": [
+        "T07",
+        "T10"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T12",
+      "title": "Graph comments, explicit steering and safe operator controls",
+      "depends_on": [
+        "T03",
+        "T07",
+        "T09"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T13",
+      "title": "Alternative implementation forks, comparisons, impact and promotion",
+      "depends_on": [
+        "T02",
+        "T05",
+        "T12"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T14",
+      "title": "Contextual room chat, consultation and cross-workspace graph links",
+      "depends_on": [
+        "T09",
+        "T11",
+        "T12"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T15",
+      "title": "Attention inbox, evidence-based progress and optimization analytics",
+      "depends_on": [
+        "T06",
+        "T09",
+        "T13"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T16",
+      "title": "Security, cross-host chaos, UI accessibility and end-to-end release gates",
+      "depends_on": [
+        "T03",
+        "T04",
+        "T06",
+        "T11",
+        "T13",
+        "T14",
+        "T15"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    },
+    {
+      "id": "T17",
+      "title": "Independent Herdr-server federation ADR (no implementation until approved)",
+      "depends_on": [
+        "T16"
+      ],
+      "acceptance": "Exact source-level reuse audit, implementation or justified no-op, targeted tests, PR, evidence and updated docs."
+    }
+  ]
+}
