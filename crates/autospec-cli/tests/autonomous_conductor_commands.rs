@@ -6982,6 +6982,8 @@ if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = 
   body=$(jq -c '.[0].body' "$AUTOSPEC_FOREGROUND_PULL_REQUESTS")
   base="${AUTOSPEC_BRIDGE_BASE_REF:-main}"
   case " $* " in
+    *" headRefOid,url "*)
+      printf '%s\n' "{\"headRefOid\":\"$head\",\"url\":\"https://github.com/test/repo/pull/17\"}" ;;
     *" headRefOid,statusCheckRollup "*)
       printf '%s\n' "{\"headRefOid\":\"$head\",\"statusCheckRollup\":[{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}" ;;
     *)
@@ -7013,6 +7015,7 @@ if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = 
   printf '%s\n' "$head" > "$AUTOSPEC_BRIDGE_MERGED"
   exit 0
 fi
+if [ "$1" = api ]; then exit 0; fi
 printf 'unexpected gh invocation: %s\n' "$*" >&2
 exit 1
 "####,
@@ -7244,8 +7247,22 @@ printf '%s\n' '[]' > "$report"
     }
 
     fn configured_command(&self) -> Command {
+        // The merge gate reads the operator's `$HOME/.autospec/autospec.yml`: give the process
+        // under test its own home that states `review_quorum: {required: false}`.
+        // outside the fixture root: some tests snapshot that tree and assert it is unchanged
+        let home = std::env::temp_dir().join(format!(
+            "autospec-quorum-home-{}",
+            &sha256_hex(self.root.to_string_lossy().as_bytes())[..16]
+        ));
+        fs::create_dir_all(home.join(".autospec")).expect("quorum home");
+        fs::write(
+            home.join(".autospec/autospec.yml"),
+            "review_quorum:\n  required: false\n",
+        )
+        .expect("operator config");
         let mut command = Command::new(env!("CARGO_BIN_EXE_autospec"));
         command
+            .env("HOME", &home)
             .current_dir(&self.repo_dir)
             .env("PATH", path_with(&self.bin))
             .env("AUTOSPEC_FOREGROUND_MODE", &self.mode)

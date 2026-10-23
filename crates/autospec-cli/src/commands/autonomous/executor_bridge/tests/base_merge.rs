@@ -1,4 +1,4 @@
-// executor_bridge tests: base / merge — 9 cases.
+// executor_bridge tests: base / merge — 12 cases.
 //
 // Split out of tests.rs; see the note in that file.
 
@@ -48,6 +48,7 @@ fn autonomous_executor_bridge_claim_takeover_blocks_admin_merge() {
          exit 0\nfi\nexit 64\n"),
     );
     let adapter = bridge::DraftPrAdapter {
+        quorum_operator_config: None,
         gh,
         environment: BTreeMap::from([("GH_CALLS".into(), calls.clone().into_os_string())]),
     };
@@ -100,11 +101,13 @@ fn autonomous_executor_bridge_merge_failure_resumes_from_accepted_evidence() {
         &gh,
         &format!(
             "#!/bin/sh\nset -eu\n\
+             case \" $* \" in *headRefOid,url*) printf '%s\\n' '{{\"headRefOid\":\"{head}\",\"url\":\"https://github.com/o/r/pull/17\"}}'; exit 0;; esac\n\
              if [ \"$1 $2\" = 'pr view' ]; then\n\
                if [ -e \"$MERGED\" ]; then printf '%s\\n' '{{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":{{\"oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"body\":{body}}}';\n\
                else printf '%s\\n' '{{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":null,\"body\":{body}}}'; fi\n\
                exit 0\n\
              fi\n\
+             if [ \"$1\" = 'api' ]; then exit 0; fi\n\
              if [ \"$1 $2\" = 'pr merge' ]; then\n\
                case \" $* \" in *\" --match-head-commit {head} \"*) ;; *) exit 74 ;; esac\n\
                if [ -e \"$FAIL_ONCE\" ]; then rm \"$FAIL_ONCE\"; exit 73; fi\n\
@@ -113,7 +116,10 @@ fn autonomous_executor_bridge_merge_failure_resumes_from_accepted_evidence() {
              exit 64\n"
         ),
     );
+    let operator = fixture.root.join("operator.yml");
+    fs::write(&operator, "review_quorum:\n  required: false\n").unwrap();
     let adapter = bridge::DraftPrAdapter {
+        quorum_operator_config: Some(operator),
         gh,
         environment: BTreeMap::from([
             ("FAIL_ONCE".into(), fail_once.into_os_string()),
@@ -193,6 +199,7 @@ fn autonomous_executor_bridge_recovers_merged_pr_after_branch_deletion_and_base_
         ),
     );
     let adapter = bridge::DraftPrAdapter {
+        quorum_operator_config: None,
         gh,
         environment: BTreeMap::new(),
     };
@@ -514,4 +521,143 @@ fn autonomous_executor_bridge_cleanup_resumes_after_owned_worktree_removal() {
     bridge::finalize_merged_executor(&state_path, &mut state, None).expect("resume cleanup");
     assert_eq!(state.phase, bridge::BridgePhase::Complete);
     assert!(bridge::cleanup_record_path(&state_path, "worktree-complete").exists());
+}
+
+/// An accepted PR (#17) whose fake forge records any `pr merge`. `live_head` is what the forge
+/// reports as the PR head; `operator` is the operator config the gate trusts (None = absent).
+#[cfg(unix)]
+fn quorum_case(
+    name: &str,
+    live_head: Option<&str>,
+    operator: Option<&str>,
+    gh_api_fails: bool,
+) -> (
+    Result<String, bridge::BridgeRunFailure>,
+    std::path::PathBuf,
+    bridge::BridgePhase,
+) {
+    let (fixture, mut state, _snapshot, _) = implementation_proof_fixture(name);
+    commit_implementation(&state);
+    let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+    git(
+        &state.identity.worktree,
+        &[
+            "push",
+            "origin",
+            &format!("{head}:refs/heads/{}", state.identity.branch),
+        ],
+    );
+    state.phase = bridge::BridgePhase::ResultAccepted;
+    state.pr = Some(17);
+    state.head_oid = Some(head.clone());
+    let closeout = "## Closeout report\n";
+    state.closeout_digest = Some(autospec_core::autonomous::waterfall::sha256_hex(
+        closeout.as_bytes(),
+    ));
+    let body =
+        serde_json::to_string(&bridge::canonical_pull_request_body(&state, closeout).unwrap())
+            .unwrap();
+    let state_path = fixture.root.join("state/invocation.json");
+    bridge::write_invocation_atomic(&state_path, &state).expect("accepted state");
+    let live = live_head.unwrap_or(&head).to_string();
+    let merged = fixture.root.join("merged");
+    let gh = fixture.root.join("gh-quorum");
+    let api = if gh_api_fails {
+        "echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1"
+    } else {
+        "echo 'gh: Not Found (HTTP 404)' >&2; exit 1"
+    };
+    write_executable(
+        &gh,
+        &format!(
+            "#!/bin/sh\nset -eu\n\
+             case \" $* \" in *headRefOid,url*) printf '%s\\n' '{{\"headRefOid\":\"{live}\",\"url\":\"https://github.com/o/r/pull/17\"}}'; exit 0;; esac\n\
+             if [ \"$1 $2\" = 'pr view' ]; then\n\
+               printf '%s\\n' '{{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"{live}\",\"baseRefName\":\"main\",\"mergeCommit\":null,\"body\":{body}}}'\n\
+               exit 0\n\
+             fi\n\
+             if [ \"$1\" = 'api' ]; then {api}; fi\n\
+             if [ \"$1 $2\" = 'pr merge' ]; then touch \"$MERGED\"; exit 0; fi\n\
+             exit 64\n"
+        ),
+    );
+    let operator_path = operator.map(|yaml| {
+        let path = fixture.root.join("operator.yml");
+        fs::write(&path, yaml).unwrap();
+        path
+    });
+    let adapter = bridge::DraftPrAdapter {
+        // absent file: the gate must treat "no stated policy" as required
+        quorum_operator_config: Some(
+            operator_path.unwrap_or_else(|| fixture.root.join("no-such-operator.yml")),
+        ),
+        gh,
+        environment: BTreeMap::from([("MERGED".into(), merged.clone().into_os_string())]),
+    };
+    let result = bridge::admin_squash_merge_exact_with_refresh_and_admission(
+        &state_path,
+        &mut state,
+        &adapter,
+        || Ok(bridge::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }),
+        || Ok(()),
+    );
+    (result, merged, state.phase)
+}
+
+#[cfg(unix)]
+#[test]
+fn executor_gate_a_quorum_refusal_never_merges_and_is_not_retried() {
+    // no stated policy anywhere = required, and nothing can satisfy it: a refusal
+    let (result, merged, phase) = quorum_case("quorum-refused", None, None, false);
+    let failure = result.expect_err("a refused quorum must not merge");
+    assert_eq!(
+        failure.kind,
+        bridge::BridgeFailureKind::InvariantNeedsHuman,
+        "a policy refusal needs a human; the conductor retries Transient 3 times"
+    );
+    assert!(!merged.exists(), "gh pr merge must not run");
+    assert_ne!(phase, bridge::BridgePhase::Merged);
+    // the closest real entry: the conductor's receipt for this failure is Blocked, never Retryable
+    let receipt = crate::commands::autonomous::ExecutorReceipt::failed(&failure);
+    assert_eq!(
+        receipt.outcome,
+        autospec_core::coordination::ConductorOutcome::Blocked(
+            "executor_receipt_failed".to_string()
+        ),
+        "a quorum refusal blocks the conductor; it is not retried"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn executor_gate_pins_the_head_it_merges_so_a_moved_head_is_refused() {
+    // the operator opted out, but the PR head moved after the executor accepted `head`
+    let moved = "c".repeat(40);
+    let (result, merged, _) = quorum_case(
+        "quorum-moved",
+        Some(&moved),
+        Some("review_quorum:\n  required: false\n"),
+        false,
+    );
+    let failure = result.expect_err("a moved head must not merge");
+    assert_eq!(failure.kind, bridge::BridgeFailureKind::InvariantNeedsHuman);
+    assert!(!merged.exists(), "the merge is pinned to the accepted head");
+}
+
+#[cfg(unix)]
+#[test]
+fn executor_gate_a_forge_outage_is_transient_not_a_refusal() {
+    let (result, merged, _) = quorum_case(
+        "quorum-outage",
+        None,
+        Some("review_quorum:\n  required: false\n"),
+        true,
+    );
+    let failure = result.expect_err("an unreadable forge must not merge");
+    assert_eq!(
+        failure.kind,
+        bridge::BridgeFailureKind::Transient,
+        "could-not-determine is retried"
+    );
+    assert!(!merged.exists());
 }

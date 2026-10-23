@@ -221,7 +221,7 @@ Immediately before `gh pr create`, then before `gh pr merge`:
    `branch` as PR base and REFUSE any merge to `main`
    (`code_health:explore_main_merge_refused`).
 6. **Merge:** when the merge-state is `CLEAN`/`HAS_HOOKS`/`UNSTABLE` and all
-   gates pass: `gh pr merge <PR> --admin --squash --delete-branch`.
+   gates pass: `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo {repo}` (never a bare `gh pr merge`: the wrapper runs the fence and the review-quorum gate and pins the merge to the verified head; exit 3 = review quorum refused, 1 = fenced/CI/build refusal, 2 = fail-closed error).
 7. **Closeout evidence:** record the Closeout report (below) as merge evidence
    alongside the passing full-suite summary. Do NOT merge on a closeout you did
    not emit. Re-read the cited artifacts — treat the closeout as a claim, not

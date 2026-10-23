@@ -11608,6 +11608,8 @@ fn contains_issue_closing_directive(line: &str) -> bool {
 pub(crate) struct DraftPrAdapter {
     gh: PathBuf,
     environment: BTreeMap<OsString, OsString>,
+    /// Operator config the review-quorum gate reads (`None`: `~/.autospec/autospec.yml`).
+    quorum_operator_config: Option<PathBuf>,
 }
 
 impl DraftPrAdapter {
@@ -11617,6 +11619,7 @@ impl DraftPrAdapter {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("gh")),
             environment: BTreeMap::new(),
+            quorum_operator_config: None,
         }
     }
 }
@@ -13944,6 +13947,31 @@ where
             "executor merge lost exact claim ownership",
         ));
     }
+    // T16: the review-quorum gate (fail closed) runs against the exact head this merge pins.
+    crate::commands::review_quorum::gate::executor_gate(
+        &state.identity.repository_path,
+        &state.identity.repository,
+        pull_request,
+        &head_oid,
+        adapter.quorum_operator_config.as_deref(),
+        crate::commands::review_quorum::gate::Gh {
+            program: Some(adapter.gh.clone()),
+            env: adapter
+                .environment
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        },
+    )
+    .map_err(|why| match why {
+        crate::commands::review_quorum::gate::GateError::Unavailable(why) => {
+            BridgeRunFailure::transient(format!("review quorum could not be checked: {why}"))
+        }
+        // a policy refusal is not retried: it needs an operator (config, report or review)
+        crate::commands::review_quorum::gate::GateError::Refused(why) => {
+            BridgeRunFailure::invariant(format!("review quorum refused the merge: {why}"))
+        }
+    })?;
     let output = Command::new(&adapter.gh)
         .args([
             "pr",

@@ -1,10 +1,8 @@
 #!/usr/bin/env bats
 # tests/autonomous/test_guarded_merge.bats — issue #1732
-# Guarded-merge wrapper: per-diff blast-radius domain fence at the merge
-# chokepoint. Uses the REAL classifier + guardrails against a fixture
-# fenced-surfaces registry; stubs gh to drive changed-files/labels and to
-# record merge/label/comment calls. LABEL_API_FAIL / COMMENT_FAIL force the
-# `gh api .../labels` and `gh pr comment` calls to fail (issue #3479).
+# Guarded-merge wrapper: per-diff blast-radius fence at the merge chokepoint. REAL classifier +
+# guardrails against a fixture registry; gh is stubbed to drive files/labels and record calls
+# (LABEL_API_FAIL / COMMENT_FAIL force those calls to fail, issue #3479); autospec is stubbed.
 
 bats_require_minimum_version 1.5.0
 
@@ -34,17 +32,14 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
             exit 0 ;;
         *"--json statusCheckRollup"*)
             if [ "${ROLLUP_FAIL:-0}" = "1" ]; then exit 1; fi
-            # NOTE: no `${ROLLUP:-<json>}` default here. A `}` inside the
-            # default value closes the parameter expansion early, which silently
-            # appended `]}` to every rollup and made jq reject valid input.
+            # No `${ROLLUP:-<json>}` default: a `}` in it closes the expansion early.
             if [ -z "${ROLLUP+x}" ]; then
                 ROLLUP='[{"name":"build-test","conclusion":"SUCCESS"}]'
             fi
             printf '%s\n' "$ROLLUP"
             exit 0 ;;
         *"--json headRefOid"*)
-            # Same no-default trap as ROLLUP above: a `}` inside the default
-            # value would close the parameter expansion early.
+            # Same no-default trap as ROLLUP above.
             if [ -z "${HEAD_OID+x}" ]; then
                 HEAD_OID="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
             fi
@@ -70,6 +65,12 @@ fi
 exit 0
 STUB
     chmod +x "$TMP/bin/gh"
+
+    # Review-quorum gate stub (T16): a passing merge-gate pinned to HEAD_OID; QUORUM_FAIL=1 refuses.
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "autospec %s\n" "$*" >> "$GH_LOG"' \
+        '[ "${QUORUM_FAIL:-0}" = "1" ] && { echo "{\"ok\":false,\"merge_head\":null}"; exit 1; }' \
+        'printf "{\"ok\":true,\"merge_head\":\"%s\"}\n" "${HEAD_OID:-deadbeefdeadbeefdeadbeefdeadbeefdeadbeef}"' > "$TMP/bin/autospec"
+    chmod +x "$TMP/bin/autospec"
 
     # Fixture registry: fence ONLY the risk-engine crate.
     cat > "$TMP/fenced.yml" <<'YAML'

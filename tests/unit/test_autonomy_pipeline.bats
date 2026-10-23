@@ -76,7 +76,7 @@ JSON
 install_gh_stub() {
   local bin="$1"
   local log="$2"
-  mkdir -p "$bin"
+  mkdir -p "$bin"; printf '#!/bin/sh\necho {}\n' > "$bin/autospec"; chmod +x "$bin/autospec"
   cat > "$bin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_STUB_LOG"
@@ -108,7 +108,7 @@ SH
   write_verifier "$TEST_TMPDIR/repo" "pass"
   install_gh_stub "$TEST_TMPDIR/bin" "$TEST_TMPDIR/gh.log"
 
-  run bash "$PROMOTE" --repo-root "$TEST_TMPDIR/repo" --dry-run --pr 7 --repo example/repo
+  PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PROMOTE" --repo-root "$TEST_TMPDIR/repo" --dry-run --pr 7 --repo example/repo
   [ "$status" -eq 0 ]
   run jq -r '.promotion_allowed' "$TEST_TMPDIR/repo/.autospec/reports/promotion-plan.json"
   [ "$output" = "true" ]

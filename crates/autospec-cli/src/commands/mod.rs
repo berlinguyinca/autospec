@@ -184,6 +184,7 @@ commands! {
     growth_report as "growth-report" => "Render local-only launch readiness metrics", diagnostic;
     graph => "Analyze a proposed issue DAG: metrics, execution waves, planner summary", direct;
     handoff => "Produce the autospec.implementation-handoff.v1 handoff (side-effect-free)", direct;
+    review_quorum as "review-quorum" => "Evaluate a head-bound post-PR review quorum (stale-head invalidation)", status_code;
 }
 
 fn print_help() {

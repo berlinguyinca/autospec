@@ -436,7 +436,7 @@ header — none of that holds and the token must be verified properly. That
 boundary belongs in a comment at the code, so a later reader cannot copy the
 pattern somewhere it is wrong.
 
-If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file.
+If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file. This is the ONLY exemption from `autospec-guarded-merge.sh` (T16 H3): a brand-new repo has no reviewed base and no PR to gate, and the commit is the spec document alone. Every later change merges through a PR and the guarded merge.
 
 For an existing repo, land the spec via a short-lived PR so CI can validate it.
 The spec commit happens in a temp worktree (`/tmp/wt-spec-<slug>`), never in the
@@ -459,7 +459,7 @@ case "$STATE" in
     PR_NUM="$(printf '%s' "$VERDICT" | jq -r .pr)"
     # Spec PR already open — validate CI + merge; skip re-commit.
     gh pr checks "$PR_NUM" --repo {repo} --watch
-    gh pr merge "$PR_NUM" --admin --squash --delete-branch --repo {repo}
+    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr "$PR_NUM" --repo {repo}
     ;;
   branch-only)
     # Branch exists but no PR — adopt in a fresh worktree and continue.
@@ -473,8 +473,8 @@ case "$STATE" in
         --title "docs: ${SLUG} design spec" \
         --body "Source spec: docs/specs/${SLUG}-design.md"
     gh pr checks --watch --repo {repo} "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
-    gh pr merge --admin --squash --delete-branch --repo {repo} \
-        "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
+    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --repo {repo} \
+        --pr "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
     git worktree remove "$WT" 2>/dev/null || true
     git worktree prune
     ;;
@@ -493,8 +493,8 @@ case "$STATE" in
         --body "Source spec: docs/specs/${SLUG}-design.md"
     gh pr checks --watch --repo {repo} "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
     if [ "${AUTOSPEC_NO_AUTOMERGE_SPEC:-0}" != "1" ]; then
-        gh pr merge --admin --squash --delete-branch --repo {repo} \
-            "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
+        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --repo {repo} \
+            --pr "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
     else
         # Env var set — pause and ask user to merge before continuing.
         echo "AUTOSPEC_NO_AUTOMERGE_SPEC=1: merge the spec PR manually, then continue."

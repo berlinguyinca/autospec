@@ -40,7 +40,7 @@ setup() {
     mkdir -p "$FAKE_SCRIPTS"
 
     FAKE_BIN="$TEST_TMP/fake-bin"
-    mkdir -p "$FAKE_BIN"
+    mkdir -p "$FAKE_BIN"; printf '#!/bin/sh\necho "{\\"merge_head\\":\\"abc123\\"}"\n' > "$FAKE_BIN/autospec"; chmod +x "$FAKE_BIN/autospec"
     export PATH="$FAKE_BIN:$PATH"
 
     GH_LOG="$TEST_TMP/gh-calls.log"
@@ -270,7 +270,7 @@ PROMOTE_ISSUE:501"
     [ "$status" -eq 0 ]
 
     # Merge is admin+squash but NEVER --delete-branch (reset recreates the branch).
-    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash --match-head-commit abc123$" "$GH_LOG"
     run ! grep -q -- "--delete-branch" "$GH_LOG"
     [ "$status" -eq 1 ]
     grep -q "^reset --parent main --repo test-owner/test-repo$" "$INTBRANCH_LOG"
@@ -402,7 +402,7 @@ PROMOTE_ISSUE:509"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash --match-head-commit abc123$" "$GH_LOG"
 }
 
 @test "merge-ok/reset-fail leaves the control issue open; re-fired promote on MERGED roll-up recovers via reset" {
@@ -419,7 +419,7 @@ PROMOTE_ISSUE:507"
 
     # Phase 1: merged, reset failed → NO issue close (stays open for retry),
     # label still cleared (operator re-fires by re-applying it).
-    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash --match-head-commit abc123$" "$GH_LOG"
     run ! grep -q "^issue close 507" "$GH_LOG"
     [ "$status" -eq 1 ]
     grep -q "^issue edit 507 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
@@ -675,7 +675,7 @@ PROMOTE_ISSUE:701"
     [ "$status" -eq 0 ]
 
     # Merge still happened — board write-back is decorative, not a gate.
-    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash --match-head-commit abc123$" "$GH_LOG"
     grep -q "^issue close 701 --repo test-owner/test-repo$" "$GH_LOG"
 
     grep -q -- "--item PVTI_xyz --state Testing" "$WRITEBACK_LOG"
@@ -704,7 +704,7 @@ PROMOTE_ISSUE:702"
     # The write-back was attempted (and failed) but the merge path is
     # completely unaffected: merge + reset + close all still happened.
     grep -q -- "--item PVTI_fails --state Testing" "$WRITEBACK_LOG"
-    grep -q "^pr merge 43 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    grep -q "^pr merge 43 --repo test-owner/test-repo --admin --squash --match-head-commit abc123$" "$GH_LOG"
     grep -q "^reset --parent main --repo test-owner/test-repo$" "$INTBRANCH_LOG"
     grep -q "^issue close 702 --repo test-owner/test-repo$" "$GH_LOG"
 }
@@ -722,7 +722,7 @@ PROMOTE_ISSUE:703"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    grep -q "^pr merge 44 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    grep -q "^pr merge 44 --repo test-owner/test-repo --admin --squash --match-head-commit abc123$" "$GH_LOG"
     run cat "$WRITEBACK_LOG"
     [ -z "$output" ]
 }
@@ -741,7 +741,7 @@ PROMOTE_ISSUE:704"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    grep -q "^pr merge 45 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    grep -q "^pr merge 45 --repo test-owner/test-repo --admin --squash --match-head-commit abc123$" "$GH_LOG"
     run cat "$WRITEBACK_LOG"
     [ -z "$output" ]
 }
