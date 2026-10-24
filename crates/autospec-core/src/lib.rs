@@ -87,6 +87,7 @@ pub mod gate_verdict;
 pub mod grading;
 pub mod graph;
 pub mod growth;
+pub mod incident;
 pub mod guard_extraction;
 pub mod heartbeat;
 pub mod held_backlog;
