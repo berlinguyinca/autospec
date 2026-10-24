@@ -1,6 +1,8 @@
 use autospec_core::incident::{parse_agent_failure_event, IncidentIssueProjection};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::fs::{self, remove_file, OpenOptions};
+use std::fs::{self, create_dir_all, remove_file, File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::process::Command;
 use std::thread::sleep;
 use std::time::Duration;
@@ -24,11 +26,14 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     }
 
     let _lock = IncidentIssueLock::acquire(&options.repo)?;
-    let existing = find_existing_issue(&options.repo, &projection.marker())?;
+    let bindings = IncidentBindingStore::open(&options.repo)?;
+    let bound = bindings.find(&event.incident_id, &event.fingerprint)?;
+    let existing = bound.or(find_existing_issue(&options.repo, &projection.marker())?);
     let (number, deduplicated) = match existing {
         Some(number) => (number, true),
         None => (create_issue(&options.repo, &projection)?, false),
     };
+    bindings.record(&event.incident_id, &event.fingerprint, number)?;
     println!(
         "{}",
         render_result(&event, &projection, number, deduplicated)
@@ -243,6 +248,122 @@ struct IncidentIssueLock {
     path: std::path::PathBuf,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct IncidentBinding {
+    incident_id: String,
+    fingerprint: String,
+    issue: u64,
+}
+
+struct IncidentBindingStore {
+    path: std::path::PathBuf,
+    bindings: Vec<IncidentBinding>,
+}
+
+impl IncidentBindingStore {
+    fn open(repo: &str) -> Result<Self, CommandFailure> {
+        let state_root = std::env::var_os("AUTOSPEC_INCIDENT_STATE_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|home| std::path::PathBuf::from(home).join(".autospec/incident-bindings"))
+            })
+            .ok_or_else(|| {
+                CommandFailure::transient("cannot determine AutoSpec incident state directory")
+            })?;
+        create_dir_all(&state_root).map_err(|error| {
+            CommandFailure::transient(format!(
+                "could not create incident state directory: {error}"
+            ))
+        })?;
+        let mut permissions = fs::metadata(&state_root)
+            .map_err(|error| {
+                CommandFailure::transient(format!(
+                    "could not stat incident state directory: {error}"
+                ))
+            })?
+            .permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o700);
+            fs::set_permissions(&state_root, permissions).map_err(|error| {
+                CommandFailure::transient(format!(
+                    "could not protect incident state directory: {error}"
+                ))
+            })?;
+        }
+        let path = state_root.join(format!("{}.jsonl", repo.replace('/', "__")));
+        let bindings = match File::open(&path) {
+            Ok(file) => BufReader::new(file)
+                .lines()
+                .map(|line| {
+                    let line = line.map_err(|error| error.to_string())?;
+                    serde_json::from_str::<IncidentBinding>(&line)
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    CommandFailure::transient(format!("invalid incident binding journal: {error}"))
+                })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                return Err(CommandFailure::transient(format!(
+                    "could not open incident binding journal: {error}"
+                )))
+            }
+        };
+        Ok(Self { path, bindings })
+    }
+
+    fn find(&self, incident_id: &str, fingerprint: &str) -> Result<Option<u64>, CommandFailure> {
+        Ok(self
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.incident_id == incident_id || binding.fingerprint == fingerprint
+            })
+            .map(|binding| binding.issue))
+    }
+
+    fn record(
+        &self,
+        incident_id: &str,
+        fingerprint: &str,
+        issue: u64,
+    ) -> Result<(), CommandFailure> {
+        if self.bindings.iter().any(|binding| {
+            binding.incident_id == incident_id
+                && binding.fingerprint == fingerprint
+                && binding.issue == issue
+        }) {
+            return Ok(());
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|error| {
+                CommandFailure::transient(format!("could not append incident binding: {error}"))
+            })?;
+        let line = serde_json::to_string(&IncidentBinding {
+            incident_id: incident_id.to_string(),
+            fingerprint: fingerprint.to_string(),
+            issue,
+        })
+        .map_err(|error| {
+            CommandFailure::transient(format!("could not encode incident binding: {error}"))
+        })?;
+        writeln!(file, "{line}").map_err(|error| {
+            CommandFailure::transient(format!("could not write incident binding: {error}"))
+        })?;
+        file.sync_data().map_err(|error| {
+            CommandFailure::transient(format!("could not sync incident binding: {error}"))
+        })?;
+        Ok(())
+    }
+}
+
 impl IncidentIssueLock {
     fn acquire(repo: &str) -> Result<Self, CommandFailure> {
         let safe_repo = repo.replace('/', "__");
@@ -296,5 +417,20 @@ mod tests {
         assert!(args.contains(&"labels[]=auto-implement".to_string()));
         assert!(args.contains(&"labels[]=origin:pi-incident".to_string()));
         assert!(!args.contains(&"labels=auto-implement,origin:pi-incident".to_string()));
+    }
+
+    #[test]
+    fn binding_store_matches_incident_id_or_fingerprint() {
+        let store = super::IncidentBindingStore {
+            path: std::path::PathBuf::from("/tmp/unused-incident-bindings.jsonl"),
+            bindings: vec![super::IncidentBinding {
+                incident_id: "inc-1".to_string(),
+                fingerprint: "deadbeefdeadbeef".to_string(),
+                issue: 42,
+            }],
+        };
+        assert_eq!(store.find("inc-1", "other"), Ok(Some(42)));
+        assert_eq!(store.find("other", "deadbeefdeadbeef"), Ok(Some(42)));
+        assert_eq!(store.find("other", "other"), Ok(None));
     }
 }
