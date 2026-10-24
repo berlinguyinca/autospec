@@ -1,9 +1,13 @@
 use autospec_core::incident::{parse_agent_failure_event, IncidentIssueProjection};
 use serde_json::json;
-use std::fs;
+use std::fs::{self, remove_file, OpenOptions};
 use std::process::Command;
+use std::thread::sleep;
+use std::time::Duration;
 
 use super::CommandFailure;
+
+const MAX_INCIDENT_EVENT_BYTES: u64 = 64 * 1024;
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     if args.first().map(String::as_str) != Some("ingest") {
@@ -19,6 +23,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         return Ok(());
     }
 
+    let _lock = IncidentIssueLock::acquire(&options.repo)?;
     let existing = find_existing_issue(&options.repo, &projection.marker())?;
     let (number, deduplicated) = match existing {
         Some(number) => (number, true),
@@ -34,6 +39,16 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
 fn read_event(
     options: &IncidentOptions,
 ) -> Result<autospec_core::incident::AgentFailureEvent, CommandFailure> {
+    let size = fs::metadata(&options.event_file)
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("could not stat incident event: {error}"))
+        })?
+        .len();
+    if size > MAX_INCIDENT_EVENT_BYTES {
+        return Err(CommandFailure::diagnostic(
+            "incident event exceeds 65536 bytes",
+        ));
+    }
     let document = fs::read_to_string(&options.event_file).map_err(|error| {
         CommandFailure::diagnostic(format!("could not read incident event: {error}"))
     })?;
@@ -151,9 +166,9 @@ fn print_help() {
 }
 
 fn find_existing_issue(repo: &str, marker: &str) -> Result<Option<u64>, CommandFailure> {
-    let endpoint = format!("repos/{repo}/issues?state=open&labels=origin:pi-incident&per_page=100");
+    let endpoint = format!("repos/{repo}/issues?state=all&labels=origin:pi-incident&per_page=100");
     let output = Command::new("gh")
-        .args(["api", &endpoint])
+        .args(["api", "--paginate", "--slurp", &endpoint])
         .output()
         .map_err(|error| {
             CommandFailure::transient(format!("could not execute gh issue lookup: {error}"))
@@ -167,32 +182,24 @@ fn find_existing_issue(repo: &str, marker: &str) -> Result<Option<u64>, CommandF
     let issues: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
         CommandFailure::transient(format!("could not parse gh issue lookup: {error}"))
     })?;
-    Ok(issues.as_array().and_then(|items| {
-        items.iter().find_map(|issue| {
-            (issue.get("body")?.as_str()?.contains(marker))
+    let pages = issues.as_array().ok_or_else(|| {
+        CommandFailure::transient("gh issue lookup returned a non-array response")
+    })?;
+    Ok(pages
+        .iter()
+        .flat_map(|page| page.as_array().into_iter().flatten())
+        .find_map(|issue| {
+            let body = issue.get("body")?.as_str()?;
+            body.lines()
+                .any(|line| line.trim() == marker)
                 .then(|| issue.get("number")?.as_u64())
                 .flatten()
-        })
-    }))
+        }))
 }
 
 fn create_issue(repo: &str, projection: &IncidentIssueProjection) -> Result<u64, CommandFailure> {
-    let labels = projection.labels.join(",");
     let output = Command::new("gh")
-        .args([
-            "api",
-            "--method",
-            "POST",
-            &format!("repos/{repo}/issues"),
-            "-f",
-            &format!("title={}", projection.title),
-            "-f",
-            &format!("body={}", projection.body),
-            "-f",
-            &format!("labels={labels}"),
-            "--jq",
-            ".number",
-        ])
+        .args(create_issue_arguments(repo, projection))
         .output()
         .map_err(|error| {
             CommandFailure::transient(format!("could not execute gh issue create: {error}"))
@@ -211,4 +218,83 @@ fn create_issue(repo: &str, projection: &IncidentIssueProjection) -> Result<u64,
         .ok_or_else(|| {
             CommandFailure::transient("gh issue create returned an invalid issue number")
         })
+}
+
+fn create_issue_arguments(repo: &str, projection: &IncidentIssueProjection) -> Vec<String> {
+    let mut args = vec![
+        "api".to_string(),
+        "--method".to_string(),
+        "POST".to_string(),
+        format!("repos/{repo}/issues"),
+        "-f".to_string(),
+        format!("title={}", projection.title),
+        "-f".to_string(),
+        format!("body={}", projection.body),
+    ];
+    for label in &projection.labels {
+        args.push("-f".to_string());
+        args.push(format!("labels[]={label}"));
+    }
+    args.extend(["--jq".to_string(), ".number".to_string()]);
+    args
+}
+
+struct IncidentIssueLock {
+    path: std::path::PathBuf,
+}
+
+impl IncidentIssueLock {
+    fn acquire(repo: &str) -> Result<Self, CommandFailure> {
+        let safe_repo = repo.replace('/', "__");
+        let path = std::env::temp_dir().join(format!("autospec-pi-incident-{safe_repo}.lock"));
+        for _ in 0..50 {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(Self { path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    sleep(Duration::from_millis(100));
+                }
+                Err(error) => {
+                    return Err(CommandFailure::transient(format!(
+                        "could not acquire incident projection lock: {error}"
+                    )))
+                }
+            }
+        }
+        Err(CommandFailure::transient(
+            "timed out waiting for incident projection lock",
+        ))
+    }
+}
+
+impl Drop for IncidentIssueLock {
+    fn drop(&mut self) {
+        let _ = remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_issue_arguments;
+    use autospec_core::incident::{DebuggerDispatch, IncidentIssueProjection};
+
+    #[test]
+    fn create_issue_arguments_send_labels_as_repeated_array_fields() {
+        let projection = IncidentIssueProjection {
+            title: "title".to_string(),
+            body: "body".to_string(),
+            labels: vec![
+                "auto-implement".to_string(),
+                "origin:pi-incident".to_string(),
+            ],
+            debugger_dispatch: DebuggerDispatch {
+                role: "debugger".to_string(),
+                dry_run: true,
+                prompt: "prompt".to_string(),
+            },
+        };
+        let args = create_issue_arguments("owner/repo", &projection);
+        assert!(args.contains(&"labels[]=auto-implement".to_string()));
+        assert!(args.contains(&"labels[]=origin:pi-incident".to_string()));
+        assert!(!args.contains(&"labels=auto-implement,origin:pi-incident".to_string()));
+    }
 }
