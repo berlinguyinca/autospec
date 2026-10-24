@@ -34,6 +34,11 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         None => (create_issue(&options.repo, &projection)?, false),
     };
     bindings.record(&event.incident_id, &event.fingerprint, number)?;
+    dispatch_autonomous(
+        &options.repo,
+        options.repo_dir.as_deref().unwrap_or(&event.worktree),
+        number,
+    )?;
     println!(
         "{}",
         render_result(&event, &projection, number, deduplicated)
@@ -96,6 +101,7 @@ fn render_result(
         "fingerprint": event.fingerprint,
         "deduplicated": deduplicated,
         "issue": number,
+        "autonomous_dispatched": true,
         "debugger_dispatch": debugger_json(projection),
     }))
     .expect("incident result is JSON serializable")
@@ -113,12 +119,14 @@ fn debugger_json(projection: &IncidentIssueProjection) -> serde_json::Value {
 struct RawIncidentOptions {
     repo: Option<String>,
     event_file: Option<String>,
+    repo_dir: Option<String>,
     dry_run: bool,
 }
 
 struct IncidentOptions {
     repo: String,
     event_file: String,
+    repo_dir: Option<String>,
     dry_run: bool,
 }
 
@@ -134,6 +142,10 @@ fn parse_options(args: &[String]) -> Result<IncidentOptions, CommandFailure> {
             "--event-file" => {
                 index += 1;
                 options.event_file = Some(required_value(args, index, "--event-file")?);
+            }
+            "--repo-dir" => {
+                index += 1;
+                options.repo_dir = Some(required_value(args, index, "--repo-dir")?);
             }
             "--dry-run" | "--json" => {}
             "--help" | "-h" => {
@@ -155,6 +167,7 @@ fn parse_options(args: &[String]) -> Result<IncidentOptions, CommandFailure> {
         event_file: options
             .event_file
             .ok_or_else(|| CommandFailure::diagnostic("--event-file is required"))?,
+        repo_dir: options.repo_dir,
         dry_run: options.dry_run || args.iter().any(|arg| arg == "--dry-run"),
     })
 }
@@ -167,7 +180,7 @@ fn required_value(args: &[String], index: usize, option: &str) -> Result<String,
 }
 
 fn print_help() {
-    println!("autospec incident ingest --repo OWNER/REPO --event-file PATH [--dry-run] [--json]");
+    println!("autospec incident ingest --repo OWNER/REPO --event-file PATH [--repo-dir DIR] [--dry-run] [--json]");
 }
 
 fn find_existing_issue(repo: &str, marker: &str) -> Result<Option<u64>, CommandFailure> {
@@ -242,6 +255,36 @@ fn create_issue_arguments(repo: &str, projection: &IncidentIssueProjection) -> V
     }
     args.extend(["--jq".to_string(), ".number".to_string()]);
     args
+}
+
+fn autonomous_arguments(repo: &str, repo_dir: &str, issue: u64) -> Vec<String> {
+    vec![
+        "autonomous".to_string(),
+        "start".to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+        "--repo-dir".to_string(),
+        repo_dir.to_string(),
+        "--issue".to_string(),
+        issue.to_string(),
+    ]
+}
+
+fn dispatch_autonomous(repo: &str, repo_dir: &str, issue: u64) -> Result<(), CommandFailure> {
+    let binary = std::env::var("AUTOSPEC_BIN").unwrap_or_else(|_| "autospec".to_string());
+    let output = Command::new(binary)
+        .args(autonomous_arguments(repo, repo_dir, issue))
+        .output()
+        .map_err(|error| {
+            CommandFailure::transient(format!("could not launch autonomous debugger: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(CommandFailure::transient(format!(
+            "autonomous debugger launch failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
 }
 
 struct IncidentIssueLock {
@@ -417,6 +460,23 @@ mod tests {
         assert!(args.contains(&"labels[]=auto-implement".to_string()));
         assert!(args.contains(&"labels[]=origin:pi-incident".to_string()));
         assert!(!args.contains(&"labels=auto-implement,origin:pi-incident".to_string()));
+    }
+
+    #[test]
+    fn autonomous_arguments_scope_the_existing_conductor_to_one_issue() {
+        assert_eq!(
+            super::autonomous_arguments("owner/repo", "/tmp/repo", 42),
+            vec![
+                "autonomous",
+                "start",
+                "--repo",
+                "owner/repo",
+                "--repo-dir",
+                "/tmp/repo",
+                "--issue",
+                "42"
+            ]
+        );
     }
 
     #[test]
