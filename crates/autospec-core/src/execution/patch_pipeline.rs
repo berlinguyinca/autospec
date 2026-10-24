@@ -173,8 +173,31 @@
 //!     ones). And a pass refuses to start when the host's load average
 //!     already exceeds its core count: a gate must not become less
 //!     reliable as it becomes busier (#4369).
+//! 19. **The lanes follow the contention, not the items**
+//!     ([`plan_lane_partition`], [`LanePartition`]). The work is
+//!     independent *except* where two patches touch the same file, and
+//!     that is the only thing that makes parallel lanes interfere. A
+//!     round-robin split by item identity maximised the collision: any
+//!     file touched by more patches than there are lanes lands in every
+//!     lane with near-certainty, so every agent gates a patch touching
+//!     it and then they race to merge — the serialisation cost paid once,
+//!     now N times concurrently (#4522). The partition edges two patches
+//!     that touch a common file, assigns each connected component whole
+//!     to one lane, and balances by component size, accepting unequal
+//!     lane counts: equal item counts are worthless if the lanes
+//!     collide. A component larger than a lane's budget runs sequentially
+//!     within one lane, which is correct and no slower than the
+//!     alternative. Grouping patches that share a file into the same lane
+//!     converts inter-agent contention (a merge race, requiring a rebase
+//!     and a full re-gate) into intra-agent contention (sequential, and
+//!     the second patch simply applies on top of the first); the
+//!     expensive part — gating — stays parallel across lanes that
+//!     genuinely do not interact. The plan reports the partition it chose
+//!     — lanes, component sizes, and any file appearing in more than one
+//!     lane, which is zero by construction and would be the alarm if it
+//!     were not ([`LanePartition::report`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The identity of the conversion-pass decision logic, for the version in
 /// force in this build (#4041).
@@ -212,7 +235,12 @@ use std::collections::BTreeMap;
 /// (the drift resolves when the patch is rebased onto the new tip), so
 /// results recorded under version 4 are hypotheses the version-5 logic
 /// re-verifies, not decisions.
-pub const CONVERSION_LOGIC_VERSION: u32 = 5;
+/// Bumped to 6 in #4522: the worker partition is now by connected
+/// components over shared touched files ([`plan_lane_partition`]) rather
+/// than round-robin by position — a change in how the pass produces its
+/// results, so results recorded under version 5 are hypotheses the
+/// version-6 logic re-verifies, not decisions.
+pub const CONVERSION_LOGIC_VERSION: u32 = 6;
 
 /// A conversion outcome class, ordered cheapest first.
 ///
@@ -359,6 +387,14 @@ pub struct Patch {
     /// expected-value dimension of the ordering key
     /// ([`Patch::ordering_key`]) (#3783).
     pub agent_status: Option<String>,
+    /// The repo-relative files this patch touches, read off the patch on
+    /// disk by the caller ([`Patch::with_touched_files`]) (#4522). The
+    /// contention-aware lane partition ([`plan_lane_partition`]) edges
+    /// two patches that touch a common file, so this is what keeps a
+    /// shared file in one lane. Empty when the caller has no file data:
+    /// unknown files are not evidence of contention, and such a patch is
+    /// its own component.
+    pub touched_files: BTreeSet<String>,
 }
 
 impl Patch {
@@ -386,6 +422,7 @@ impl Patch {
             produced_at,
             unblocks,
             agent_status: None,
+            touched_files: BTreeSet::new(),
         })
     }
 
@@ -430,6 +467,23 @@ impl Patch {
         } else {
             Some(status.trim().to_string())
         };
+        self
+    }
+
+    /// Record the repo-relative files this patch touches, when the caller
+    /// has read them off the patch on disk (#4522). The contention-aware
+    /// lane partition ([`plan_lane_partition`]) is only as good as this
+    /// data: two patches that both touch `AGENTS.md` are one component
+    /// only if both recorded it. Entries are normalised — trimmed, blank
+    /// entries dropped, duplicates removed — so input order and shape do
+    /// not matter. A patch left with no recorded files is not evidence of
+    /// contention: it is its own component.
+    pub fn with_touched_files(mut self, files: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        self.touched_files = files
+            .into_iter()
+            .map(|f| f.as_ref().trim().to_string())
+            .filter(|f| !f.is_empty())
+            .collect();
         self
     }
 
@@ -1062,7 +1116,8 @@ pub fn classify_gate(build_rc: i32, test_rc: i32) -> GateVerdict {
 /// machine's cores.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerPlan {
-    /// Position in the pool (also the round-robin assignment target).
+    /// Position in the pool (also the lane the contention partition
+    /// assigns its components to, #4522).
     pub index: usize,
     /// Private checkout for this worker. The worktree lock from #3608
     /// protects this path, not the operation: N checkouts admit N
@@ -1166,8 +1221,9 @@ pub fn plan_workers(count: usize, root: &str) -> Result<Vec<WorkerPlan>, String>
 pub struct ScheduledPatch<'a> {
     /// The patch, in cost order (terminal classes first).
     pub patch: &'a Patch,
-    /// Worker index that converts this patch (round-robin over the cost
-    /// order).
+    /// Worker (lane) index that converts this patch: the lane of the
+    /// patch's file-contention component ([`plan_lane_partition`],
+    /// #4522), not a round-robin position.
     pub worker: usize,
     /// True when [`ConversionMemo`] already carries the matching terminal
     /// decision for this (identity, base sha) pair **and the base is still
@@ -1199,13 +1255,242 @@ pub struct ConversionSchedule<'a> {
     pub workers: Vec<WorkerPlan>,
     /// Patches in execution order with their worker assignment.
     pub assignments: Vec<ScheduledPatch<'a>>,
+    /// The contention-aware partition this plan chose (#4522): lanes,
+    /// per-lane component sizes, and the files appearing in more than one
+    /// lane (zero by construction). [`LanePartition::report`] is the pass's
+    /// line for it.
+    pub partition: LanePartition,
+}
+
+/// The contention-aware partition of a cost-ordered queue into lanes
+/// (#4522): connected components over shared touched files, assigned
+/// whole to lanes and balanced by component size.
+///
+/// Invariant, by construction: a file appears in at most one lane. Two
+/// patches that touch a common file are one component, and a component
+/// is never split across lanes. [`LanePartition::cross_lane_files`] is
+/// computed anyway and reported by [`LanePartition::report`]: it is zero
+/// by construction, and a future change that breaks the invariant would
+/// be visible in the pass's report instead of arriving as a merge race.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanePartition {
+    /// The lane count (the worker pool size).
+    pub lanes: usize,
+    /// Per lane, the size of each component assigned to it, in assignment
+    /// order. Empty lanes (fewer components than lanes) carry an empty
+    /// list: unequal lane counts are accepted, equal item counts are not
+    /// the point (#4522).
+    pub component_sizes: Vec<Vec<usize>>,
+    /// Files touched by patches assigned to more than one lane. Empty by
+    /// construction; non-empty would be the alarm.
+    pub cross_lane_files: Vec<String>,
+    /// The lane each patch of the cost-ordered input was assigned to, in
+    /// input order.
+    pub lane_of_patch: Vec<usize>,
+}
+
+impl LanePartition {
+    /// The empty partition: no lanes, no components. Reported when a pass
+    /// plans no work.
+    pub fn empty() -> Self {
+        Self {
+            lanes: 0,
+            component_sizes: Vec::new(),
+            cross_lane_files: Vec::new(),
+            lane_of_patch: Vec::new(),
+        }
+    }
+
+    /// The pass's report line for the chosen partition (#4522): the lanes,
+    /// each lane's component sizes, and the files appearing in more than
+    /// one lane (zero by construction), e.g. `4 lanes: lane 0: components
+    /// [2, 1], lane 1: components [1, 1], lane 2: components [], lane 3:
+    /// components [] — 0 files in more than one lane`.
+    pub fn report(&self) -> String {
+        let lanes: Vec<String> = self
+            .component_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, sizes)| {
+                let sizes = sizes
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("lane {i}: components [{sizes}]")
+            })
+            .collect();
+        let mut line = format!("{} lanes: {} — ", self.lanes, lanes.join(", "));
+        if self.cross_lane_files.is_empty() {
+            line.push_str("0 files in more than one lane");
+        } else {
+            line.push_str(&format!(
+                "{} files in more than one lane: {}",
+                self.cross_lane_files.len(),
+                self.cross_lane_files.join(", ")
+            ));
+        }
+        line
+    }
+}
+
+/// The connected components of the contention graph over cost-ordered
+/// patches (#4522): an edge joins two patches that touch a common file.
+///
+/// The graph is built with a union-find over the patch positions:
+/// `file -> first patch touching it` maps every file to the first patch
+/// that touched it, and every later patch touching the same file unions
+/// into that first one, so a chain of shared files (p1 touches a, p2
+/// touches a and b, p3 touches b) is one component. Each patch appears in
+/// exactly one component, in ascending position order within it. A patch
+/// with no recorded touched files is its own component: unknown files are
+/// not evidence of contention.
+pub fn contention_components(ordered: &[&Patch]) -> Vec<Vec<usize>> {
+    let n = ordered.len();
+    let mut uf = UnionFind::new(n);
+    let mut first_by_file: BTreeMap<&str, usize> = BTreeMap::new();
+    for (i, patch) in ordered.iter().enumerate() {
+        for file in &patch.touched_files {
+            match first_by_file.get(file.as_str()).copied() {
+                Some(first) => uf.union(first, i),
+                None => {
+                    first_by_file.insert(file.as_str(), i);
+                }
+            }
+        }
+    }
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut root_to_group: BTreeMap<usize, usize> = BTreeMap::new();
+    for i in 0..n {
+        let root = uf.find(i);
+        let group = *root_to_group.entry(root).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[group].push(i);
+    }
+    groups
+}
+
+/// Assign whole components to `lanes`, balanced by component size
+/// (#4522): largest component first, each to the currently smallest
+/// lane, ties to the lowest lane index. Deterministic: components tie
+/// break on their lowest member position, so two passes over the same
+/// queue agree.
+///
+/// Unequal lane counts are the point: a component is never split, so a
+/// component larger than a lane's budget simply runs sequentially within
+/// one lane — correct, and no slower than the alternative (a split would
+/// turn one sequential chain into a merge race). Returns the lane of each
+/// component, in component order.
+pub fn assign_components_to_lanes(components: &[Vec<usize>], lanes: usize) -> Vec<usize> {
+    assert!(
+        lanes > 0,
+        "assign_components_to_lanes needs at least one lane"
+    );
+    let mut order: Vec<usize> = (0..components.len()).collect();
+    order.sort_by(|&a, &b| {
+        components[b]
+            .len()
+            .cmp(&components[a].len())
+            .then_with(|| components[a][0].cmp(&components[b][0]))
+    });
+    let mut lane_sizes = vec![0usize; lanes];
+    let mut lane_of_component = vec![0usize; components.len()];
+    for component in order {
+        let lane = (0..lanes)
+            .min_by_key(|i| (lane_sizes[*i], *i))
+            .expect("lanes > 0");
+        lane_sizes[lane] += components[component].len();
+        lane_of_component[component] = lane;
+    }
+    lane_of_component
+}
+
+/// Partition a cost-ordered queue into lanes by file contention (#4522):
+/// build the contention components ([`contention_components`]) and assign
+/// them whole to the lanes ([`assign_components_to_lanes`]). Patches
+/// inside a component run sequentially in their lane in cost order — the
+/// second patch applies on top of the first — while components stay
+/// independent across lanes, so the lanes never race on a shared file.
+pub fn plan_lane_partition(ordered: &[&Patch], lanes: usize) -> LanePartition {
+    assert!(lanes > 0, "plan_lane_partition needs at least one lane");
+    let components = contention_components(ordered);
+    let lane_of_component = assign_components_to_lanes(&components, lanes);
+    let mut lane_of_patch = vec![0usize; ordered.len()];
+    let mut component_sizes: Vec<Vec<usize>> = vec![Vec::new(); lanes];
+    for (component, members) in components.iter().enumerate() {
+        let lane = lane_of_component[component];
+        component_sizes[lane].push(members.len());
+        for &position in members {
+            lane_of_patch[position] = lane;
+        }
+    }
+    let mut lanes_by_file: BTreeMap<&str, BTreeSet<usize>> = BTreeMap::new();
+    for (position, patch) in ordered.iter().enumerate() {
+        for file in &patch.touched_files {
+            lanes_by_file
+                .entry(file.as_str())
+                .or_default()
+                .insert(lane_of_patch[position]);
+        }
+    }
+    let cross_lane_files = lanes_by_file
+        .into_iter()
+        .filter(|(_, lanes)| lanes.len() > 1)
+        .map(|(file, _)| file.to_string())
+        .collect();
+    LanePartition {
+        lanes,
+        component_sizes,
+        cross_lane_files,
+        lane_of_patch,
+    }
+}
+
+/// Disjoint-set union-find over patch positions, for
+/// [`contention_components`]. Private: the partition is the public
+/// surface; the data structure is not.
+struct UnionFind {
+    parent: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+        }
+    }
+
+    fn find(&mut self, x: usize) -> usize {
+        let mut root = x;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+        let mut current = x;
+        while self.parent[current] != root {
+            let next = self.parent[current];
+            self.parent[current] = root;
+            current = next;
+        }
+        root
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.parent[rb] = ra;
+        }
+    }
 }
 
 /// Plan one pass over the queue against the **current** trunk tip: order
-/// the queue by cost, then impact, then recency; size the pool; assign
-/// round-robin; and flag memo hits and stale bases. An empty queue plans
-/// an empty pool — there is nothing to convert, and zero workers is the
-/// only sane pool for zero work.
+/// the queue by cost, then impact, then recency; size the pool; partition
+/// the ordered queue into lanes by file contention
+/// ([`plan_lane_partition`], #4522) — not by index or issue number; and
+/// flag memo hits and stale bases. An empty queue plans an empty pool —
+/// there is nothing to convert, and zero workers is the only sane pool
+/// for zero work.
 ///
 /// `current_tip` is the tip of `origin/main` fetched immediately before this
 /// plan: the pass re-reads the world before each candidate, so a snapshot
@@ -1238,15 +1523,18 @@ pub fn plan_pass<'a>(
         return Ok(ConversionSchedule {
             workers: Vec::new(),
             assignments: Vec::new(),
+            partition: LanePartition::empty(),
         });
     }
     let pool = plan_workers(workers, root)?;
-    let assignments = order_by_cost(patches)
+    let ordered = order_by_cost(patches);
+    let partition = plan_lane_partition(&ordered, pool.len());
+    let assignments = ordered
         .into_iter()
         .enumerate()
         .map(|(position, patch)| ScheduledPatch {
             patch,
-            worker: position % pool.len(),
+            worker: partition.lane_of_patch[position],
             memo_hit: patch.base_sha == current_tip
                 && memo
                     .lookup(&patch.identity, &patch.base_sha, logic_version)
@@ -1258,6 +1546,7 @@ pub fn plan_pass<'a>(
     Ok(ConversionSchedule {
         workers: pool,
         assignments,
+        partition,
     })
 }
 
@@ -2613,6 +2902,10 @@ pub fn dry_run_report(schedule: &ConversionSchedule) -> String {
         schedule.workers.len(),
         schedule.assignments.len()
     )];
+    // The pass reports the partition it chose (#4522): lanes, component
+    // sizes, and the files appearing in more than one lane (zero by
+    // construction, and the alarm if they ever are not).
+    lines.push(format!("partition: {}", schedule.partition.report()));
     for a in &schedule.assignments {
         lines.push(format!(
             "worker {}: {} class={} memo_hit={} stale_base={} superseded_verdict={}",
@@ -3168,9 +3461,12 @@ mod tests {
             })
             .collect();
         // Terminal classes first (in class order), then candidates;
-        // round-robin over the cost order; only the memoized hold is a hit,
-        // and only because its base is still the tip. The patches on older
-        // bases are flagged for re-baselining.
+        // lanes by the contention partition (#4522) — with no touched
+        // files recorded every patch is its own component, and the
+        // size-balanced assignment over two lanes reproduces the old
+        // round-robin shape; only the memoized hold is a hit, and only
+        // because its base is still the tip. The patches on older bases
+        // are flagged for re-baselining.
         assert_eq!(
             order,
             vec![
@@ -5087,7 +5383,12 @@ mod tests {
         // drifted patch that compiles cleanly at its base is retirable,
         // not a genuine defect): results recorded under version 4 are
         // hypotheses the version-5 logic re-verifies, not decisions.
-        assert_eq!(CONVERSION_LOGIC_VERSION, 5);
+        // #4522 replaced the round-robin worker assignment with the
+        // contention-aware lane partition (connected components over
+        // shared touched files, balanced by component size): results
+        // recorded under version 5 are hypotheses the version-6 logic
+        // re-verifies, not decisions.
+        assert_eq!(CONVERSION_LOGIC_VERSION, 6);
     }
 
     // ---- #3793: base self-check and dry-run ----
@@ -5231,8 +5532,15 @@ mod tests {
         let mut lines = report.lines();
         // Header: the pool and the queue sizes, decided by the pass.
         assert_eq!(lines.next().unwrap(), "dry-run: 2 worker(s), 3 patch(es)");
-        // Cost order (ExistingPr before MemoizedHold), round-robin over
-        // the two workers; every decision flag the pass computes is
+        // The partition the pass chose (#4522): no touched files are
+        // recorded, so every patch is its own component, and the three
+        // singletons spread over the two lanes as 1, 1, 1.
+        assert_eq!(
+            lines.next().unwrap(),
+            "partition: 2 lanes: lane 0: components [1, 1], lane 1: components [1] — 0 files in more than one lane"
+        );
+        // Cost order (ExistingPr before MemoizedHold), lanes by the
+        // contention partition; every decision flag the pass computes is
         // printed, so CI can assert on the plan without running it.
         assert_eq!(
             lines.next().unwrap(),
@@ -5268,5 +5576,250 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dry_run_report(&schedule), "dry-run: nothing to convert");
+    }
+
+    #[test]
+    fn with_touched_files_trims_dedupes_and_drops_blank_entries() {
+        let p = patch("p", "base-1", ConversionClass::Candidate).with_touched_files([
+            " AGENTS.md ".to_string(),
+            "AGENTS.md".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+            "docs/invariants.md".to_string(),
+        ]);
+        assert_eq!(p.touched_files.len(), 2);
+        assert!(p.touched_files.contains("AGENTS.md"));
+        assert!(p.touched_files.contains("docs/invariants.md"));
+    }
+
+    #[test]
+    fn contention_components_chain_shared_files_into_one_component() {
+        // p0 touches a; p1 touches a and b; p2 touches b: the chain of
+        // shared files is one component. p3 shares nothing: singleton.
+        let c = ConversionClass::Candidate;
+        let patches = vec![
+            patch("p0", "b0", c).with_touched_files(["a".to_string()]),
+            patch("p1", "b1", c).with_touched_files(["a".to_string(), "b".to_string()]),
+            patch("p2", "b2", c).with_touched_files(["b".to_string()]),
+            patch("p3", "b3", c),
+        ];
+        let ordered = order_by_cost(&patches);
+        let components = contention_components(&ordered);
+        // Every position in exactly one component.
+        let mut seen = vec![false; patches.len()];
+        for component in &components {
+            for &i in component {
+                assert!(!seen[i], "position {i} in two components");
+                seen[i] = true;
+            }
+        }
+        assert!(seen.iter().all(|s| *s));
+        // All four patches tie on every ordering key (same class, no
+        // status, unblocks 0, produced_at 1), so cost order is queue
+        // order: p0, p1, p2, p3 at positions 0, 1, 2, 3. p0, p1, p2
+        // chain through a and b; p3 shares nothing.
+        let chained = components
+            .iter()
+            .find(|c| c.len() == 3)
+            .expect("the shared-file trio is one component");
+        assert_eq!(chained, &vec![0, 1, 2]);
+        let singleton = components.iter().find(|c| c.len() == 1).unwrap();
+        assert_eq!(singleton, &vec![3]);
+    }
+
+    #[test]
+    fn lane_partition_never_puts_a_file_in_two_lanes() {
+        // AC (#4522): for a given partition, no file is touched by
+        // patches in two different lanes.
+        let c = ConversionClass::Candidate;
+        let patches = vec![
+            // Four patches round-robin would scatter across four lanes,
+            // all touching the append-only indexes the pipeline already
+            // knows about.
+            patch_at("p0", "b0", c, 10)
+                .with_touched_files(["AGENTS.md".to_string(), "docs/invariants.md".to_string()]),
+            patch_at("p1", "b1", c, 20).with_touched_files(["docs/invariants.md".to_string()]),
+            patch_at("p2", "b2", c, 30).with_touched_files(["AGENTS.md".to_string()]),
+            patch_at("p3", "b3", c, 40)
+                .with_touched_files(["crates/autospec-core/src/lib.rs".to_string()]),
+            patch_at("p4", "b4", c, 50)
+                .with_touched_files(["crates/autospec-core/src/lib.rs".to_string()]),
+            patch_at("p5", "b5", c, 60), // no file data: its own component
+        ];
+        let ordered = order_by_cost(&patches);
+        for lanes in 2..=4 {
+            let partition = plan_lane_partition(&ordered, lanes);
+            let mut lanes_by_file: BTreeMap<&str, BTreeSet<usize>> = BTreeMap::new();
+            for (position, patch) in ordered.iter().enumerate() {
+                for file in &patch.touched_files {
+                    lanes_by_file
+                        .entry(file.as_str())
+                        .or_default()
+                        .insert(partition.lane_of_patch[position]);
+                }
+            }
+            for (file, file_lanes) in &lanes_by_file {
+                assert_eq!(
+                    file_lanes.len(),
+                    1,
+                    "file {file} touched by patches in two lanes: {file_lanes:?}"
+                );
+            }
+            // The partition agrees with its own report on this point.
+            assert!(partition.cross_lane_files.is_empty());
+        }
+    }
+
+    #[test]
+    fn lane_partition_keeps_shared_files_together_where_round_robin_splits() {
+        // Cost order p5, p4, p3, p2, p1, p0 (newest first). Round-robin
+        // over four lanes puts p0, p1, p2 in lanes 0, 1, 2 — three lanes
+        // racing on AGENTS.md / docs/invariants.md. The contention
+        // partition keeps the whole shared-file chain in one lane.
+        let c = ConversionClass::Candidate;
+        let patches = vec![
+            patch_at("p0", "b0", c, 10).with_touched_files(["AGENTS.md".to_string()]),
+            patch_at("p1", "b1", c, 20)
+                .with_touched_files(["AGENTS.md".to_string(), "docs/invariants.md".to_string()]),
+            patch_at("p2", "b2", c, 30).with_touched_files(["docs/invariants.md".to_string()]),
+            patch_at("p3", "b3", c, 40),
+            patch_at("p4", "b4", c, 50),
+            patch_at("p5", "b5", c, 60),
+        ];
+        let schedule = plan_pass(
+            &patches,
+            4,
+            "/scratch/convert",
+            &ConversionMemo::new(),
+            "b5",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+        let lane_of = |id: &str| {
+            schedule
+                .assignments
+                .iter()
+                .find(|a| a.patch.identity == id)
+                .unwrap()
+                .worker
+        };
+        assert_eq!(
+            lane_of("p0"),
+            lane_of("p1"),
+            "shared AGENTS.md must stay in one lane"
+        );
+        assert_eq!(
+            lane_of("p1"),
+            lane_of("p2"),
+            "shared docs/invariants.md must stay in one lane"
+        );
+    }
+
+    #[test]
+    fn lane_partition_balances_by_component_size_accepting_unequal_lanes() {
+        // One component of 5 (all touching one file) plus three
+        // singletons, four lanes: the big component takes a lane whole,
+        // the singletons spread, and the lanes end up 5, 1, 1, 1 —
+        // unequal by design.
+        let c = ConversionClass::Candidate;
+        let mut patches = Vec::new();
+        for i in 0..5u64 {
+            patches.push(
+                patch_at(&format!("big-{i}"), &format!("b-big-{i}"), c, 100 + i)
+                    .with_touched_files(["AGENTS.md".to_string()]),
+            );
+        }
+        for (i, id) in ["s1", "s2", "s3"].into_iter().enumerate() {
+            patches.push(patch_at(id, &format!("b-{i}"), c, 50 + i as u64));
+        }
+        let ordered = order_by_cost(&patches);
+        let partition = plan_lane_partition(&ordered, 4);
+        let mut sizes: Vec<usize> = partition
+            .component_sizes
+            .iter()
+            .map(|sizes| sizes.iter().sum::<usize>())
+            .collect();
+        sizes.sort_unstable();
+        sizes.reverse();
+        assert_eq!(sizes, vec![5, 1, 1, 1]);
+        assert_eq!(
+            partition
+                .component_sizes
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>(),
+            4
+        );
+        assert!(partition.cross_lane_files.is_empty());
+    }
+
+    #[test]
+    fn lane_partition_keeps_an_oversized_component_whole_in_one_lane() {
+        // Six patches share a file, three lanes: the component of six is
+        // larger than any lane's fair share and runs sequentially within
+        // one lane, never split across lanes.
+        let c = ConversionClass::Candidate;
+        let patches: Vec<Patch> = (0..6)
+            .map(|i| {
+                patch_at(&format!("p{i}"), &format!("b{i}"), c, i as u64)
+                    .with_touched_files(["crates/autospec-core/src/lib.rs".to_string()])
+            })
+            .collect();
+        let ordered = order_by_cost(&patches);
+        let partition = plan_lane_partition(&ordered, 3);
+        let lanes: BTreeSet<usize> = partition.lane_of_patch.iter().copied().collect();
+        assert_eq!(lanes.len(), 1, "the oversized component must not be split");
+        let sizes: Vec<usize> = partition.component_sizes.iter().map(Vec::len).collect();
+        assert_eq!(sizes.iter().sum::<usize>(), 1);
+    }
+
+    #[test]
+    fn plan_pass_reports_the_partition_it_chose() {
+        // AC (#4522): the pass reports the partition it chose — lanes,
+        // component sizes, and any file appearing in more than one lane
+        // (zero).
+        let c = ConversionClass::Candidate;
+        let patches = vec![
+            patch_at("p0", "b0", c, 10)
+                .with_touched_files(["AGENTS.md".to_string(), "docs/invariants.md".to_string()]),
+            patch_at("p1", "b1", c, 20).with_touched_files(["docs/invariants.md".to_string()]),
+            patch_at("p2", "b2", c, 30).with_touched_files(["AGENTS.md".to_string()]),
+            patch_at("p3", "b3", c, 40)
+                .with_touched_files(["crates/autospec-core/src/lib.rs".to_string()]),
+        ];
+        let schedule = plan_pass(
+            &patches,
+            4,
+            "/scratch/convert",
+            &ConversionMemo::new(),
+            "b3",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+        let report = schedule.partition.report();
+        assert!(report.starts_with("4 lanes: "), "report: {report}");
+        // One component of three (p0-p2, chained through the two shared
+        // files) and one singleton (p3): the sizes are in the report.
+        assert!(report.contains("components [3]"), "report: {report}");
+        assert!(report.contains("components [1]"), "report: {report}");
+        assert!(report.contains("components []"), "report: {report}");
+        assert!(
+            report.contains("0 files in more than one lane"),
+            "report: {report}"
+        );
+        // The empty-queue pass reports the empty partition, not nothing.
+        let schedule = plan_pass(
+            &[],
+            4,
+            "/scratch/convert",
+            &ConversionMemo::new(),
+            "b3",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            schedule.partition.report(),
+            "0 lanes:  — 0 files in more than one lane"
+        );
     }
 }
