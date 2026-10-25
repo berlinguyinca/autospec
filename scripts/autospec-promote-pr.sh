@@ -3,12 +3,7 @@
 
 set -eu
 
-usage() {
-    cat <<'EOF'
-Usage:
-  autospec-promote-pr.sh [--repo-root <dir>] [--dry-run|--confirm] [--repo OWNER/REPO] (--pr <number>|--issue <number>)
-EOF
-}
+usage() { echo "Usage: autospec-promote-pr.sh [--repo-root <dir>] [--dry-run|--confirm] [--repo OWNER/REPO] (--pr <number>|--issue <number>)"; }
 
 die() { printf 'autospec-promote-pr: %s\n' "$*" >&2; exit 2; }
 
@@ -72,10 +67,10 @@ policy_traceability_required = bool(policy_traceability) or "policy_traceability
 blocked = []
 if verdict not in {"pass", "pass_with_warnings"}: blocked.append(f"verifier verdict is {verdict or 'missing'}")
 quorum_verdict = quorum.get("verdict", "")
-opcfg = os.path.expanduser("~/.autospec/autospec.yml")
-qv = subprocess.run(["autospec", "review-quorum", "verify-report", "--repo-root", repo_root, "--pr", pr] + (["--repo", gh_repo] if gh_repo else []), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE) if shutil.which("autospec") else None
-if qv is not None and qv.returncode == 2 and ("verify-report" in qv.stderr or "unknown autospec command" in qv.stderr): qv = None
-if (qv is None and (os.path.exists(os.path.join(reports, "review-quorum.json")) or (os.path.exists(opcfg) and "review_quorum" in open(opcfg).read()))) or (qv is not None and qv.returncode != 0): blocked.append("review quorum not verified: " + ((qv.stdout.strip() or qv.stderr.strip()) if qv else "autospec binary unavailable"))
+rq = ["autospec", "review-quorum", "verify-report", "--repo-root", repo_root, "--pr", pr] + (["--repo", gh_repo] if gh_repo else [])
+qv = subprocess.run(rq, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE) if shutil.which("autospec") else None
+if qv is None or qv.returncode != 0: blocked.append("review quorum not verified: " + ((qv.stdout.strip() or qv.stderr.strip()) if qv else "autospec binary unavailable"))
+qhead = json.loads(qv.stdout).get("live_head") if qv is not None and qv.stdout.strip().startswith("{") else None
 if policy_traceability_required and policy_traceability_status in {"fail", "unknown"}: blocked.append("policy traceability is missing or failed")
 if policy_traceability_required and quality_gate_status == "fail": blocked.append("blocking quality gate finding")
 if dimensions.get("validation_evidence", {}).get("status") == "fail": blocked.append("missing validation for code changes")
@@ -89,6 +84,11 @@ allowed = not blocked
 labels_add = ["autospec:needs-human-review", "autospec:verified"] if allowed else []
 labels_remove = ["autospec:needs-changes", "autospec:verification-failed"] if allowed else []
 actions = []
+prev = load(os.path.join(promotions, f"pr-{pr}.json"), {}).get("review_quorum_head")
+if confirm and pr and (not allowed or (prev and qhead and prev != qhead)):
+    for label in ("autospec:verified", "autospec:needs-human-review"):
+        try: gh(["issue", "edit", pr, "--remove-label", label]); actions.append(f"remove {label}")
+        except RuntimeError as exc: actions.append(f"could not remove {label}: {exc}")
 if confirm and pr and allowed:
     for label in labels_add:
         gh(["issue", "edit", pr, "--add-label", label]); actions.append(f"add {label}")
@@ -96,7 +96,7 @@ if confirm and pr and allowed:
         gh(["issue", "edit", pr, "--remove-label", label]); actions.append(f"remove {label}")
 
 source_id = f"pr-{pr}" if pr else f"issue-{issue or 'unknown'}"
-report = {"version":1,"mode":"confirm" if confirm else "dry_run","source":{"pr":pr,"issue":issue},"verifier_verdict":verdict,"review_quorum_verdict":quorum_verdict or "not_present","review_quorum_head":(json.loads(qv.stdout).get("live_head") if qv is not None and qv.stdout.strip().startswith("{") else None),"promotion_allowed":allowed,"policy_traceability_status":policy_traceability_status,"quality_gate_status":quality_gate_status,"maturity_impact":maturity_impact,"labels_to_add":labels_add,"labels_to_remove":labels_remove,"ready_for_review_allowed":False,"blocked_reasons":blocked,"actions":actions,"side_effects":{"approved":False,"merged":False}}
+report = {"version":1,"mode":"confirm" if confirm else "dry_run","source":{"pr":pr,"issue":issue},"verifier_verdict":verdict,"review_quorum_verdict":quorum_verdict or "not_present","review_quorum_head":qhead,"promotion_allowed":allowed,"policy_traceability_status":policy_traceability_status,"quality_gate_status":quality_gate_status,"maturity_impact":maturity_impact,"labels_to_add":labels_add,"labels_to_remove":labels_remove,"ready_for_review_allowed":False,"blocked_reasons":blocked,"actions":actions,"side_effects":{"approved":False,"merged":False}}
 write_json(out_json, report); write_json(os.path.join(promotions, f"{source_id}.json"), report)
 md = "\n".join(["# Promotion Gate", "", f"Verdict: **{'allowed' if allowed else 'blocked'}**", "", "## Evidence", f"- Verifier verdict: `{verdict}`", f"- Risk classification: `{classification or 'unknown'}`", f"- Policy traceability: `{policy_traceability_status}`", f"- Quality gates: `{quality_gate_status}`", "", "## Review Quorum", f"- Verdict: `{quorum_verdict or 'not_present'}`", "", "## Specialist Findings", "\n".join(f"- `{item.get('specialist', 'unknown')}`" for item in quorum.get("blocking_findings", [])) if quorum else "- No quorum report present.", "", "## Human Review Notes", "- Review quorum is internal evidence; it is not human approval.", "", "## Maturity Impact", f"- Target: `{maturity_impact.get('maturity_target', 'unknown')}`", f"- Category: `{maturity_impact.get('category', 'unknown')}`", f"- Severity: `{maturity_impact.get('severity', 'unknown')}`", "", "## Labels", *[f"- add `{l}`" for l in labels_add], *[f"- remove `{l}`" for l in labels_remove], "", "## Blocked reasons", *(f"- {b}" for b in blocked or ["None."]), "", "## Next recommended command", "`bash scripts/autospec-autonomy-status.sh`"])
 write_text(out_md, md); write_text(os.path.join(promotions, f"{source_id}.md"), md)

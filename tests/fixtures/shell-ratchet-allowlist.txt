@@ -19,7 +19,7 @@
 bootstrap.sh 146
 crates/autospec-cli/tests/support/foreground_accountability_gh.sh 44
 crates/autospec-cli/tests/support/sleeping_autonomous_gh.sh 75
-install.sh 1685
+install.sh 1684
 mutation-adapters/bash-mutate.sh 173
 mutation-adapters/go-mutesting.sh 57
 mutation-adapters/mutmut.sh 65
@@ -118,7 +118,7 @@ scripts/autospec-generate-report-artifacts.sh 4
 scripts/autospec-generate-runtime-feature.sh 4
 scripts/autospec-generate-screenshot-contact-sheet.sh 4
 scripts/autospec-generate-tutorial-artifacts.sh 4
-scripts/autospec-guarded-merge.sh 409
+scripts/autospec-guarded-merge.sh 408
 scripts/autospec-guide-issue.sh 69
 scripts/autospec-impact-analysis.sh 5
 scripts/autospec-initiative-contract.sh 131

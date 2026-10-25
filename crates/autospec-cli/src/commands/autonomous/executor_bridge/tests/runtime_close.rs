@@ -289,6 +289,7 @@ esac
 "#,
     );
     let adapter = bridge::DraftPrAdapter {
+        quorum_operator_config: None,
         gh,
         environment: BTreeMap::from([
             ("ISSUE_CALLS".into(), calls.clone().into_os_string()),

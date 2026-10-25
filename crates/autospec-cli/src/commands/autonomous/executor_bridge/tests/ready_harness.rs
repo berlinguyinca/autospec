@@ -494,6 +494,7 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
 "#,
     );
     let adapter = bridge::DraftPrAdapter {
+        quorum_operator_config: None,
         gh,
         environment: BTreeMap::new(),
     };

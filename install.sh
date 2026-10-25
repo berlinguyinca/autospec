@@ -1849,9 +1849,8 @@ print_dependency_summary
 info ""
 info "Suite install summary: $succeeded/$total pairs OK ($failures failed)"
 
-if [ "$failures" -gt 0 ]; then
-    exit 1
-fi
+command -v autospec >/dev/null 2>&1 && { autospec review-quorum config-check >&2 || true; } # LOUD warning when no review_quorum policy is stated
+[ "$failures" -eq 0 ] || exit 1
 if [ "$DISABLE_AUTO_ROLLOVER" -eq 1 ]; then
     remove_rollover_block
     exit 0
