@@ -94,7 +94,7 @@ herdr:
   - **`merge-gate` (the merge path, T16 H3/H4).** `autospec review-quorum merge-gate --repo-root D --pr N --repo O/R`
     is `verify-report` in strict mode and is what `scripts/autospec-guarded-merge.sh` and the run-drain
     recovery merge call. It differs: (1) no trusted source stating a `review_quorum` policy means REQUIRED, and only an explicit
-    `review_quorum: {required: false}` in a trusted config opts out; (2) a required quorum needs origin proof, an
+    `review_quorum: {required: false}` in the OPERATOR config (`~/.autospec/autospec.yml`) opts out; the default branch can only add a requirement; (2) a required quorum needs origin proof, an
     `attestation_key_file` or an enabled Herdr live check; (3) the live head is read once and printed as `merge_head` (only on
     success); the scripts merge with `gh pr merge --match-head-commit <merge_head>`, so a head pushed after verification cannot
     merge; (4) any failure removes `autospec:verified` and `autospec:needs-human-review`; (5) a missing `autospec` binary, or one

@@ -436,7 +436,12 @@ pub fn trusted(root: &Path, operator: Option<&Path>, base: &Base) -> Trusted {
             Ok(op) => {
                 out.required |= op.required;
                 out.explicit_required |= op.required;
-                out.stated |= op.stated;
+                // Only the operator's own file may state a policy (and so opt out): the
+                // default branch can add a requirement but never remove one, or a repo owner
+                // could waive the quorum by merging a one-line file.
+                if name == "operator" {
+                    out.stated |= op.stated;
+                }
                 if name == "operator" {
                     out.herdr_enabled = op.herdr_enabled;
                 }

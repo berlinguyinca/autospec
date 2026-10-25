@@ -2564,3 +2564,16 @@ fn r7_the_head_pin_must_be_a_canonical_full_sha() {
     args.push(&other);
     assert_eq!(merge_gate_raw(&gate, &args).status.code(), Some(3));
 }
+
+#[test]
+fn the_default_branch_cannot_opt_out_on_its_own() {
+    // No operator policy; the default branch's file says `required: false`. Only the
+    // operator may waive the quorum, so the merge gate still refuses (exit 3).
+    let gate = Gate::new("t16-base-optout");
+    gate.base("version: 1\nreview_quorum:\n  required: false\n");
+    let none = gate.dir.join("no-operator.yml");
+    gate.live(&"a".repeat(40), 7);
+    let (code, v) = gate.merge_gate(&none);
+    assert_eq!(code, Some(3), "{v}");
+    assert!(v.get("merge_head").is_none_or(|m| m.is_null()), "{v}");
+}
