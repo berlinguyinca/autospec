@@ -148,6 +148,7 @@ pub mod managed_project;
 
 commands! {
     init => "Initialize AutoSpec metadata", diagnostic;
+    incident => "Ingest Pi agent failure incidents", direct;
     aar => "Inspect adaptive agent runtime policy", direct;
     anchor => "Register and verify protected evaluator anchor suites", direct;
     evaluator => "Manage versioned evaluators, epochs, and promotions", direct;
