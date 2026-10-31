@@ -259,7 +259,7 @@ impl TaskClassification {
 
 /// Default confidence below which the rubric asks for a tie-breaker.
 ///
-/// Mirrors `LLM_ESCALATION_THRESHOLD` in `scripts/classify-model-fit.sh`.
+/// A reporting threshold only; `scripts/classify-model-fit.sh` is purely deterministic.
 pub const DEFAULT_TIE_BREAKER_THRESHOLD: f64 = 0.3;
 
 mod rubric;

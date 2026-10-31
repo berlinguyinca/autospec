@@ -55,9 +55,9 @@ Default for issues that lack any of these signals: `ctx:64k`, `reasoning:medium`
 > Classification runs the deterministic
 > rubric (`${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/classify-model-fit.sh` — file counts, verb keywords, per
 > tracker #421) FIRST, with **no LLM dispatch** for issues it can score
-> confidently. Only issues the rubric flags as ambiguous (confidence below
-> `LLM_ESCALATION_THRESHOLD`, default 0.3) escalate to a single `TIER_B` LLM
-> tie-breaker — never `TIER_A`. Sibling normalization stays deterministic. Set
+> confidently. The script itself never calls an LLM. Only an issue you judge
+> ambiguous from the script's reported confidence and rationale escalates to a
+> single `TIER_B` LLM tie-breaker — never `TIER_A`. Sibling normalization stays deterministic. Set
 > `AUTOSPEC_REVIEWER_TIER=opus` only governs the run-trio reviewer, not this
 > classifier; the classifier's LLM tie-breaker is always `TIER_B`.
 
@@ -72,9 +72,10 @@ For each candidate issue:
 2. **Classify (deterministic-first).** Run the deterministic rubric first
    (`${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/classify-model-fit.sh <body-file>`): it assigns one `ctx:*` and one
    `reasoning:*` label from file counts and verb keywords with **zero LLM cost**.
-   Only when the rubric reports `deterministic:false` (confidence below
-   `LLM_ESCALATION_THRESHOLD`) escalate that single ambiguous issue to one
-   `TIER_B` LLM tie-breaker; otherwise take the deterministic result as final.
+   Only when you judge the result ambiguous from its reported confidence and
+   rationale (the script itself never calls an LLM) escalate that single
+   ambiguous issue to one `TIER_B` LLM tie-breaker; otherwise take the
+   deterministic result as final.
    Print the rationale (and whether it was deterministic or escalated) in the
    dry-run preview.
 
