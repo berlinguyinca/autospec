@@ -13,8 +13,8 @@
 # returns non-zero on harness absence/failure so a failed explore cannot be
 # confused with a completed empty repository scan.
 #
-# Mocking: PATH-shim omx + gh; no network. The gh mock reports an issue count
-# read from a state file; the omx mock mutates that file to simulate filing.
+# Mocking: PATH-shim codex + gh; no network. The gh mock reports an issue count
+# read from a state file; the codex mock mutates that file to simulate filing.
 
 BRIDGE="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/autospec-autonomous-explore-drain.sh"
 LAUNCHER="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/autospec-autonomous.sh"

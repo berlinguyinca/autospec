@@ -24,9 +24,6 @@ AUTOSPEC_SCRIPTS_DIR="$TEMP_SCRIPTS_DIR" \
 AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
 AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
 AUTOSPEC_SKIP_SUPERPOWERS=1 \
-AUTOSPEC_SKIP_OH_MY_CODEX=1 \
-AUTOSPEC_SKIP_OH_MY_OPENCODE=1 \
-AUTOSPEC_SKIP_OH_MY_CLAUDE=1 \
 AUTOSPEC_NO_STAR_PROMPT=1 \
 CI=1 \
 bash "$SCRIPT_DIR/install.sh" --skill autospec-autonomous --harness codex >/tmp/autospec-install-path.out 2>&1
@@ -122,7 +119,7 @@ done
 
 # Premerge-gate scanner shims (issue: autospec#1693 / autotrade#1350 Part 1 systemic):
 # the gate resolves autospec-qa / autospec-secaudit with `command -v`, so the
-# installer must place PATH-resolvable shims that run the skill headlessly via omx.
+# installer must place PATH-resolvable shims that run the skill headlessly via codex exec.
 for scanner in autospec-qa autospec-secaudit; do
     shim="$TEST_HOME/.autospec/bin/$scanner"
     [ -x "$shim" ] || {
@@ -136,8 +133,8 @@ for scanner in autospec-qa autospec-secaudit; do
         cat "$shim"
         exit 1
     }
-    grep -qF 'omx exec' "$shim" || {
-        echo "FAIL: $scanner shim does not run the skill via omx exec"
+    grep -qF 'codex exec' "$shim" || {
+        echo "FAIL: $scanner shim does not run the skill via codex exec"
         cat "$shim"
         exit 1
     }
@@ -168,9 +165,6 @@ AUTOSPEC_SCRIPTS_DIR="$TEMP_SCRIPTS_DIR" \
 AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
 AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
 AUTOSPEC_SKIP_SUPERPOWERS=1 \
-AUTOSPEC_SKIP_OH_MY_CODEX=1 \
-AUTOSPEC_SKIP_OH_MY_OPENCODE=1 \
-AUTOSPEC_SKIP_OH_MY_CLAUDE=1 \
 AUTOSPEC_NO_STAR_PROMPT=1 \
 CI=1 \
 bash "$SCRIPT_DIR/install.sh" --skill autospec-autonomous --harness codex --update >/tmp/autospec-install-heal.out 2>&1
@@ -207,9 +201,6 @@ CARGO_TARGET_DIR="$TEST_TARGET_DIR" \
 AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
 AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
 AUTOSPEC_SKIP_SUPERPOWERS=1 \
-AUTOSPEC_SKIP_OH_MY_CODEX=1 \
-AUTOSPEC_SKIP_OH_MY_OPENCODE=1 \
-AUTOSPEC_SKIP_OH_MY_CLAUDE=1 \
 AUTOSPEC_NO_STAR_PROMPT=1 \
 CI=1 \
 bash "$SCRIPT_DIR/install.sh" --skill autospec-autonomous --harness codex --update >/tmp/autospec-install-heal-noop.out 2>&1

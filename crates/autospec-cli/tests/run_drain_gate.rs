@@ -24,7 +24,7 @@ impl Drain {
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(&bin).unwrap();
         write_exe(
-            &bin.join("omx"),
+            &bin.join("codex"),
             "echo 'codex_core::tools::router: error=write_stdin failed: Unknown process id 83740' >&2\nexit 1",
         );
         let h = home.display();

@@ -25,13 +25,13 @@ teardown() {
   cleanup_closeout_fixture
 }
 
-@test "run-drain: exits when omx child makes no progress past stall timeout" {
-  cat > "$TEST_TMP/bin/omx" <<'EOF'
+@test "run-drain: exits when codex child makes no progress past stall timeout" {
+  cat > "$TEST_TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$$" > "$HOME/omx.pid"
+printf '%s\n' "$$" > "$HOME/codex.pid"
 exec sleep 30
 EOF
-  chmod +x "$TEST_TMP/bin/omx"
+  chmod +x "$TEST_TMP/bin/codex"
 
   PATH="$TEST_TMP/bin:$PATH" \
   AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=1 \
@@ -57,21 +57,21 @@ EOF
 
   [ "${status:-0}" -eq 124 ]
   grep -q "stalled after 1s with no output" "$TEST_TMP/drain.out"
-  if [ -f "$HOME/omx.pid" ]; then
+  if [ -f "$HOME/codex.pid" ]; then
     # kill -0 succeeds against an unreaped zombie (#4429): the pid is gone
     # when it has no /proc entry or its state is Z; a live state fails.
-    omx_state="$(sed 's/^.*) //' "/proc/$(cat "$HOME/omx.pid")/stat" 2>/dev/null | awk '{print $1}')"
-    [ "$omx_state" = "Z" ] || [ -z "$omx_state" ]
+    codex_state="$(sed 's/^.*) //' "/proc/$(cat "$HOME/codex.pid")/stat" 2>/dev/null | awk '{print $1}')"
+    [ "$codex_state" = "Z" ] || [ -z "$codex_state" ]
   fi
 }
 
-@test "run-drain: returns successful omx child status when it completes" {
-  cat > "$TEST_TMP/bin/omx" <<'EOF'
+@test "run-drain: returns successful codex child status when it completes" {
+  cat > "$TEST_TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
-printf 'omx completed\n'
+printf 'codex completed\n'
 exit 0
 EOF
-  chmod +x "$TEST_TMP/bin/omx"
+  chmod +x "$TEST_TMP/bin/codex"
 
   PATH="$TEST_TMP/bin:$PATH" \
   AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=10 \
@@ -79,16 +79,16 @@ EOF
   run bash "$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"omx completed"* ]]
+  [[ "$output" == *"codex completed"* ]]
 }
 
 @test "run-drain: active issue heartbeat counts as progress during stdout silence" {
-  cat > "$TEST_TMP/bin/omx" <<'EOF'
+  cat > "$TEST_TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 sleep 4
 exit 0
 EOF
-  chmod +x "$TEST_TMP/bin/omx"
+  chmod +x "$TEST_TMP/bin/codex"
 
   hb_dir="$HOME/.autospec/process-heartbeats/berlinguyinca__autospec"
   mkdir -p "$hb_dir"
@@ -111,8 +111,8 @@ EOF
   [[ "$output" != *"stalled after"* ]]
 }
 
-@test "run-drain: follows declared validation log progress from a quiet omx child" {
-  cat > "$TEST_TMP/bin/omx" <<'EOF'
+@test "run-drain: follows declared validation log progress from a quiet codex child" {
+  cat > "$TEST_TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 for _ in 1 2 3; do
   printf 'validate tick\n' >> "$AUTOSPEC_AUTONOMOUS_DRAIN_LOG"
@@ -120,7 +120,7 @@ for _ in 1 2 3; do
 done
 exit 0
 EOF
-  chmod +x "$TEST_TMP/bin/omx"
+  chmod +x "$TEST_TMP/bin/codex"
 
   PATH="$TEST_TMP/bin:$PATH" \
   AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=2 \
@@ -132,8 +132,8 @@ EOF
   [ "$(grep -c 'validate tick' "$TEST_TMP/validate-1840-cleanenv.log")" -eq 3 ]
 }
 
-@test "run-drain: treats heartbeat updates as progress from a quiet omx child" {
-  cat > "$TEST_TMP/bin/omx" <<'EOF'
+@test "run-drain: treats heartbeat updates as progress from a quiet codex child" {
+  cat > "$TEST_TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 heartbeat_dir="$HOME/.autospec/process-heartbeats/berlinguyinca_autospec"
 mkdir -p "$heartbeat_dir"
@@ -143,7 +143,7 @@ for tick in 1 2 3; do
 done
 exit 0
 EOF
-  chmod +x "$TEST_TMP/bin/omx"
+  chmod +x "$TEST_TMP/bin/codex"
 
   PATH="$TEST_TMP/bin:$PATH" \
   AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=2 \
@@ -155,12 +155,12 @@ EOF
 }
 
 @test "run-drain: records closeout hang when issue wrapper has no child progress" {
-  cat > "$TEST_TMP/bin/omx" <<'EOF'
+  cat > "$TEST_TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$$" > "$HOME/omx.pid"
+printf '%s\n' "$$" > "$HOME/codex.pid"
 exec sleep 30
 EOF
-  chmod +x "$TEST_TMP/bin/omx"
+  chmod +x "$TEST_TMP/bin/codex"
 
   PATH="$TEST_TMP/bin:$PATH" \
   AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=1 \
@@ -194,13 +194,13 @@ EOF
 
 
 @test "run-drain: records closeout hang for wrapper child with no artifact progress" {
-  cat > "$TEST_TMP/bin/omx" <<'EOF'
+  cat > "$TEST_TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$$" > "$HOME/omx.pid"
+printf '%s\n' "$$" > "$HOME/codex.pid"
 (sleep 30) &
 wait
 EOF
-  chmod +x "$TEST_TMP/bin/omx"
+  chmod +x "$TEST_TMP/bin/codex"
 
   PATH="$TEST_TMP/bin:$PATH" \
   AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=1 \
@@ -233,12 +233,12 @@ EOF
 }
 
 @test "run-drain: recovers stale wait handle by merging green in-progress PR" {
-  cat > "$TEST_TMP/bin/omx" <<'EOF'
+  cat > "$TEST_TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 printf 'codex_core::tools::router: error=write_stdin failed: Unknown process id 83740\n' >&2
 exit 1
 EOF
-  chmod +x "$TEST_TMP/bin/omx"
+  chmod +x "$TEST_TMP/bin/codex"
 
   cat > "$TEST_TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -290,13 +290,13 @@ sleep 30
 EOF
   chmod +x "$HOME/term-resistant.sh"
 
-  cat > "$TEST_TMP/bin/omx" <<'EOF'
+  cat > "$TEST_TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$$" > "$HOME/omx.pid"
+printf '%s\n' "$$" > "$HOME/codex.pid"
 "$HOME/term-resistant.sh" &
 wait
 EOF
-  chmod +x "$TEST_TMP/bin/omx"
+  chmod +x "$TEST_TMP/bin/codex"
 
   PATH="$TEST_TMP/bin:$PATH" \
   AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=1 \
@@ -322,16 +322,16 @@ EOF
 
   [ "${status:-0}" -eq 124 ]
   grep -q "stalled after 1s with no output" "$TEST_TMP/drain-kill.out"
-  [ -f "$HOME/omx.pid" ]
+  [ -f "$HOME/codex.pid" ]
   [ -f "$HOME/term-resistant.pid" ]
   # kill -0 succeeds against an unreaped zombie (#4429): gone means no /proc
   # entry or state Z.
   tr_state="$(sed 's/^.*) //' "/proc/$(cat "$HOME/term-resistant.pid")/stat" 2>/dev/null | awk '{print $1}')"
   [ "$tr_state" = "Z" ] || [ -z "$tr_state" ]
-  # No live member may remain in the omx process group: kill -0 on a group
+  # No live member may remain in the codex process group: kill -0 on a group
   # succeeds while even one unreaped zombie member lingers, so count
   # non-zombie members from /proc (final statement — the verdict).
-  awk -v pg="$(cat "$HOME/omx.pid")" '
+  awk -v pg="$(cat "$HOME/codex.pid")" '
       { s = $0; sub(/^.*) /, "", s); split(s, a, " ");
         if (a[3] == pg && a[1] != "Z") live = 1 }
       END { exit live ? 1 : 0 }

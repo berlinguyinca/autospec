@@ -11,8 +11,8 @@
 #   ensure-tool.sh <tool>          # ensure <tool> is on PATH; install if absent
 #
 # Supported tools (baked-in table): ajv, bash, bats, bun, cargo, claude, codex,
-# curl, gh, git, gitleaks, jq, license-checker, mempalace, node, npm, omc, omx,
-# oh-my-opencode, opencode, pipx, python3, rustc, semgrep, trivy, uv, yq
+# curl, gh, git, gitleaks, jq, license-checker, mempalace, node, npm,
+# opencode, pipx, python3, rustc, semgrep, trivy, uv, yq
 # Unknown tools are a silent no-op (exit 0).
 #
 # Exit codes:
@@ -226,15 +226,6 @@ case "$TOOL" in
   node|npm)
     _try_brew node || _try_apt nodejs npm || _try_dnf nodejs npm || _try_yum nodejs npm || _try_pacman nodejs npm \
       || _try_apk nodejs npm || _try_winget OpenJS.NodeJS.LTS || _try_choco nodejs-lts || _try_scoop nodejs-lts || true
-    ;;
-  oh-my-opencode)
-    _try_npm oh-my-opencode || true
-    ;;
-  omc)
-    _try_npm oh-my-claude-sisyphus || true
-    ;;
-  omx)
-    _try_npm oh-my-codex || true
     ;;
   opencode)
     _try_npm opencode-ai || true

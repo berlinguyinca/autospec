@@ -406,7 +406,7 @@ fn termination_attempt_end(
 }
 
 fn spawn_child(options: &Options) -> Result<Child, CommandFailure> {
-    let input = DrainExecutorInput::omx_autospec_run(&options.repo_dir)
+    let input = DrainExecutorInput::codex_autospec_run(&options.repo_dir)
         .map_err(CommandFailure::diagnostic)?;
     spawn_input(options, &input)
 }

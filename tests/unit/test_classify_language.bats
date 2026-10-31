@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # tests/unit/test_classify_language.bats — bats coverage for classify-language.sh
 # (language-selection ranks 1-5: explicit-with-path, inherited, explicit-prose,
-# repo-dominant, chosen, with Tier-B tie-break)
+# repo-dominant, chosen, no LLM tie-break)
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -381,30 +381,21 @@ EOF
   echo "$output" | jq -e '.lang == "rust" and .source == "chosen" and .confidence == 0.7 and .deterministic == true' >/dev/null
 }
 
-@test "classify-language: genuine tie makes exactly one Tier-B call" {
+@test "classify-language: genuine tie never calls omc and abstains with exit 2 lang:unknown" {
   make_no_marker_root
   make_fake_omc
   write_tie_body
+  local telemetry_file="$WORK/empty-repo/.autospec/telemetry/classify-language.jsonl"
+  local before=0
+  [ -f "$telemetry_file" ] && before="$(wc -l < "$telemetry_file")"
   run env AUTOSPEC_REPO_ROOT="$WORK/empty-repo" \
     PATH="$WORK/fakebin:$PATH" \
     FAKE_OMC_CALLS="$WORK/omc-calls" \
     FAKE_OMC_RETURN="go" \
     bash "$BIN" "$WORK/tie.md" --json
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.lang == "go" and .source == "chosen" and .confidence == 0.6 and .deterministic == false' >/dev/null
-  [ "$(wc -l < "$WORK/omc-calls")" -eq 1 ]
-}
-
-@test "classify-language: Tier-B unavailable -> exit 2 lang:unknown" {
-  make_no_marker_root
-  write_tie_body
-  local telemetry_file="$WORK/empty-repo/.autospec/telemetry/classify-language.jsonl"
-  local before=0
-  [ -f "$telemetry_file" ] && before="$(wc -l < "$telemetry_file")"
-  run env AUTOSPEC_REPO_ROOT="$WORK/empty-repo" PATH="/usr/bin:/bin" \
-    bash "$BIN" "$WORK/tie.md" --json
   [ "$status" -eq 2 ]
   echo "$output" | jq -e '.lang == "unknown" and .source == "unknown" and .confidence == 0.0 and .deterministic == false' >/dev/null
+  [ ! -e "$WORK/omc-calls" ]
   local after=0
   [ -f "$telemetry_file" ] && after="$(wc -l < "$telemetry_file")"
   [ "$after" -gt "$before" ]

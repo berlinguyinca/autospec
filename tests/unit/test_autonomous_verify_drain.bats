@@ -4,14 +4,14 @@ setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     TMP="$(mktemp -d -t autospec-verify-bound.XXXXXX)"
     mkdir -p "$TMP/bin"
-    cat > "$TMP/bin/omx" <<'EOF'
+    cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 while :; do
     printf 'chatty harness heartbeat\n'
     sleep 0.2
 done
 EOF
-    chmod +x "$TMP/bin/omx"
+    chmod +x "$TMP/bin/codex"
     export PATH="$TMP/bin:$PATH"
     printf '{"deduped":[{"norm_title":"fix parser","title":"fix parser","evidence":"README.md:1","estimated_complexity":"small"}]}' > "$TMP/dedup.json"
     export AUTOSPEC_EXPLORE_DEDUPED_IN="$TMP/dedup.json"

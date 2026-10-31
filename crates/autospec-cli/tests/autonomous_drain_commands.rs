@@ -205,7 +205,7 @@ fn rust_drain_source_does_not_restore_shell_or_legacy_drain_authority() {
     let tokens = lex_rust_source(&source);
 
     assert!(
-        lexically_references(&tokens, "DrainExecutorInput", "omx_autospec_run"),
+        lexically_references(&tokens, "DrainExecutorInput", "codex_autospec_run"),
         "drain command must receive typed executor input from autospec-core"
     );
     assert!(
@@ -233,12 +233,12 @@ fn rust_drain_source_does_not_restore_shell_or_legacy_drain_authority() {
 fn drain_dispatches_literal_autospec_run_token_without_legacy_script_authority() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
-    let args_file = fixture.root.join("omx-args");
+    let args_file = fixture.root.join("codex-args");
     let legacy_marker = fixture.root.join("legacy-drain-invoked");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AUTOSPEC_TEST_OMX_ARGS\"\n",
+        &bin.join("codex"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AUTOSPEC_TEST_CODEX_ARGS\"\n",
     );
     write_executable(
         &bin.join("autospec-autonomous-run-drain.sh"),
@@ -248,13 +248,13 @@ fn drain_dispatches_literal_autospec_run_token_without_legacy_script_authority()
 
     let output = fixture
         .command(&bin)
-        .env("AUTOSPEC_TEST_OMX_ARGS", &args_file)
+        .env("AUTOSPEC_TEST_CODEX_ARGS", &args_file)
         .env("AUTOSPEC_TEST_LEGACY_MARKER", &legacy_marker)
         .output()
         .expect("run drain with typed executor input");
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
-    let args = fs::read_to_string(&args_file).expect("read captured omx args");
+    let args = fs::read_to_string(&args_file).expect("read captured codex args");
     assert_eq!(
         args.lines().collect::<Vec<_>>(),
         [
@@ -272,13 +272,42 @@ fn drain_dispatches_literal_autospec_run_token_without_legacy_script_authority()
 }
 
 #[test]
+fn drain_never_launches_a_legacy_omx_executable_on_path() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let codex_args = fixture.root.join("codex-args");
+    let omx_marker = fixture.root.join("omx-launched");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("codex"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AUTOSPEC_TEST_CODEX_ARGS\"\n",
+    );
+    write_executable(
+        &bin.join("omx"),
+        "#!/bin/sh\nprintf omx > \"$AUTOSPEC_TEST_OMX_MARKER\"\nexit 9\n",
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture
+        .command(&bin)
+        .env("AUTOSPEC_TEST_CODEX_ARGS", &codex_args)
+        .env("AUTOSPEC_TEST_OMX_MARKER", &omx_marker)
+        .output()
+        .expect("run drain with both codex and omx on PATH");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(!omx_marker.exists(), "drain must not launch omx");
+    assert!(codex_args.exists(), "drain must launch codex natively");
+}
+
+#[test]
 fn malformed_repo_is_rejected_before_state_or_child_creation() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
     let launched = fixture.root.join("launched");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         "#!/bin/sh\nprintf launched > \"$AUTOSPEC_TEST_DRAIN_LAUNCHED\"\n",
     );
 
@@ -301,7 +330,7 @@ fn missing_origin_is_rejected_before_state_or_child_creation() {
     let launched = fixture.root.join("launched");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         "#!/bin/sh\nprintf launched > \"$AUTOSPEC_TEST_DRAIN_LAUNCHED\"\n",
     );
     let removed = Command::new("git")
@@ -334,7 +363,7 @@ fn unsupported_origin_is_rejected_before_state_or_child_creation() {
     let launched = fixture.root.join("launched");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         "#!/bin/sh\nprintf launched > \"$AUTOSPEC_TEST_DRAIN_LAUNCHED\"\n",
     );
     let changed = Command::new("git")
@@ -372,7 +401,7 @@ fn declared_drain_log_growth_is_not_liveness_evidence() {
     let log = fixture.repo_dir.join("validation.log");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         "#!/bin/sh\n\
          i=0\n\
          while [ \"$i\" -lt 30 ]; do\n\
@@ -425,7 +454,7 @@ fn quiet_child_growing_the_closeout_artifact_is_not_stalled() {
     let bin = fixture.root.join("bin");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         "#!/bin/sh\n\
          mkdir -p \"$AUTOSPEC_TEST_REPO_DIR/.autospec\"\n\
          i=0\n\
@@ -479,7 +508,7 @@ fn quiet_child_with_heartbeat_progress_completes_without_termination() {
     let bin = fixture.root.join("bin");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 heartbeat_dir="$AUTOSPEC_PROCESS_HEARTBEAT_DIR/o5_owner_r4_repo"
@@ -520,7 +549,7 @@ fn quiet_child_with_claim_heartbeat_progress_completes_without_termination() {
     let bin = fixture.root.join("bin");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 heartbeat_dir="$AUTOSPEC_HEARTBEAT_DIR/o5_owner_r4_repo"
@@ -553,7 +582,7 @@ fn claim_heartbeat_wins_when_process_root_conflicts() {
     let claim_root = fixture.root.join("claim-heartbeats");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 heartbeat_dir="$AUTOSPEC_HEARTBEAT_DIR/o5_owner_r4_repo"
@@ -585,7 +614,7 @@ fn quiet_child_with_watchdog_heartbeat_progress_completes_without_termination() 
     let watchdog_root = fixture.root.join("watchdog");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 heartbeat_dir="$AUTOSPEC_WATCHDOG_DIR/process-heartbeats/o5_owner_r4_repo"
@@ -623,7 +652,7 @@ fn json_drain_keeps_child_output_out_of_structured_stdout() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
     fs::create_dir_all(&bin).expect("create fake bin");
-    write_executable(&bin.join("omx"), "#!/bin/sh\nprintf 'agent output\\n'\n");
+    write_executable(&bin.join("codex"), "#!/bin/sh\nprintf 'agent output\\n'\n");
     write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
 
     let output = fixture.run(&bin, &["--json"]);
@@ -640,7 +669,7 @@ fn matching_session_reconciliation_cancels_the_startup_deadline() {
     let bin = fixture.root.join("bin");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 printf 'session_start child=child-1850 session_turns=0 issue_claim=none\n'
@@ -666,7 +695,7 @@ fn matching_reconciliation_from_the_other_pipe_cancels_an_inverted_delivery() {
     let bin = fixture.root.join("bin");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 printf 'session_start_reconciled child=child-cross-pipe-1850 session_turns=1 issue_claim=1850\n' >&2
@@ -695,7 +724,7 @@ fn unreconciled_startup_exhausts_bounded_retries_and_kills_every_process_group()
     let descendant_pids = fixture.root.join("descendant-pids");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 attempt=0
@@ -747,13 +776,13 @@ done
 }
 
 #[test]
-fn startup_retry_relaunches_the_actual_omx_child_and_then_reconciles() {
+fn startup_retry_relaunches_the_actual_codex_child_and_then_reconciles() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
     let attempts = fixture.root.join("attempts");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 attempt=0
@@ -806,7 +835,7 @@ fn startup_retry_exhaustion_survives_separate_drain_invocations() {
     fs::create_dir_all(&bin).expect("create fake bin");
     fs::write(&phase, "first\n").expect("write first invocation phase");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 attempt=0
@@ -886,7 +915,7 @@ fn successful_command_clears_recovered_startup_failures_without_session_output()
     let attempts = fixture.root.join("attempts");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 attempt=0
@@ -931,7 +960,7 @@ fn session_event_persistence_failure_terminates_the_live_process_group() {
     fs::create_dir_all(fixture.session_events_path())
         .expect("make the event journal path unwritable as a file");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 printf '%s\n' "$$" > "$AUTOSPEC_TEST_LEADER_PID"
@@ -979,7 +1008,7 @@ fn startup_event_parsing_drains_output_larger_than_pipe_capacity() {
     let bin = fixture.root.join("bin");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 printf 'session_start child=child-1850 session_turns=0 issue_claim=none\n'
@@ -1007,7 +1036,7 @@ fn quiet_child_with_github_progress_warns_and_completes() {
     let gh_counter = fixture.root.join("gh-counter");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 set -eu
 for attempt in 1 2 3 4 5 6 7 8; do
@@ -1056,7 +1085,7 @@ fn recovered_github_baseline_is_not_false_progress() {
     let bin = fixture.root.join("bin");
     let gh_counter = fixture.root.join("gh-counter");
     fs::create_dir_all(&bin).expect("create fake bin");
-    write_executable(&bin.join("omx"), "#!/bin/sh\nexec sleep 30\n");
+    write_executable(&bin.join("codex"), "#!/bin/sh\nexec sleep 30\n");
     write_executable(
         &bin.join("gh"),
         r#"#!/bin/sh
@@ -1099,7 +1128,7 @@ fn silent_live_child_is_reaped_before_process_group_liveness_check() {
     let child_pid = fixture.root.join("child-pid");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 printf '%s\n' "$$" > "$AUTOSPEC_TEST_CHILD_PID"
 exec sleep 30
@@ -1139,7 +1168,7 @@ fn child_exit_while_termination_is_attempted_is_reported_as_complete() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
     fs::create_dir_all(&bin).expect("create fake bin");
-    write_executable(&bin.join("omx"), "#!/bin/sh\nexec sleep 2\n");
+    write_executable(&bin.join("codex"), "#!/bin/sh\nexec sleep 2\n");
     write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
     write_executable(&bin.join("kill"), "#!/bin/sh\nsleep 2\nexit 1\n");
 
@@ -1158,7 +1187,7 @@ fn stalled_drain_terminates_the_wrapper_and_its_descendant() {
     let descendant_pid = fixture.root.join("descendant-pid");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 printf '%s\n' "$$" > "$AUTOSPEC_TEST_WRAPPER_PID"
 sleep 30 &
@@ -1193,7 +1222,7 @@ fn stalled_drain_kills_a_term_ignoring_descendant_before_joining_readers() {
     let descendant_pid = fixture.root.join("descendant-pid");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 trap 'exit 0' TERM
 (
@@ -1235,7 +1264,7 @@ fn completed_leader_terminates_a_descendant_that_keeps_both_pipes_open() {
     let descendant_pid = fixture.root.join("descendant-pid");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
-        &bin.join("omx"),
+        &bin.join("codex"),
         r#"#!/bin/sh
 (
   trap '' TERM
@@ -1269,7 +1298,7 @@ fn child_exit_is_not_blocked_by_a_hung_github_snapshot() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
     fs::create_dir_all(&bin).expect("create fake bin");
-    write_executable(&bin.join("omx"), "#!/bin/sh\nexec sleep 1\n");
+    write_executable(&bin.join("codex"), "#!/bin/sh\nexec sleep 1\n");
     write_executable(&bin.join("gh"), "#!/bin/sh\nsleep 15\nprintf '[]\\n'\n");
 
     let started = Instant::now();
@@ -1289,7 +1318,7 @@ fn child_exit_during_final_reconciliation_wins_over_termination() {
     let bin = fixture.root.join("bin");
     let gh_counter = fixture.root.join("gh-counter");
     fs::create_dir_all(&bin).expect("create fake bin");
-    write_executable(&bin.join("omx"), "#!/bin/sh\nsleep 2\n");
+    write_executable(&bin.join("codex"), "#!/bin/sh\nsleep 2\n");
     write_executable(
         &bin.join("gh"),
         r#"#!/bin/sh

@@ -33,23 +33,23 @@ DRAIN="$BATS_TEST_DIRNAME/../../scripts/autospec-autonomous-verify-drain.sh"
   export AUTOSPEC_REPO_DIR="$TMP"
 
   # Evidence names no real repository path, so the deterministic fallback
-  # rejects and the drain fails closed after the watchdog terminates omx.
+  # rejects and the drain fails closed after the watchdog terminates codex.
   cat > "$DEDUPED_IN" <<'JSON'
 {"deduped":[
   {"norm_title":"stall probe","title":"feat: stall probe","evidence":"no repository path here","estimated_complexity":"small","confidence":0.5}
 ]}
 JSON
 
-  # The omx shim spawns a long-lived descendant inside its isolated process
+  # The codex shim spawns a long-lived descendant inside its isolated process
   # group, then goes silent so the stall watchdog fires.
-  cat > "$TMP/bin/omx" <<EOF
+  cat > "$TMP/bin/codex" <<EOF
 #!/usr/bin/env bash
 sleep 300 &
 echo "\$!" > "$DESC_FILE"
 printf 'skeptic started\n'
 sleep 300
 EOF
-  chmod +x "$TMP/bin/omx"
+  chmod +x "$TMP/bin/codex"
 
   run bash "$DRAIN"
   [ "$status" -ne 0 ] || { echo "$output"; false; }

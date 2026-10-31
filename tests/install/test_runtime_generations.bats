@@ -565,8 +565,8 @@ SH
 
 @test "top-level installer delegates runtime publication to the narrow installer" {
   run env HOME="$TEST_HOME" AUTOSPEC_SKIP_SYSTEM_TOOLS=1 AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
-    AUTOSPEC_SKIP_SUPERPOWERS=1 AUTOSPEC_SKIP_OH_MY_CODEX=1 AUTOSPEC_SKIP_OH_MY_OPENCODE=1 \
-    AUTOSPEC_SKIP_OH_MY_CLAUDE=1 AUTOSPEC_NO_STAR_PROMPT=1 CI=1 \
+    AUTOSPEC_SKIP_SUPERPOWERS=1 \
+    AUTOSPEC_NO_STAR_PROMPT=1 CI=1 \
     bash "$REPO_ROOT/install.sh" --skill autospec-autonomous --harness codex --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"autospec-runtime-install.sh --repo-dir"* ]]

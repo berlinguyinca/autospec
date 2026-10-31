@@ -242,25 +242,13 @@ run_ensure_isolated() {
   grep -q "npm .*opencode-ai" "$LOG"
 }
 
-@test "omx absent + npm available → installs oh-my-codex via npm" {
+@test "legacy oh-my-* tools are unknown: silent no-op, nothing is installed" {
   mk_installer npm
-  run_ensure_isolated omx
-  [ "$status" -eq 0 ]
-  grep -q "npm .*oh-my-codex" "$LOG"
-}
-
-@test "omc absent + npm available → installs oh-my-claude via npm" {
-  mk_installer npm
-  run_ensure_isolated omc
-  [ "$status" -eq 0 ]
-  grep -q "npm .*oh-my-claude-sisyphus" "$LOG"
-}
-
-@test "oh-my-opencode absent + npm available → installs oh-my-opencode via npm" {
-  mk_installer npm
-  run_ensure_isolated oh-my-opencode
-  [ "$status" -eq 0 ]
-  grep -q "npm .*oh-my-opencode" "$LOG"
+  for legacy in omx omc oh-my-opencode; do
+    run_ensure_isolated "$legacy"
+    [ "$status" -eq 0 ]
+  done
+  ! grep -q "oh-my" "$LOG"
 }
 
 # ── mempalace pip fallback chain ─────────────────────────────────────────────
