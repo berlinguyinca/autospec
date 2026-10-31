@@ -52,9 +52,9 @@ fn silent_live_child_is_terminated_only_after_the_stall_window() {
 
 #[test]
 fn drain_executor_input_preserves_autospec_run_as_literal_typed_data() {
-    let input = DrainExecutorInput::omx_autospec_run("/repo").expect("typed drain executor input");
+    let input = DrainExecutorInput::codex_autospec_run("/repo").expect("typed drain executor input");
 
-    assert_eq!(input.program(), "omx");
+    assert_eq!(input.program(), "codex");
     assert_eq!(input.skill_identifier(), "$autospec-run");
     assert_eq!(
         input.arguments(),

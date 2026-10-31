@@ -1989,7 +1989,7 @@ fn run_ingests_an_explicit_agent_result_without_launching_an_agent_or_validation
 fn run_persists_literal_resume_command_without_shell_expansion_under_set_u() {
     let root = temp_dir("autospec-run-literal-resume-command");
     let script = concat!(
-        "AUTOSPEC_RESUME_COMMAND='omx exec --cd /repo $autospec-run' ",
+        "AUTOSPEC_RESUME_COMMAND='codex exec --cd /repo $autospec-run' ",
         "\"$AUTOSPEC_BIN\" run --run run-cli-literal-resume ",
         "--spec v67-agent-integration-contracts --json"
     );
@@ -2019,7 +2019,7 @@ fn run_persists_literal_resume_command_without_shell_expansion_under_set_u() {
     assert_eq!(parsed["resume_command"]["kind"], "literal");
     assert_eq!(
         parsed["resume_command"]["value"],
-        "omx exec --cd /repo $autospec-run"
+        "codex exec --cd /repo $autospec-run"
     );
 }
 

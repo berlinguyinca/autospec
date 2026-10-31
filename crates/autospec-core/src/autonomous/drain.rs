@@ -1,5 +1,5 @@
 const AUTOSPEC_RUN_SKILL_IDENTIFIER: &str = "$autospec-run";
-const OMX_EXECUTOR_PROGRAM: &str = "omx";
+const CODEX_EXECUTOR_PROGRAM: &str = "codex";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrainExecutorInput {
@@ -9,14 +9,14 @@ pub struct DrainExecutorInput {
 }
 
 impl DrainExecutorInput {
-    pub fn omx_autospec_run(repo_dir: impl Into<String>) -> Result<Self, String> {
+    pub fn codex_autospec_run(repo_dir: impl Into<String>) -> Result<Self, String> {
         let repo_dir = repo_dir.into();
         if repo_dir.trim().is_empty() {
             return Err("drain executor repo dir must not be empty".to_string());
         }
         let skill_identifier = AUTOSPEC_RUN_SKILL_IDENTIFIER.to_string();
         Ok(Self {
-            program: OMX_EXECUTOR_PROGRAM.to_string(),
+            program: CODEX_EXECUTOR_PROGRAM.to_string(),
             arguments: vec![
                 "exec".to_string(),
                 "--cd".to_string(),
