@@ -75,13 +75,6 @@ exit 0
 EOS
     chmod +x "$fake_bin/npm"
 
-    # Stub the oh-my tools so install.sh thinks they're already present
-    # (install_npm_ecosystem_package skips the npm call when command_present).
-    for _tool in omx omc oh-my-opencode; do
-        printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_bin/$_tool"
-        chmod +x "$fake_bin/$_tool"
-    done
-
     printf '%s\n' "$fake_bin"
 }
 

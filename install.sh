@@ -72,10 +72,7 @@ required_system_tools() {
 AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS="$(required_system_tools)"
 readonly AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS
 AUTOSPEC_HARNESS_TOOLS="${AUTOSPEC_HARNESS_TOOLS:-codex claude opencode}"
-AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-yq node npm bun bats omx omc oh-my-opencode mempalace ajv}"
-OH_MY_CODEX_PACKAGE="${OH_MY_CODEX_PACKAGE:-oh-my-codex}"
-OH_MY_OPENCODE_PACKAGE="${OH_MY_OPENCODE_PACKAGE:-oh-my-opencode}"
-OH_MY_CLAUDE_PACKAGE="${OH_MY_CLAUDE_PACKAGE:-oh-my-claude-sisyphus}"
+AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-yq node npm bun bats mempalace ajv}"
 ENSURE_TOOL_SCRIPT="$REPO_ROOT/skills/autospec-shared/scripts/ensure-tool.sh"
 CODEX_SANDBOX_HELPER="$REPO_ROOT/scripts/ensure-codex-sandbox.sh"
 DEPENDENCIES_PRESENT=""
@@ -341,23 +338,23 @@ write_scanner_shim() {
         printf '%s\n' '# autospec premerge-gate scanner shim (installed by install.sh).'
         printf '%s\n' '# The gate (autonomous-premerge-gate.sh) resolves this scanner with'
         printf '%s\n' '# `command -v`; the real scanner is a harness skill, not a PATH command, so'
-        printf '%s\n' '# this shim runs it headlessly via omx (parity with the drain wrapper) and'
+        printf '%s\n' '# this shim runs it headlessly via codex exec (parity with the drain wrapper) and'
         printf '%s\n' '# streams findings to stdout. It deliberately does NOT set'
         printf '%s\n' '# AUTOSPEC_*_PRESENT_OVERRIDE, which would fake presence and skip the scan.'
         printf '%s\n' 'set -eu'
         printf '%s\n' 'REPO_DIR="${AUTOSPEC_REPO_DIR:-$PWD}"'
-        printf '%s\n' 'if ! command -v omx >/dev/null 2>&1; then'
-        printf '    echo "%s: omx not found on PATH; cannot invoke the %s skill" >&2\n' "$skill" "$skill"
+        printf '%s\n' 'if ! command -v codex >/dev/null 2>&1; then'
+        printf '    echo "%s: codex not found on PATH; cannot invoke the %s skill" >&2\n' "$skill" "$skill"
         printf '%s\n' '    exit 2'
         printf '%s\n' 'fi'
-        # omx exec wraps `codex exec [OPTIONS] [PROMPT]`: fold any gate args (e.g.
+        # `codex exec [OPTIONS] [PROMPT]`: fold any gate args (e.g.
         # --branch <b>) INTO the single prompt so codex does not reject them as
         # unknown options (which would silently empty the scan).
         printf "PROMPT='\$%s'\n" "$skill"
         printf '%s\n' 'if [ "$#" -gt 0 ]; then'
         printf '%s\n' '    PROMPT="$PROMPT $*"'
         printf '%s\n' 'fi'
-        printf '%s\n' 'exec omx exec --cd "$REPO_DIR" --dangerously-bypass-approvals-and-sandbox "$PROMPT"'
+        printf '%s\n' 'exec codex exec --cd "$REPO_DIR" --dangerously-bypass-approvals-and-sandbox "$PROMPT"'
     } > "$target"
     chmod +x "$target"
 }
@@ -659,38 +656,6 @@ print_dependency_summary() {
     fi
 }
 
-install_npm_ecosystem_package() {
-    label="$1"
-    package_name="$2"
-    command_name="$3"
-    skip_var="$4"
-
-    eval "skip_val=\${${skip_var}:-0}"
-    if [ "$skip_val" = "1" ]; then
-        info "$label: skipped by $skip_var=1"
-        return 0
-    fi
-
-    if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] $label: would npm install -g $package_name when $command_name is missing or --update is set"
-        return 0
-    fi
-
-    if command_present "$command_name" && [ "$UPDATE" -eq 0 ]; then
-        info "$label: $command_name present ($(command -v "$command_name"))"
-        return 0
-    fi
-
-    if ! command_present npm; then
-        warn "$label: npm not found; install Node.js/npm or rerun after ensure_system_tools succeeds"
-        return 0
-    fi
-
-    npm install -g "$package_name" >/dev/null 2>&1 \
-        && info "$label: installed/updated $package_name" \
-        || warn "$label: npm install -g $package_name failed; continuing"
-}
-
 bootstrap_superpowers_codex_link() {
     src="$SUPERPOWERS_REPO_DIR/skills"
     target="$SUPERPOWERS_CODEX_SKILLS_DIR/superpowers"
@@ -787,35 +752,6 @@ bootstrap_superpowers() {
     bootstrap_superpowers_opencode_plugin
 }
 
-run_peer_setup_commands() {
-    if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] bootstrap_oh_my_codex: would run omx setup --scope user --skill-target codex-home"
-        info "[dry-run] bootstrap_oh_my_opencode: would initialize oh-my-opencode only when config is missing"
-        info "[dry-run] bootstrap_oh_my_claude: would run omc setup --quiet"
-        return 0
-    fi
-
-    if command_present omx; then
-        omx setup --scope user --skill-target codex-home >/dev/null 2>&1 \
-            && info "bootstrap_oh_my_codex: refreshed OMX setup" \
-            || warn "bootstrap_oh_my_codex: omx setup failed; continuing"
-    fi
-    if command_present oh-my-opencode; then
-        if [ -f "$OPENCODE_CONFIG_ROOT/oh-my-openagent.json" ]; then
-            info "bootstrap_oh_my_opencode: existing config left untouched"
-        else
-            oh-my-opencode install --no-tui --claude=no --openai=no --gemini=no --copilot=no --skip-auth >/dev/null 2>&1 \
-                && info "bootstrap_oh_my_opencode: initialized OpenCode setup" \
-                || warn "bootstrap_oh_my_opencode: non-interactive setup failed; package install still completed"
-        fi
-    fi
-    if command_present omc; then
-        omc setup --quiet >/dev/null 2>&1 \
-            && info "bootstrap_oh_my_claude: refreshed OMC setup" \
-            || warn "bootstrap_oh_my_claude: omc setup failed; continuing"
-    fi
-}
-
 bootstrap_peer_ecosystems() {
     if [ "${AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP:-0}" = "1" ]; then
         info "bootstrap_peer_ecosystems: skipped by AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1"
@@ -823,10 +759,6 @@ bootstrap_peer_ecosystems() {
     fi
 
     bootstrap_superpowers
-    install_npm_ecosystem_package "bootstrap_oh_my_codex" "$OH_MY_CODEX_PACKAGE" "omx" "AUTOSPEC_SKIP_OH_MY_CODEX"
-    install_npm_ecosystem_package "bootstrap_oh_my_opencode" "$OH_MY_OPENCODE_PACKAGE" "oh-my-opencode" "AUTOSPEC_SKIP_OH_MY_OPENCODE"
-    install_npm_ecosystem_package "bootstrap_oh_my_claude" "$OH_MY_CLAUDE_PACKAGE" "omc" "AUTOSPEC_SKIP_OH_MY_CLAUDE"
-    run_peer_setup_commands
 }
 
 bootstrap_turbo() {
