@@ -982,8 +982,8 @@ Best-effort idempotent installer for autospec's required and recommended CLI
 deps via a platform fallback chain (brew / apt/dnf/yum/pacman/apk /
 winget/choco/scoop / npm / pipx / uv / pip). Baked-in tool table: `ajv`,
 `bash`, `bats`, `bun`, `cargo`, `claude`, `codex`, `curl`, `gh`, `git`,
-`gitleaks`, `jq`, `license-checker`, `mempalace`, `node`, `npm`, `omc`,
-`omx`, `oh-my-opencode`, `opencode`, `pipx`, `python3`, `rustc`, `semgrep`,
+`gitleaks`, `jq`, `license-checker`, `mempalace`, `node`, `npm`,
+`opencode`, `pipx`, `python3`, `rustc`, `semgrep`,
 `trivy`, `uv`, `yq`.
 
 ```

@@ -184,7 +184,7 @@ commands for another repository. The
 drain command invokes:
 
 ```bash
-omx exec --cd "$AUTOSPEC_REPO_DIR" --dangerously-bypass-approvals-and-sandbox '$autospec-run'
+codex exec --cd "$AUTOSPEC_REPO_DIR" --dangerously-bypass-approvals-and-sandbox '$autospec-run'
 ```
 
 Use `autospec-autonomous-status --json` for monitoring integrations; its unit
@@ -506,7 +506,7 @@ files, and issue-scoped closeout artifacts (`.autospec/run-summary.md`,
 parent wrapper is not marked stalled while an issue worker is still advancing.
 If the stall budget is reached, `autospec-autonomous-run-drain.sh` checks for
 live descendant processes and runs GitHub reconciliation before terminating the
-`omx exec` child. If an issue-scoped drain has no live descendant and no
+`codex exec` child. If an issue-scoped drain has no live descendant and no
 closeout artifact movement, it writes closeout-hang evidence before terminating
 so the conductor can advance with a precise failure reason.
 
@@ -524,7 +524,7 @@ monitor failures, not proof that the issue failed.
 - `skills/autospec-autonomous/codex/prompt.md` — Codex CLI mirror (lockstep).
 - `skills/autospec-autonomous/opencode/agent.md` — OpenCode mirror (lockstep).
 - `autospec-autonomous.sh` — installed operator lifecycle command (`start`, `list`, `status`, `timeline`, `logs`, `watch`, `stop`, `restart`).
-- `autospec-autonomous-run-drain.sh` — installed Tier-1 drain wrapper that runs `$autospec-run` through `omx exec`.
+- `autospec-autonomous-run-drain.sh` — installed Tier-1 drain wrapper that runs `$autospec-run` through `codex exec`.
 - `autospec-loop.sh` (shared loop driver, `${AUTOSPEC_SCRIPTS_DIR}/lib/`) — extended with `autospec_conductor_run()`, the never-idle conductor entry point wiring control-channel → waterfall → Tier 1.5 promotion / Tier 2–4 discovery → premerge-gate → drain → spend-ledger → resilience → digest (issue #1378); the conductor passes filed issue counts and budget issue units separately to the ledger.
 - `autonomous-control-channel.sh` — label query → command decision (Phase 1, Issue #1373).
 - `autonomous-waterfall.sh` — Tier 0/1/1.5/2/3/4 selection logic (Issue #1374, activated by issue #1529), plus capability-gated Tiers 5-7 growth outbound/define/measure (growth conductor fold-in).

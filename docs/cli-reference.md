@@ -62,13 +62,13 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec graph analyze --input <PATH> [--capacity N] [--format json\|text]` | yes | analyzes a proposed issue DAG (issue graph JSON or an issue draft array): §19 metrics JSON in stable key order with `estimated_fleet_saturation` and the 12 `autospec.define` telemetry counters, or the §24 wave projection plus §25 planner summary with `--format text`; exits `3` with the 1-line cycle path on a cyclic graph |
 | `autospec graph compare --before <PATH> --after <PATH> [--capacity N]` | yes | §25 optimizer change summary: analyzes a before/after pair of issue graphs at the same fleet capacity and prints the diff (edges removed/added, issues split/merged, edge-count delta, critical path before→after); the §23 retry is rejected and exit is `4` when the after-graph critical path grew, otherwise exit `0` |
 | `autospec autonomous resilience decide --repo OWNER/REPO [--issue N] [--budget-tokens N] [--budget-issues N]` | yes | reads resilient admission state without migration; atomic lifecycle ownership writes only canonical `owner__repo` state and starts no shell process |
-| `autospec autonomous drain --repo OWNER/REPO --repo-dir DIR [--stall-secs N] [--poll-secs N]` | yes | directly supervises the fixed `omx exec ... $autospec-run` child, preserving local/external progress and terminating only a genuinely stalled live child |
+| `autospec autonomous drain --repo OWNER/REPO --repo-dir DIR [--stall-secs N] [--poll-secs N]` | yes | directly supervises the fixed `codex exec ... $autospec-run` child, preserving local/external progress and terminating only a genuinely stalled live child |
 | `autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]` | yes | classifies changed paths against configured fenced surfaces; fenced matches exit non-zero and report quarantine evidence |
 | `autospec autonomous main-health --repo OWNER/REPO --repo-dir DIR [--branch BRANCH] [--json]` | yes | runs the Rust repository-local mainline-health probe without dispatching work |
 | `autospec autonomous start --repo OWNER/REPO --repo-dir DIR [--epic N] [--max-cycles N] [--poll-interval-sec N]` | no | refreshes to the checkout's exact immutable runtime, creates or adopts one verified run epic, then launches a lease-owned conductor |
 | `autospec autonomous resume --epic N --repo OWNER/REPO --repo-dir DIR` | no | verifies and reconstructs a managed accountability epic, reopening a closed or parked epic when safe, before conductor spawn |
 | `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR [--branch BRANCH]` | no | runs one native foreground cycle when invoked directly; a child launched by `start` inherits lifecycle ownership and repeats cycles |
-| `autospec autonomous lifecycle decide --repo OWNER/REPO [--claim-repo OWNER/REPO --claim-issue N --claim-worker ID --claim-branch NAME --claim-state active\|terminal] [--lease-age-sec N] [--stop graceful\|immediate] [--health continue\|wait\|halt] [--budget within\|soft\|hard] [--ready-tier 1\|1.5\|2\|3\|4\|5\|6\|7\|idle]` | yes | evaluates one pure typed lifecycle decision without filesystem, process, GitHub, shell, or `omx` effects |
+| `autospec autonomous lifecycle decide --repo OWNER/REPO [--claim-repo OWNER/REPO --claim-issue N --claim-worker ID --claim-branch NAME --claim-state active\|terminal] [--lease-age-sec N] [--stop graceful\|immediate] [--health continue\|wait\|halt] [--budget within\|soft\|hard] [--ready-tier 1\|1.5\|2\|3\|4\|5\|6\|7\|idle]` | yes | evaluates one pure typed lifecycle decision without filesystem, process, GitHub, shell, or `codex` effects |
 | `autospec autonomous executor-result --repo OWNER/REPO --issue N [--worker-id ID --branch NAME --outcome succeeded\|blocked\|retryable ...]` | yes | records either the exact legacy deferred receipt or one strictly validated executor outcome; it never launches work, releases a claim, or merges a PR |
 | `autospec run --run <id> --spec <id>[=<source.md>]... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command. Every `--spec` value is a bare spec id, or a spec id plus a source file staged in the same action (`id=<source.md>` — staged inputs land at `.autospec/runs/<id>/specs/<spec-id>.md` before the queue is written, and an unreadable source aborts the creation fail-closed); either all `--spec` values carry a source path or none |
 | `autospec run --ingest <agent-result.json> --run <id> --spec <id> --result-id <id> --outcome <passed\|failed\|blocked\|no-spec> [--failure-kind <kind>] [--retry-limit <n>] [--json]` | yes | validates and records an explicit local agent result; it does not launch an agent or validation command. `--outcome no-spec` parks the entry in the terminal `no-spec` state ("dispatched but could not start") with a required blocker, no failure kind, and no attempts increment — it is excluded from the re-dispatch selector and must not be reported as `no-output` |
@@ -407,7 +407,7 @@ key distinguishes repository runs from each explicit issue slice. For a selected
 the native executor bridge directly. The bridge resolves the configured Codex, Claude, or
 OpenCode harness from the installed runtime-alias table, creates or adopts the exact private
 issue worktree and runtime session, and launches the harness with an explicit local-only argument
-vector. It never delegates implementation to a shell, `omx`, `/autospec-run`, or a second queue
+vector. It never delegates implementation to a shell, `/autospec-run`, or a second queue
 owner.
 
 Harness output and phase changes are appended to the repository-scoped autonomous log consumed
@@ -496,14 +496,14 @@ status so policy config changes such as `.autospec/autospec.yml` cannot be
 treated as low-blast-radius.
 
 `autospec autonomous drain --repo OWNER/REPO --repo-dir DIR [--stall-secs N] [--poll-secs N]
-[--json]` is the Rust Tier-1 watchdog for the fixed direct `omx exec ... $autospec-run` child.
+[--json]` is the Rust Tier-1 watchdog for the fixed direct `codex exec ... $autospec-run` child.
 It forwards child output, resets the stall window when output, progress artifacts, scoped
 heartbeats, or the timeout-boundary GitHub snapshot advances, and returns the child’s actual exit
 status if it completes. External-only progress emits one
 `quiet_stdout_external_progress` warning; a genuinely silent, live child emits a
 `terminate_stalled` decision and exits `124`. Each decision is atomically recorded as
 `drain-observation.json` in the repository’s autonomous-operator scope, without raw output or
-lease tokens. The command uses direct `omx`, `gh`, and process arguments—never a shell or a
+lease tokens. The command uses direct `codex`, `gh`, and process arguments—never a shell or a
 legacy drain fallback. Existing shell launcher wiring is intentionally a separate #2076 deletion
 child; it must redirect to this command rather than reimplement this watchdog.
 

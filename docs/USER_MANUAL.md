@@ -39,8 +39,8 @@ curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstr
 The suite installer also bootstraps required and recommended local tools on a
 best-effort basis across macOS, Linux, and Windows: system CLIs (`git`, `bash`,
 `curl`, `jq`, `yq`, `gh`, `node`, `npm`, `bun`, `bats`), agent CLIs (`codex`,
-`claude`, `opencode`), and companion ecosystems (`superpowers`,
-`oh-my-codex`/OMX, `oh-my-opencode`, OMC/oh-my-claude, and turbo). Locked-down
+`claude`, `opencode`), and companion ecosystems (`superpowers`
+and turbo). Locked-down
 or offline hosts continue with warnings; use `AUTOSPEC_SKIP_SYSTEM_TOOLS=1` or
 `AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1` to opt out.
 
