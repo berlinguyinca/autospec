@@ -1016,7 +1016,7 @@ start_foreground() {
     # explore's adversarial verify stage is fail-closed: an autonomous --once run
     # with NO skeptic verdicts files ZERO proposals. Without a verifier wired,
     # detached discovery generates proposals every idle cycle but files nothing.
-    # This bridge runs the skeptic through the LLM harness (omx). Same `:-` guard
+    # This bridge runs the skeptic through the Codex CLI. Same `:-` guard
     # so operators/tests can override.
     export AUTOSPEC_EXPLORE_VERIFY_CMD="${AUTOSPEC_EXPLORE_VERIFY_CMD:-bash $SCRIPT_DIR/autospec-autonomous-verify-drain.sh}"
     export AUTOSPEC_STOP_FLAG_FILE="$STOP_FLAG_FILE"
@@ -1045,7 +1045,7 @@ start_detached() {
         [ -n "$_repo_dir" ] || _repo_dir="$DEFAULT_REPO_DIR"
     fi
     # Fail loud (Rule 12): never launch the conductor against a non-checkout —
-    # the omx-bridged explore/drain would `--cd` into it and analyze garbage,
+    # the codex-bridged explore/drain would `--cd` into it and analyze garbage,
     # burning tokens silently.
     if ! git -C "$_repo_dir" rev-parse --show-toplevel >/dev/null 2>&1; then
         die "resolved repo dir ($_repo_dir) is not a git checkout — pass --repo-dir /path/to/checkout (or run from inside the checkout)"

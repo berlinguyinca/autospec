@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # autospec-autonomous-verify-drain.sh — adversarial-skeptic verify bridge for
 # explore's fail-closed verify stage (the AUTOSPEC_EXPLORE_VERIFY_CMD seam),
-# bridged through the LLM harness (omx).
+# bridged through the Codex CLI.
 #
 # explore (scripts/autospec-explore.sh) runs a fail-closed adversarial verify:
 # an autonomous `--once` run with NO skeptic verdicts files ZERO proposals
 # (reason:verify-unavailable-failclosed). In the detached conductor no verifier
 # is wired, so explore generates proposals every idle cycle but files nothing.
 # This wrapper IS that verifier: it reads the deduped proposals from
-# $AUTOSPEC_EXPLORE_DEDUPED_IN, runs an omx-backed adversarial skeptic
+# $AUTOSPEC_EXPLORE_DEDUPED_IN, runs a codex-backed adversarial skeptic
 # (default-to-REFUTED), and writes the {norm_title -> {verdict, reason}} map to
 # $AUTOSPEC_EXPLORE_VERDICTS_OUT — the exact seam contract explore consumes
 # (see tests/explore/test_explore_orchestrator_verify.bats write_skeptic).
 #
 # Consumer success gate: exit 0 AND a non-empty verdicts file. This wrapper
-# INVERTS the sibling drains' fail-safe-to-dry: all failures (omx absent/
+# INVERTS the sibling drains' fail-safe-to-dry: all failures (codex absent/
 # non-zero, unparseable output, stall/timeout) is FAIL-CLOSED — exit non-zero
 # and write no all-survived map. explore then refutes-by-default and files
 # nothing. NEVER emit all-"survived" on error: that would push unverified junk
@@ -120,7 +120,7 @@ if [ "$DEDUP_COUNT" -eq 0 ]; then
 fi
 
 # ── Harness absence is FAIL-CLOSED here (unlike the run/explore drains). ──────
-command -v omx >/dev/null 2>&1 || fail_closed "omx not found on PATH"
+command -v codex >/dev/null 2>&1 || fail_closed "codex not found on PATH"
 
 # ── Build the adversarial-skeptic prompt (embeds the exact norm_title keys). ──
 PROMPT_FILE="$(mktemp "${TMPDIR:-/tmp}/autospec-verify-prompt.XXXXXX" 2>/dev/null || printf '/tmp/autospec-verify-prompt.%s' "$$")"
@@ -166,7 +166,7 @@ fi
 PROMPT="$(cat "$PROMPT_FILE")"
 rm -f "$PROMPT_FILE"
 
-# ── Run the skeptic through omx, with a stall watchdog. ───────────────────────
+# ── Run the skeptic through codex, with a stall watchdog. ───────────────────────
 HARNESS_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-verify-drain.XXXXXX" 2>/dev/null || printf '/tmp/autospec-verify-drain.%s' "$$")"
 
 # The background job must be the new-session process itself: backgrounding a
@@ -176,18 +176,18 @@ NEW_SESSION_CMD=(python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1],
 if command -v setsid >/dev/null 2>&1; then
     NEW_SESSION_CMD=(setsid)
 fi
-"${NEW_SESSION_CMD[@]}" omx exec \
+"${NEW_SESSION_CMD[@]}" codex exec \
     --cd "$REPO_DIR" \
     --dangerously-bypass-approvals-and-sandbox \
     "$PROMPT" > "$HARNESS_LOG" 2>&1 &
 child_pid="$!"
 
-omx_rc=0
+codex_rc=0
 verify_started_epoch="$(date +%s)"
 if [ "${VERIFY_STALL_SECS:-0}" -le 0 ] 2>/dev/null; then
     set +e
     wait "$child_pid"
-    omx_rc="$?"
+    codex_rc="$?"
     set -e
 else
     last_size=0
@@ -201,7 +201,7 @@ else
                 "$VERIFY_MAX_SECS" "$child_pid" >&2
             autospec_kill_tree "$child_pid" separate-recursive
             wait "$child_pid" 2>/dev/null || true
-            omx_rc=124
+            codex_rc=124
             break
         fi
         current_size="$(stat -c '%s' "$HARNESS_LOG" 2>/dev/null || stat -f '%z' "$HARNESS_LOG" 2>/dev/null || printf '0')"
@@ -216,14 +216,14 @@ else
                 "$VERIFY_STALL_SECS" "$child_pid" >&2
             autospec_kill_tree "$child_pid" separate-recursive
             wait "$child_pid" 2>/dev/null || true
-            omx_rc=124
+            codex_rc=124
             break
         fi
     done
-    if [ "$omx_rc" -eq 0 ]; then
+    if [ "$codex_rc" -eq 0 ]; then
         set +e
         wait "$child_pid"
-        omx_rc="$?"
+        codex_rc="$?"
         set -e
     fi
 fi
@@ -232,20 +232,20 @@ fi
 cat "$HARNESS_LOG" >&2 2>/dev/null || true
 
 # A non-zero harness exit is FAIL-CLOSED — even if the log looks like a valid
-# verdict object, an errored omx run is not trustworthy.
-if [ "$omx_rc" -ne 0 ]; then
+# verdict object, an errored codex run is not trustworthy.
+if [ "$codex_rc" -ne 0 ]; then
     if deterministic_fallback; then
         printf 'autospec-autonomous-verify-drain: skeptic unavailable (rc=%s); deterministic evidence fallback accepted %s candidate(s)\n' \
-            "$omx_rc" "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$VERDICTS_OUT" 2>/dev/null || printf 0)" >&2
+            "$codex_rc" "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$VERDICTS_OUT" 2>/dev/null || printf 0)" >&2
         rm -f "$HARNESS_LOG" 2>/dev/null || true
         exit 0
     fi
     rm -f "$HARNESS_LOG" 2>/dev/null || true
-    fail_closed "omx skeptic exited $omx_rc"
+    fail_closed "codex skeptic exited $codex_rc"
 fi
 
-# ── Extract + normalize the verdict map from the (chatty) omx stdout. ─────────
-# Real codex/omx output is NOT a clean fenced block — the verdict arrives as raw
+# ── Extract + normalize the verdict map from the (chatty) codex stdout. ─────────
+# Real codex output is NOT a clean fenced block — the verdict arrives as raw
 # JSON buried in brace-heavy chatter (shell-var braces, hook telemetry, the final
 # message printed twice, a `tokens used` block, JSON-ish footers). Recovery is:
 #   1. PRIMARY — the JSON between the LAST ===AUTOSPEC_VERDICTS_BEGIN/END=== pair.

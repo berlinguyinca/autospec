@@ -29,8 +29,8 @@ fi
 # bounded lease because its worker heartbeat refreshes active claims.
 export AUTOSPEC_CLAIM_TTL_SECONDS="${AUTOSPEC_CLAIM_TTL_SECONDS:-600}"
 
-if ! command -v omx >/dev/null 2>&1; then
-    printf 'autospec-autonomous-run-drain: omx not found on PATH\n' >&2
+if ! command -v codex >/dev/null 2>&1; then
+    printf 'autospec-autonomous-run-drain: codex not found on PATH\n' >&2
     exit 127
 fi
 
@@ -105,7 +105,7 @@ progress_signature() {
     done
 }
 
-# The omx child is launched in its own session (see below), so its pid is also
+# The codex child is launched in its own session (see below), so its pid is also
 # its process-group id. A group-directed liveness probe reports "alive" while
 # any member of that group still runs — the stale wait-handle case the old
 # parent-chain walk covered — and "dead" only when the whole tree is gone.
@@ -285,23 +285,23 @@ EOF
 
 # Provide a literal, shell-safe resume command so autospec-run preflight does
 # not interpolate `$autospec-run` as an unset shell variable under `set -u`.
-export AUTOSPEC_RESUME_COMMAND="${AUTOSPEC_RESUME_COMMAND:-cd $(printf '%q' "$REPO_DIR") && omx exec '\$autospec-run'}"
+export AUTOSPEC_RESUME_COMMAND="${AUTOSPEC_RESUME_COMMAND:-cd $(printf '%q' "$REPO_DIR") && codex exec '\$autospec-run'}"
 
-# Launch the omx child in its own session so it becomes its own process-group
+# Launch the codex child in its own session so it becomes its own process-group
 # leader: the shared reaper's 'separate-recursive' policy and the group
 # liveness probe above both require the child to own the group that gets
 # signalled. A plain `&` child stays in this script's group, which the helper
 # refuses to signal and the group probe would misread as this script's own
 # liveness.
 if ! command -v setsid >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
-    printf 'autospec-autonomous-run-drain: neither setsid nor python3 found; cannot launch omx in its own session\n' >&2
+    printf 'autospec-autonomous-run-drain: neither setsid nor python3 found; cannot launch codex in its own session\n' >&2
     exit 127
 fi
 NEW_SESSION_CMD=(python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])')
 if command -v setsid >/dev/null 2>&1; then
     NEW_SESSION_CMD=(setsid)
 fi
-"${NEW_SESSION_CMD[@]}" omx exec \
+"${NEW_SESSION_CMD[@]}" codex exec \
     --cd "$REPO_DIR" \
     --dangerously-bypass-approvals-and-sandbox \
     '$autospec-run' &

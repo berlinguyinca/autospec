@@ -4,7 +4,7 @@ setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     TMP="$(mktemp -d -t autospec-explore-bound.XXXXXX)"
     mkdir -p "$TMP/bin"
-    cat > "$TMP/bin/omx" <<'EOF'
+    cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 while :; do
     printf 'chatty explore heartbeat\n'
@@ -18,7 +18,7 @@ case "$*" in
     *) printf 'test/repo\n' ;;
 esac
 EOF
-    chmod +x "$TMP/bin/omx" "$TMP/bin/gh"
+    chmod +x "$TMP/bin/codex" "$TMP/bin/gh"
     export PATH="$TMP/bin:$PATH"
     export CONDUCTOR_REPO=test/repo
     export AUTOSPEC_REPO_DIR="$TMP"
