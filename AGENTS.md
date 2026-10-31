@@ -51,7 +51,7 @@ Used by: research subagents (Phase 1), decomposition subagents (Phase 3 — turn
 
 Reasoning: spec/issue quality is the bottleneck. A cheap model here costs you N cheap-implementer cycles correcting it downstream. The orchestrator/user is also typically running on a top model in Phase 2 (design + spec writing); subagents in spec-adjacent phases match that quality.
 
-**Tier right-sizing for classification (Phase 3.5 review-and-label + `/autospec-classify`):** classification is now **deterministic-first**. The deterministic rubric (file counts under `## Files to read first`, verb keywords — see `scripts/classify-model-fit.sh`, tracker #421) runs FIRST and gates any LLM call. Only issues the rubric scores as ambiguous (confidence below `LLM_ESCALATION_THRESHOLD`) get an LLM call, and that call runs at **Tier B**, not Tier A. Sibling normalization stays deterministic. This keeps the common case zero-LLM-cost while preserving a cheap LLM tie-breaker for genuinely ambiguous issues.
+**Tier right-sizing for classification (Phase 3.5 review-and-label + `/autospec-classify`):** classification is **purely deterministic**. The deterministic rubric (file counts under `## Files to read first`, verb keywords — see `scripts/classify-model-fit.sh`, tracker #421) decides ctx/reasoning with zero LLM calls; the former optional LLM tie-break (`LLM_ESCALATION_THRESHOLD`, `AUTOSPEC_FORCE_LLM`) was removed. Sibling normalization stays deterministic.
 
 | Harness     | Preferred model | Thinking budget | Fallback (next-tier UP on unavailability) |
 |-------------|-----------------|-----------------|--------------------------------------------|

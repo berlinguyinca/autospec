@@ -47,15 +47,19 @@ teardown() {
   echo "$output" | grep -q "reasoning:deep"
 }
 
-# Case 5: low-confidence escalation stub — LLM_ESCALATION_THRESHOLD=1.0 forces LLM path
-# Since omc may not be available, we expect either graceful fallback (exit 0) or exit 2.
-# We verify deterministic:false appears in JSON mode.
-@test "low-confidence: LLM_ESCALATION_THRESHOLD=1.0 invokes LLM path (json mode)" {
-  run env LLM_ESCALATION_THRESHOLD=1.0 bash "$BIN" "$FIXTURES/low-confidence.md" --json
-  # Exit 0 (LLM fallback succeeded or omc unavailable with graceful default) or 2 (LLM failed)
-  [ "$status" -eq 0 ] || [ "$status" -eq 2 ]
-  # Output should contain deterministic:false
-  echo "$output" | grep -q '"deterministic":false'
+# Case 5: classification is purely deterministic; a legacy `omc` on PATH is never called,
+# whatever the old escalation knobs say.
+@test "low-confidence: legacy escalation knobs never call omc and stay deterministic" {
+  local stubdir calls
+  stubdir="$(mktemp -d)"; calls="$stubdir/omc-calls"
+  printf '#!/usr/bin/env bash\nprintf call >> "%s"\nprintf "{}"\n' "$calls" > "$stubdir/omc"
+  chmod +x "$stubdir/omc"
+  run env PATH="$stubdir:$PATH" LLM_ESCALATION_THRESHOLD=1.0 AUTOSPEC_FORCE_LLM=1 \
+    bash "$BIN" "$FIXTURES/low-confidence.md" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"deterministic":true'
+  [ ! -e "$calls" ]
+  rm -rf "$stubdir"
 }
 
 # Case 6: telemetry-append — one JSON line appended per invocation
@@ -75,12 +79,4 @@ teardown() {
   fi
 
   [ "$after" -gt "$before" ]
-}
-
-# Case 7: LLM_ESCALATION_THRESHOLD env override
-@test "LLM_ESCALATION_THRESHOLD env var overrides default 0.3" {
-  # Setting threshold to 0.0 means confidence is always >= threshold → deterministic path
-  run env LLM_ESCALATION_THRESHOLD=0.0 bash "$BIN" "$FIXTURES/small.md" --json
-  [ "$status" -eq 0 ]
-  echo "$output" | grep -q '"deterministic":true'
 }

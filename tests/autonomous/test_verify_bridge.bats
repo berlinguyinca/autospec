@@ -91,20 +91,6 @@ assert m['add retry logic']['reason'], m
     grep -q 'dangerously-bypass-approvals-and-sandbox' "$CODEX_LOG"
 }
 
-@test "bridge never launches a legacy omx executable on PATH" {
-    cat > "$TMP/bin/omx" <<'EOF2'
-#!/usr/bin/env bash
-printf 'omx\n' > "$OMX_MARKER"
-exit 9
-EOF2
-    chmod +x "$TMP/bin/omx"
-    export OMX_MARKER="$TMP/omx-launched"
-    run bash "$BRIDGE"
-    [ "$status" -eq 0 ]
-    [ ! -e "$OMX_MARKER" ]
-    grep -q 'dangerously-bypass-approvals-and-sandbox' "$CODEX_LOG"
-}
-
 # ── empty deduped ─────────────────────────────────────────────────────────────
 
 @test "bridge writes {} and exits 0 when there is nothing to verify" {

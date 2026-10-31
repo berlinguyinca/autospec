@@ -11,7 +11,7 @@
 #
 #   lang          closed label set: rust|go|python|typescript|javascript|java|bash|ruby|csharp|markdown|mixed|unknown
 #   source        explicit | inherited | repo-dominant | chosen | unknown
-#   deterministic false only when a rank-5 tie reaches a Tier-B (omc) call
+#   deterministic false only when a rank-5 tie stays unresolved (abstention)
 #
 # Precedence (ranks 1-5, per docs/specs/2026-08-12-language-selection-axis-design.md):
 #   rank 1  explicit-with-path — a language named within one line of a target path or a
@@ -21,7 +21,7 @@
 #   rank 3  explicit-prose — the body names exactly one canonical language in prose
 #   rank 4  repo-dominant — the repo's dominant language at confidence > 0.5
 #   rank 5  chosen — a spec-table row matches the body; ties resolve by repo affinity,
-#           then the operator default, then a single Tier-B (omc) call
+#           then the operator default; an unresolved tie abstains
 #   none    -> lang:unknown, confidence 0.0 (abstention, never a guess)
 #
 # Telemetry: appends one JSON line per invocation to .autospec/telemetry/classify-language.jsonl
@@ -29,7 +29,7 @@
 # Exit codes:
 #   0  — success
 #   1  — usage error / body file not found
-#   2  — escalation failed (Tier-B tie-break unavailable)
+#   2  — rank-5 tie unresolved (abstained, lang:unknown)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,7 +57,7 @@ Output (--json):
 Exit codes:
   0  success
   1  usage error / body file not found
-  2  escalation failed (Tier-B tie-break unavailable)
+  2  rank-5 tie unresolved (abstained, lang:unknown)
 EOF
 }
 
@@ -355,32 +355,8 @@ operator_default() {
   prose_lang "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')"
 }
 
-# Tier-B (omc) tie-break: at most one call. Sets CHOSEN_LLM_LANG when omc
-# replies with one of the candidates.
-CHOSEN_LLM_LANG=""
-llm_tiebreak() {
-  local cands="$1" prompt raw canon t
-  command -v omc >/dev/null 2>&1 || return 1
-  prompt="$(printf '%s' "$BODY" | head -c 3000 || true)"
-  raw="$(printf '%s\nCANDIDATE LANGUAGES: %s\nPick exactly one. Reply with the language name only.\n' \
-    "$prompt" "$cands" | omc ask 2>/dev/null | head -n 1 || true)"
-  [ -n "$raw" ] || return 1
-  canon="$(prose_lang "$(printf '%s' "$raw" | tr -cd '[:alpha:]' | tr '[:upper:]' '[:lower:]')")"
-  [ -n "$canon" ] || return 1
-  set -f
-  for t in ${cands//,/ }; do
-    if [ "$t" = "$canon" ]; then
-      CHOSEN_LLM_LANG="$canon"
-      set +f
-      return 0
-    fi
-  done
-  set +f
-  return 1
-}
-
 # Tie-break chain: repo-affinity (exactly one candidate hit) -> operator
-# default (must be among candidates) -> Tier-B. Sets CHOSEN_LANG/CHOSEN_SOURCE.
+# default (must be among candidates). Sets CHOSEN_LANG/CHOSEN_SOURCE.
 CHOSEN_LANG=""
 CHOSEN_SOURCE=""
 resolve_tie() {
@@ -415,11 +391,6 @@ resolve_tie() {
     esac
   fi
   set +f
-  if llm_tiebreak "$cands"; then
-    CHOSEN_LANG="$CHOSEN_LLM_LANG"
-    CHOSEN_SOURCE="tier-b"
-    return 0
-  fi
   return 1
 }
 
@@ -487,7 +458,7 @@ else
         CONFIDENCE="0.0"
         DETERMINISTIC=false
         EXIT_CODE=2
-        RATIONALE="Abstained: rank-5 tie among (${CHOSEN_CANDS}) unresolved, Tier-B unavailable"
+        RATIONALE="Abstained: rank-5 tie among (${CHOSEN_CANDS}) unresolved"
       fi
     else
       LANG_VAL="unknown"

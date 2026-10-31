@@ -333,17 +333,15 @@ Exit: 0 = lint pass, 1 = MISSING_FIELD or render error, N = lint finding count.
 
 Deterministic ctx/reasoning classifier for autospec issue bodies. Scores `ctx:32k/64k/120k`
 and `reasoning:shallow/medium/deep` from issue body signals (files-to-read count, anchor sizes,
-verb patterns). Escalates to LLM only when `confidence < LLM_ESCALATION_THRESHOLD` (default 0.3).
+verb patterns). Never calls an LLM.
 Appends one JSON telemetry line per invocation to `.autospec/telemetry/classify-model-fit.jsonl`.
 
 ```
 Usage: bash scripts/classify-model-fit.sh <body-file>
        bash scripts/classify-model-fit.sh <body-file> --json
-Env:   LLM_ESCALATION_THRESHOLD   confidence below this triggers LLM (default: 0.3)
-       AUTOSPEC_FORCE_LLM         set to 1 to always use LLM path
 ```
 
-Exit: 0 = success, 1 = usage/file error, 2 = LLM escalation failed.
+Exit: 0 = success, 1 = usage/file error.
 
 <!-- autospec-doc-scope:
   src: ["tests/classify-model-fit.bats", "tests/fixtures/classify-model-fit/small.md", "tests/fixtures/classify-model-fit/medium.md", "tests/fixtures/classify-model-fit/large.md", "tests/fixtures/classify-model-fit/deep-reasoning.md", "tests/fixtures/classify-model-fit/low-confidence.md"]

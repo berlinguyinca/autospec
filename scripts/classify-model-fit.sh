@@ -6,19 +6,14 @@
 #   scripts/classify-model-fit.sh <body-file> --json  # emit JSON object to stdout
 #   scripts/classify-model-fit.sh --help              # show this help
 #
-# Environment:
-#   LLM_ESCALATION_THRESHOLD  — confidence below this triggers LLM tie-breaker (default: 0.3)
-#   AUTOSPEC_FORCE_LLM        — if set to 1, always use LLM path
-#
 # Output (default): ## Model fit markdown block
-# Output (--json): {"ctx":"64k","reasoning":"medium","rationale":"...","deterministic":true|false,"confidence":0.0-1.0}
+# Output (--json): {"ctx":"64k","reasoning":"medium","rationale":"...","deterministic":true,"confidence":0.0-1.0}
 #
 # Telemetry: appends one JSON line per invocation to .autospec/telemetry/classify-model-fit.jsonl
 #
 # Exit codes:
 #   0  — success
 #   1  — usage error or body file not found
-#   2  — LLM escalation failed
 
 set -eu
 
@@ -26,8 +21,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Defaults
-THRESHOLD="${LLM_ESCALATION_THRESHOLD:-0.3}"
-FORCE_LLM="${AUTOSPEC_FORCE_LLM:-0}"
 JSON_MODE=0
 BODY_FILE=""
 
@@ -40,14 +33,9 @@ Usage:
   scripts/classify-model-fit.sh <body-file> --json
   scripts/classify-model-fit.sh --help
 
-Environment:
-  LLM_ESCALATION_THRESHOLD  confidence below this triggers LLM (default: 0.3)
-  AUTOSPEC_FORCE_LLM        set to 1 to always use LLM path
-
 Exit codes:
   0  success
   1  usage error or body file not found
-  2  LLM escalation failed
 EOF
 }
 
@@ -260,39 +248,6 @@ count_files_in_body() {
 }
 
 # ---------------------------------------------------------------------------
-# llm_classify: escalate to LLM via omc ask
-# ---------------------------------------------------------------------------
-llm_classify() {
-  local body="$1"
-  local prompt="Classify this GitHub issue body for autospec model-fit.
-Return JSON only: {\"ctx\":\"32k\"|\"64k\"|\"120k\",\"reasoning\":\"shallow\"|\"medium\"|\"deep\",\"rationale\":\"one sentence\"}
-
-Issue body:
-${body:0:3000}"
-
-  local result
-  if command -v omc &>/dev/null; then
-    result="$(echo "$prompt" | omc ask 2>/dev/null)" || true
-  fi
-
-  if [ -z "${result:-}" ]; then
-    # Fallback: return deterministic defaults as JSON
-    printf '{"ctx":"64k","reasoning":"medium","rationale":"LLM unavailable; fallback to defaults"}'
-    return 2
-  fi
-
-  # Extract JSON from result (omc may wrap in prose)
-  local json
-  json="$(echo "$result" | grep -o '{[^}]*}' | head -1)" || true
-  if [ -z "$json" ]; then
-    printf '{"ctx":"64k","reasoning":"medium","rationale":"LLM output unparseable; fallback"}'
-    return 2
-  fi
-
-  echo "$json"
-}
-
-# ---------------------------------------------------------------------------
 # Main classification logic
 # ---------------------------------------------------------------------------
 
@@ -303,36 +258,10 @@ VERBS_MATCHED="$(count_verbs_matched "$BODY")"
 # Compute confidence
 CONFIDENCE="$(compute_confidence "$VERBS_MATCHED" "$FILE_COUNT" "$ANCHOR_COUNT")"
 
-# Compare confidence to threshold using awk
-BELOW_THRESHOLD=0
-if awk -v c="$CONFIDENCE" -v t="$THRESHOLD" 'BEGIN{exit !(c+0 < t+0)}' 2>/dev/null; then
-  BELOW_THRESHOLD=1
-fi
-
 DETERMINISTIC=true
-CTX=""
-REASONING=""
-RATIONALE=""
-
-if [ "$FORCE_LLM" = "1" ] || [ "$BELOW_THRESHOLD" = "1" ]; then
-  # LLM escalation path
-  DETERMINISTIC=false
-  LLM_RESULT="$(llm_classify "$BODY")" || LLM_EXIT=$?
-
-  # Parse LLM JSON result
-  CTX="$(echo "$LLM_RESULT" | grep -o '"ctx":"[^"]*"' | sed 's/"ctx":"//;s/"//')" || CTX="64k"
-  REASONING="$(echo "$LLM_RESULT" | grep -o '"reasoning":"[^"]*"' | sed 's/"reasoning":"//;s/"//')" || REASONING="medium"
-  RATIONALE="$(echo "$LLM_RESULT" | grep -o '"rationale":"[^"]*"' | sed 's/"rationale":"//;s/"//')" || RATIONALE="LLM classification"
-
-  [ -z "$CTX" ] && CTX="64k"
-  [ -z "$REASONING" ] && REASONING="medium"
-  [ -z "$RATIONALE" ] && RATIONALE="LLM classification"
-else
-  # Deterministic path
-  CTX="$(score_ctx "$BODY")"
-  REASONING="$(score_reasoning "$BODY")"
-  RATIONALE="Deterministic: ${FILE_COUNT} files-to-read, ${ANCHOR_COUNT} anchors, ${VERBS_MATCHED} verb categories matched (confidence ${CONFIDENCE})"
-fi
+CTX="$(score_ctx "$BODY")"
+REASONING="$(score_reasoning "$BODY")"
+RATIONALE="Deterministic: ${FILE_COUNT} files-to-read, ${ANCHOR_COUNT} anchors, ${VERBS_MATCHED} verb categories matched (confidence ${CONFIDENCE})"
 
 # ---------------------------------------------------------------------------
 # Telemetry append
