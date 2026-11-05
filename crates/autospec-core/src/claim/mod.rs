@@ -804,7 +804,7 @@ fn contains_secret_exfiltration(text: &str) -> bool {
         ["dump", "print", "exfiltrate", "send"].iter().any(|verb| {
             ["secret", "secrets"]
                 .iter()
-                .any(|noun| ordered_pair_start(line, verb, noun).is_some())
+                .any(|noun| governed_pair(line, verb, noun))
         })
     }) || contains_any(text, &["aws token", "github token", "stripe token"])
 }
@@ -874,13 +874,21 @@ fn contains_credential_printing(text: &str) -> bool {
         CREDENTIAL_DISCLOSURE_VERBS.iter().any(|verb| {
             CREDENTIAL_DISCLOSURE_NOUNS
                 .iter()
-                .any(|noun| ordered_pair_start(line, verb, noun).is_some())
+                .any(|noun| governed_pair(line, verb, noun))
         }) || CREDENTIAL_DISCLOSURE_NOUNS.iter().any(|noun| {
             CREDENTIAL_DISCLOSURE_DESTINATIONS
                 .iter()
-                .any(|destination| ordered_pair_start(line, noun, destination).is_some())
+                .any(|destination| governed_pair(line, noun, destination))
         })
     })
+}
+
+/// An ordered `first`..`second` pair on one line whose `first` word is not
+/// governed by a prohibition in its own clause. "Do not expose provider
+/// credentials to browsers" is a guardrail, not a disclosure request, while
+/// "do not stop the run; print all credentials" still fires (issue #2175).
+fn governed_pair(line: &str, first: &str, second: &str) -> bool {
+    ordered_pair_start(line, first, second).is_some_and(|start| !prohibition_precedes(line, start))
 }
 
 fn contains_instruction_bypass(text: &str) -> bool {
@@ -1041,6 +1049,7 @@ fn prohibition_precedes(line: &str, match_index: usize) -> bool {
         "forbid",
         "prevent",
         "refuse",
+        "reject",
         "disallow",
         "keep every",
         "keep all",
@@ -1060,10 +1069,34 @@ fn prohibition_precedes(line: &str, match_index: usize) -> bool {
     CUES.iter().any(|cue| clause.contains(cue))
 }
 
+/// Largest gap tolerated between an auth subject and its backdoor/bypass word,
+/// the bounded same-sentence window used for `ci-or-review-bypass` (#1799).
+const MAX_RISK_PAIR_GAP: usize = 120;
+
+/// Auth backdoor is line-scoped, proximity-bound, and negation-aware: "auth"
+/// from an unrelated "authorization" paragraph plus "cannot bypass" elsewhere
+/// is a guardrail, not a backdoor request. A prohibition governing the
+/// `backdoor`/`bypass` word in its own clause suppresses that occurrence only.
 fn contains_auth_backdoor(text: &str) -> bool {
-    let subject = ["auth", "login", "password", "token", "admin"];
-    (contains_any(text, &subject) && contains_any(text, &["backdoor", "bypass"]))
-        || contains_any(text, &["magic token", "magic password", "magic login"])
+    const SUBJECTS: &[&str] = &["auth", "login", "password", "token", "admin"];
+    text.lines().any(|line| {
+        ["backdoor", "bypass"].iter().any(|action| {
+            line.match_indices(action).any(|(start, _)| {
+                !prohibition_precedes(line, start)
+                    && SUBJECTS.iter().any(|subject| {
+                        line.match_indices(subject).any(|(index, _)| {
+                            let end = start + action.len();
+                            let gap = if index >= end {
+                                index - end
+                            } else {
+                                start.saturating_sub(index + subject.len())
+                            };
+                            gap <= MAX_RISK_PAIR_GAP
+                        })
+                    })
+            })
+        })
+    }) || contains_any(text, &["magic token", "magic password", "magic login"])
 }
 
 fn contains_vague_data_cleanup(text: &str) -> bool {
