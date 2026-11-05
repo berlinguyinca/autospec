@@ -24,6 +24,30 @@ mutation-adapters/bash-mutate.sh 173
 mutation-adapters/go-mutesting.sh 57
 mutation-adapters/mutmut.sh 65
 mutation-adapters/stryker.sh 92
+# Deliberate raise: the Woodpecker pipeline (PR #4726). Two new shell files,
+# 975 counted lines, and the ratchet is right to ask.
+#
+# The gate bodies are not application logic and are deliberately NOT in
+# crates/: a CI gate has to be runnable from a clean checkout before anything
+# is built, and by an operator debugging a red pipeline on a cluster node.
+# `bash ops/ci/woodpecker-gates.sh file-size-ratchet` needs no toolchain and
+# no compile; `cargo run -p autospec-cli -- gate ...` needs both, which is
+# exactly the cycle a CI failure is trying to break out of. Several gates are
+# also a handful of lines calling this repository's OWN shell helpers
+# (scripts/stack-guard.sh, scripts/security-workstream.sh,
+# scripts/architecture-fitness.sh) -- reimplementing that layer in Rust to
+# call shell anyway buys nothing.
+#
+# Both files are also mostly comment: they carry the measured reasons behind
+# each choice (the read-only CARGO_HOME, the /tmp harness refusal, the perl
+# locale) precisely so the next person does not rediscover them. The ratchet
+# counts comments, which is the right default and the wrong signal here.
+#
+# It replaces seven TeamCity configurations that were not in this repository
+# at all, so the shell surface it ADDS here is smaller than the shell surface
+# it brings under version control.
+ops/ci/woodpecker-gates.sh 528
+ops/ci/woodpecker-rust-gates.sh 447
 packages/cli/scripts/init.sh 54
 packages/cli/scripts/install.sh 47
 packages/cli/scripts/status.sh 77
