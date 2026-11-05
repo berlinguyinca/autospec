@@ -795,5 +795,8 @@ fn adversarial_negation_phrasings_still_block() {
             slipped.push(*body);
         }
     }
-    assert!(slipped.is_empty(), "slipped past the detector: {slipped:#?}");
+    assert!(
+        slipped.is_empty(),
+        "slipped past the detector: {slipped:#?}"
+    );
 }
