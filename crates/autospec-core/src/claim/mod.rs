@@ -804,7 +804,7 @@ fn contains_secret_exfiltration(text: &str) -> bool {
         ["dump", "print", "exfiltrate", "send"].iter().any(|verb| {
             ["secret", "secrets"]
                 .iter()
-                .any(|noun| ordered_pair_start(line, verb, noun).is_some())
+                .any(|noun| governed_pair(line, verb, noun))
         })
     }) || contains_any(text, &["aws token", "github token", "stripe token"])
 }
@@ -874,14 +874,171 @@ fn contains_credential_printing(text: &str) -> bool {
         CREDENTIAL_DISCLOSURE_VERBS.iter().any(|verb| {
             CREDENTIAL_DISCLOSURE_NOUNS
                 .iter()
-                .any(|noun| ordered_pair_start(line, verb, noun).is_some())
+                .any(|noun| governed_pair(line, verb, noun))
         }) || CREDENTIAL_DISCLOSURE_NOUNS.iter().any(|noun| {
             CREDENTIAL_DISCLOSURE_DESTINATIONS
                 .iter()
-                .any(|destination| ordered_pair_start(line, noun, destination).is_some())
+                .any(|destination| {
+                    // Noun-first: the prohibition may sit between the noun and
+                    // the destination ("credentials must not be ... to the log").
+                    ordered_pair_span(line, noun, destination).is_some_and(|(start, end)| {
+                        !directly_prohibited(line, start) && !directly_prohibited(line, end)
+                    })
+                })
         })
     })
 }
+
+/// An ordered `first`..`second` pair on one line in which at least one
+/// occurrence of `first` is NOT directly governed by a prohibition
+/// (`directly_prohibited`). Every occurrence of `first` is checked, so a
+/// guardrail earlier on the line cannot hide a later request.
+fn governed_pair(line: &str, first: &str, second: &str) -> bool {
+    word_positions(line, first).into_iter().any(|start| {
+        let tail = start + first.len();
+        !word_positions(&line[tail..], second).is_empty() && !directly_prohibited(line, start)
+    })
+}
+
+/// Words that open a prohibition when they directly govern a risky word.
+const NEGATION_CUES: &[&str] = &[
+    "no",
+    "not",
+    "never",
+    "cannot",
+    "without",
+    "avoid",
+    "avoids",
+    "prohibit",
+    "prohibits",
+    "prohibited",
+    "forbid",
+    "forbids",
+    "forbidden",
+    "prevent",
+    "prevents",
+    "refuse",
+    "refuses",
+    "reject",
+    "rejects",
+    "disallow",
+    "disallows",
+];
+
+/// (cue, following word) pairs that are NOT prohibitions: "do not worry",
+/// "never mind", "no need", "must not fail", "without delay", "not only".
+const NON_PROHIBITIVE: &[(&str, &str)] = &[
+    ("not", "worry"),
+    ("not", "hesitate"),
+    ("not", "forget"),
+    ("not", "mind"),
+    ("not", "only"),
+    ("not", "wait"),
+    ("never", "mind"),
+    ("no", "problem"),
+    ("no", "need"),
+    ("no", "questions"),
+    ("no", "one"),
+    ("no", "matter"),
+    ("cannot", "wait"),
+    ("without", "delay"),
+    ("without", "hesitation"),
+    ("without", "asking"),
+    ("without", "question"),
+];
+
+/// How many words before the risky word a cue may sit and still govern it.
+const NEGATION_WINDOW_WORDS: usize = 5;
+
+/// Split `text` into lowercase words and `None` clause boundaries. Boundaries:
+/// `, ; : ! ? ( )`, a sentence-ending `.`, newlines, a lone `-`/en/em dash, and
+/// the conjunctions `but`, `and`, `so`, `then`, `yet`, `however`, `instead`.
+fn negation_tokens(text: &str) -> Vec<Option<String>> {
+    let spaced = text
+        .replace(['\u{2014}', '\u{2013}'], " - ")
+        .replace('\n', " \n ");
+    let mut out: Vec<Option<String>> = Vec::new();
+    for raw in spaced.split(' ').filter(|t| !t.is_empty()) {
+        if raw == "\n" || raw == "-" {
+            out.push(None);
+            continue;
+        }
+        let lead = raw.starts_with('(');
+        let word_end = raw.trim_matches(|c: char| {
+            !(c.is_alphanumeric() || c == '\'' || c == '\u{2019}' || c == '-')
+        });
+        let trailing_boundary = raw
+            .rsplit(|c: char| c.is_alphanumeric())
+            .next()
+            .is_some_and(|tail| tail.contains([',', ';', ':', '!', '?', ')', '.']));
+        if lead {
+            out.push(None);
+        }
+        let word = word_end.to_lowercase().replace('\u{2019}', "'");
+        if matches!(
+            word.as_str(),
+            "but" | "and" | "so" | "then" | "yet" | "however" | "instead"
+        ) {
+            out.push(None);
+        } else if !word.is_empty() {
+            out.push(Some(word));
+        }
+        if trailing_boundary {
+            out.push(None);
+        }
+    }
+    out
+}
+
+fn is_negation_cue(word: &str) -> bool {
+    NEGATION_CUES.contains(&word) || (word.ends_with("n't") && word.len() > 3)
+}
+
+/// True when a prohibition directly governs the risky word starting at
+/// `match_index`: a whole-word negation cue sits within
+/// `NEGATION_WINDOW_WORDS` words before it, in the same clause, is not a
+/// non-prohibitive idiom, and is not cancelled by a second negation ("do not
+/// refuse to print" is a request). A dedicated check, separate from
+/// `prohibition_precedes`, because a safety detector must prefer false
+/// positives: when unsure, flag.
+fn directly_prohibited(line: &str, match_index: usize) -> bool {
+    let tokens = negation_tokens(&line[..match_index]);
+    let clause: Vec<&str> = tokens
+        .iter()
+        .rev()
+        .take_while(|t| t.is_some())
+        .flatten()
+        .map(String::as_str)
+        .take(NEGATION_WINDOW_WORDS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let cues = clause
+        .iter()
+        .enumerate()
+        .filter(|(index, word)| {
+            is_negation_cue(word)
+                && !clause.get(index + 1).is_some_and(|next| {
+                    NON_PROHIBITIVE.iter().any(|(cue, follow)| {
+                        (*cue == **word || (word.ends_with("n't") && *cue == "not"))
+                            && follow == next
+                    })
+                })
+        })
+        .count();
+    // A verb of omission directly after a cue cancels it: "never fail to
+    // expose", "do not omit printing", "do not decline to dump" are requests.
+    let cancels = clause
+        .windows(2)
+        .filter(|pair| is_negation_cue(pair[0]) && CANCELLING_VERBS.contains(&pair[1]))
+        .count();
+    (cues + cancels) % 2 == 1
+}
+
+/// Verbs that, right after a negation cue, turn the pair into a positive
+/// obligation.
+const CANCELLING_VERBS: &[&str] = &["fail", "omit", "decline", "stop", "neglect"];
 
 fn contains_instruction_bypass(text: &str) -> bool {
     [
@@ -1060,10 +1217,40 @@ fn prohibition_precedes(line: &str, match_index: usize) -> bool {
     CUES.iter().any(|cue| clause.contains(cue))
 }
 
+/// Largest gap, in characters, tolerated between an auth subject and its
+/// backdoor/bypass word (the window used for `ci-or-review-bypass`, #1799).
+const MAX_RISK_PAIR_GAP: usize = 120;
+
+/// Auth backdoor pairs a subject with `backdoor`/`bypass` inside a three-line
+/// window (so hard wrapping cannot defeat it), measures the gap in characters,
+/// and suppresses an occurrence only when `directly_prohibited` governs it.
 fn contains_auth_backdoor(text: &str) -> bool {
-    let subject = ["auth", "login", "password", "token", "admin"];
-    (contains_any(text, &subject) && contains_any(text, &["backdoor", "bypass"]))
-        || contains_any(text, &["magic token", "magic password", "magic login"])
+    const SUBJECTS: &[&str] = &["auth", "login", "password", "token", "admin"];
+    const ACTIONS: &[&str] = &["backdoor", "back-door", "back door", "back\ndoor", "bypass"];
+    let lines: Vec<&str> = text.lines().collect();
+    // Three lines (blank lines included) so wrapping or a paragraph break
+    // cannot separate the subject from the action.
+    let windows = (0..lines.len()).map(|i| lines[i..lines.len().min(i + 3)].join("\n"));
+    windows.into_iter().any(|chunk| {
+        ACTIONS.iter().any(|action| {
+            chunk.match_indices(action).any(|(start, _)| {
+                let end = start + action.len();
+                !directly_prohibited(&chunk, start)
+                    && SUBJECTS.iter().any(|subject| {
+                        chunk.match_indices(subject).any(|(index, _)| {
+                            let gap = if index >= end {
+                                chunk[end..index].chars().count()
+                            } else {
+                                chunk[(index + subject.len()).min(start)..start]
+                                    .chars()
+                                    .count()
+                            };
+                            gap <= MAX_RISK_PAIR_GAP
+                        })
+                    })
+            })
+        })
+    }) || contains_any(text, &["magic token", "magic password", "magic login"])
 }
 
 fn contains_vague_data_cleanup(text: &str) -> bool {
