@@ -931,7 +931,6 @@ const NON_PROHIBITIVE: &[(&str, &str)] = &[
     ("not", "worry"),
     ("not", "hesitate"),
     ("not", "forget"),
-    ("not", "fail"),
     ("not", "mind"),
     ("not", "only"),
     ("not", "wait"),
@@ -1028,8 +1027,18 @@ fn directly_prohibited(line: &str, match_index: usize) -> bool {
                 })
         })
         .count();
-    cues % 2 == 1
+    // A verb of omission directly after a cue cancels it: "never fail to
+    // expose", "do not omit printing", "do not decline to dump" are requests.
+    let cancels = clause
+        .windows(2)
+        .filter(|pair| is_negation_cue(pair[0]) && CANCELLING_VERBS.contains(&pair[1]))
+        .count();
+    (cues + cancels) % 2 == 1
 }
+
+/// Verbs that, right after a negation cue, turn the pair into a positive
+/// obligation.
+const CANCELLING_VERBS: &[&str] = &["fail", "omit", "decline", "stop", "neglect"];
 
 fn contains_instruction_bypass(text: &str) -> bool {
     [
@@ -1212,17 +1221,16 @@ fn prohibition_precedes(line: &str, match_index: usize) -> bool {
 /// backdoor/bypass word (the window used for `ci-or-review-bypass`, #1799).
 const MAX_RISK_PAIR_GAP: usize = 120;
 
-/// Auth backdoor pairs a subject with `backdoor`/`bypass` inside a two-line
+/// Auth backdoor pairs a subject with `backdoor`/`bypass` inside a three-line
 /// window (so hard wrapping cannot defeat it), measures the gap in characters,
 /// and suppresses an occurrence only when `directly_prohibited` governs it.
 fn contains_auth_backdoor(text: &str) -> bool {
     const SUBJECTS: &[&str] = &["auth", "login", "password", "token", "admin"];
     const ACTIONS: &[&str] = &["backdoor", "back-door", "back door", "back\ndoor", "bypass"];
     let lines: Vec<&str> = text.lines().collect();
-    let windows = (0..lines.len()).map(|i| match lines.get(i + 1) {
-        Some(next) => format!("{}\n{}", lines[i], next),
-        None => lines[i].to_string(),
-    });
+    // Three lines (blank lines included) so wrapping or a paragraph break
+    // cannot separate the subject from the action.
+    let windows = (0..lines.len()).map(|i| lines[i..lines.len().min(i + 3)].join("\n"));
     windows.into_iter().any(|chunk| {
         ACTIONS.iter().any(|action| {
             chunk.match_indices(action).any(|(start, _)| {
