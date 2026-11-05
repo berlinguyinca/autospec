@@ -878,7 +878,12 @@ fn contains_credential_printing(text: &str) -> bool {
         }) || CREDENTIAL_DISCLOSURE_NOUNS.iter().any(|noun| {
             CREDENTIAL_DISCLOSURE_DESTINATIONS
                 .iter()
-                .any(|destination| governed_pair(line, noun, destination))
+                .any(|destination| {
+                    // Noun-first: the prohibition may sit between the noun and
+                    // the destination ("credentials must not be ... to the log").
+                    ordered_pair_span(line, noun, destination)
+                        .is_some_and(|(_, end)| !prohibition_precedes(line, end))
+                })
         })
     })
 }
