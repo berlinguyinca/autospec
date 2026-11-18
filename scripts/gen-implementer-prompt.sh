@@ -228,7 +228,28 @@ cd /path/to/autospec
 git fetch origin
 git worktree add ${WT_PATH} -b ${BRANCH} origin/main
 cd ${WT_PATH}
+[ -f .autospec-env.sh ] && . ./.autospec-env.sh   # shared CARGO_TARGET_DIR, CARGO_INCREMENTAL=0
 \`\`\`
+
+### Disk hygiene (ON by default)
+
+- **Rust build output is shared per repo.** If \`.autospec-env.sh\` exists in the worktree,
+  source it before any \`cargo\` command; it exports a shared \`CARGO_TARGET_DIR\` and
+  \`CARGO_INCREMENTAL=0\`. Never build into a per-worktree \`target/\` and never override
+  \`CARGO_TARGET_DIR\` unless the caller already set it.
+- **Clean up through the sanctioned command, not raw deletes.** When done (PR merged or
+  closed, or you abort) with a clean tree and everything pushed, run
+  \`herdr-eng cleanup --scope worktree --path ${WT_PATH}\` (or, if \`herdr-eng\` is not
+  installed, \`bash \${AUTOSPEC_SCRIPTS_DIR:-\$HOME/.autospec/scripts}/disk-hygiene.sh cleanup-worktree ${WT_PATH}\`).
+  Do NOT use raw \`rm -rf\`, \`git worktree remove\` or \`docker rm\`; the permission
+  classifier blocks them and the data stays on disk. Dirty or unpushed work is kept and logged.
+- **Docker containers you start are ephemeral.** Always pass \`--rm --label herdr.ephemeral=1\`
+  (compose: \`labels: [herdr.ephemeral=1]\`; \`docker compose run --rm\`). Stop them via
+  \`herdr-eng cleanup --scope docker --path <name>\` when done.
+- **Low disk.** If \`bash \${AUTOSPEC_SCRIPTS_DIR:-\$HOME/.autospec/scripts}/disk-hygiene.sh preflight\`
+  exits 75, stop, comment that the issue is parked for low disk, and restore the \`auto-implement\` label.
+  Opt-outs: \`AUTOSPEC_DISK_HYGIENE=off\` (all), \`AUTOSPEC_SHARED_TARGET=off\`,
+  \`AUTOSPEC_DISK_CLEANUP=off\`, \`AUTOSPEC_DISK_PREFLIGHT=off\`.
 
 ### Issue body
 

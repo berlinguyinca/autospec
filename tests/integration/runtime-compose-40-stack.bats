@@ -61,7 +61,7 @@ host_docker() {
 
 start_isolated_engine() {
   mkdir -p "$TEST_ROOT/docker-run"
-  host_docker run -d --privileged --name "$ISOLATED_ENGINE" \
+  host_docker run -d --rm --label herdr.ephemeral=1 --privileged --name "$ISOLATED_ENGINE" \
     -v "$TEST_ROOT/docker-run:/var/run" docker:29.1.3-dind \
     --host=unix:///var/run/docker.sock \
     --default-address-pool=base=10.240.0.0/16,size=24 > "$TEST_ROOT/engine-id"

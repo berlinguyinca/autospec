@@ -75,6 +75,7 @@ WATCHDOG_SCRIPT_DIR="$SCRIPT_DIR"
 WORKER_LIVENESS_SH="${AUTOSPEC_WORKER_LIVENESS_SH:-$WATCHDOG_SCRIPT_DIR/worker-liveness.sh}"
 REPO_SLUG_SH="${AUTOSPEC_REPO_SLUG_SH:-$WATCHDOG_SCRIPT_DIR/repo-slug.sh}"
 RUNTIME_WORKTREE_CLEANUP_SH="${AUTOSPEC_RUNTIME_WORKTREE_CLEANUP:-$WATCHDOG_SCRIPT_DIR/autospec-runtime-worktree-cleanup.sh}"
+DISK_HYGIENE_SH="${AUTOSPEC_DISK_HYGIENE_SH:-$WATCHDOG_SCRIPT_DIR/disk-hygiene.sh}"
 
 if ! command -v gh >/dev/null 2>&1; then
     echo "$WATCHDOG_LOG_PREFIX ERROR: gh CLI not found" >&2
@@ -408,7 +409,7 @@ gc_orphaned_worktrees() {
 
         # GUARD 1 — un-pushed commits. NEVER prune if a local commit is not on
         # a remote. This is the load-bearing data-integrity check.
-        unpushed="$(git -C "$wt" log --not --remotes --oneline 2>/dev/null || echo "x")"
+        unpushed="$(git -C "$wt" log HEAD --not --remotes --oneline 2>/dev/null || echo "x")"
         [ -z "$unpushed" ] || continue
 
         # GUARD 3 — live heartbeat (cheap local file check; do it before gh).
@@ -422,6 +423,13 @@ gc_orphaned_worktrees() {
         gc_state="${meta%% *}"
         gc_labels="${meta#* }"
         [ "$gc_state" = "$meta" ] && gc_labels=""
+        # A merged/closed PR for the branch also ends the work (the issue can
+        # lag behind): everything is pushed, so the worktree is reclaimable.
+        # shellcheck disable=SC2086
+        gc_pr_state="$(gh pr list --head "$branch" --state all --limit 1 $REPO_ARGS --json state --jq '.[0].state // empty' 2>/dev/null || true)"
+        case "$gc_pr_state" in
+            MERGED|CLOSED) gc_state="PR_$gc_pr_state" ;;
+        esac
         if [ "$gc_state" = "OPEN" ]; then
             if printf '%s' ",${gc_labels}," | grep -qE ',(auto-implement|in-progress-by-bot),'; then
                 continue
@@ -435,8 +443,15 @@ gc_orphaned_worktrees() {
             continue
         fi
 
-        # Runtime cleanup passed → safe to prune via Git's worktree removal.
-        if git worktree remove --force "$wt" >/dev/null 2>&1; then
+        # Runtime cleanup passed → remove the worktree and its target dir via
+        # disk-hygiene.sh (prefers `herdr-eng cleanup`; keeps dirty trees and
+        # logs why). Without it, fall back to Git's worktree removal.
+        if [ -f "$DISK_HYGIENE_SH" ]; then
+            if bash "$DISK_HYGIENE_SH" cleanup-worktree --reason watchdog-gc "$wt" >&2; then
+                garbage_collected=$((garbage_collected + 1))
+                echo "$WATCHDOG_LOG_PREFIX gc: removed orphaned worktree $wt (issue #$issue, branch $branch)" >&2
+            fi
+        elif git worktree remove --force "$wt" >/dev/null 2>&1; then
             garbage_collected=$((garbage_collected + 1))
             echo "$WATCHDOG_LOG_PREFIX gc: removed orphaned worktree $wt (issue #$issue, branch $branch)" >&2
         fi

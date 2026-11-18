@@ -44,6 +44,7 @@ RAN_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 # scripts dir.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKTREE_GUARD="$SCRIPT_DIR/worktree-guard.sh"
+DISK_HYGIENE="$SCRIPT_DIR/disk-hygiene.sh"
 
 # ---------------------------------------------------------------------------
 # 1. No sandbox → operator error (fail-closed, exit 2).
@@ -137,6 +138,11 @@ cleanup_worktree() {
                 kill "$notify_pid" >/dev/null 2>&1 || true
             fi
         fi
+        # Throwaway worktree: forced removal, preferring the sanctioned
+        # herdr-eng path via disk-hygiene.sh; legacy git commands otherwise.
+        if [ -f "$DISK_HYGIENE" ]; then
+            bash "$DISK_HYGIENE" cleanup-worktree --force --reason explore-qa-gate "$WT_PATH" >/dev/null 2>&1 || true
+        fi
         git -C "$REPO_ROOT" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
         git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
         for _cleanup_try in 1 2 3 4 5; do
@@ -146,6 +152,12 @@ cleanup_worktree() {
         done
     fi
 }
+
+# Every exit path (including an abort by signal) removes the worktree.
+# cleanup_worktree is idempotent, so the inline calls below stay valid.
+trap cleanup_worktree EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # Branch the worktree off the recorded sandbox HEAD sha (detached-safe via a
 # throwaway local branch name). worktree-guard create refuses the primary
@@ -192,8 +204,15 @@ if ! command -v "$QA_BIN" >/dev/null 2>&1; then
     exit 1
 fi
 
+# Shared per-repo CARGO_TARGET_DIR / CARGO_INCREMENTAL=0 for Rust repos
+# (ON by default; AUTOSPEC_SHARED_TARGET=off opts out).
+HYGIENE_ENV=""
+if [ -f "$DISK_HYGIENE" ]; then
+    HYGIENE_ENV="$(bash "$DISK_HYGIENE" env "$WT_PATH" 2>/dev/null || true)"
+fi
+
 QA_RC=0
-( cd "$WT_PATH" && sh -c "$QA_CMD" ) >/dev/null 2>&1 || QA_RC=$?
+( cd "$WT_PATH" && eval "$HYGIENE_ENV" && sh -c "$QA_CMD" ) >/dev/null 2>&1 || QA_RC=$?
 
 if [ "$QA_RC" -ne 0 ] && [ ! -f "$QA_VERDICT_FILE" ]; then
     emit "code_health:explore_qa_gate_failed qa crash rc=$QA_RC"

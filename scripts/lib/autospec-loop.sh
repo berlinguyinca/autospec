@@ -1797,6 +1797,19 @@ fi'
         _cycle=$((_cycle + 1))
         _AUTOSPEC_CONDUCTOR_CYCLE="$_cycle"
         printf '[conductor] cycle %s starting\n' "$_cycle" >&2
+        # Disk pre-flight (ON by default; AUTOSPEC_DISK_PREFLIGHT=off opts out):
+        # below the free-space threshold (after herdr-eng cleanup) park this
+        # cycle instead of starting builds that will fail.
+        local _disk_hygiene="${AUTOSPEC_DISK_HYGIENE_SH:-${_sdir}/disk-hygiene.sh}"
+        if [ "$_dry" != "1" ] && [ -f "$_disk_hygiene" ]; then
+            local _disk_rc=0
+            bash "$_disk_hygiene" preflight --label "conductor-cycle-${_cycle}" >&2 || _disk_rc=$?
+            if [ "$_disk_rc" -eq 75 ]; then
+                printf '[conductor] cycle %s parked: disk low (code_health:disk_low_parked)\n' "$_cycle" >&2
+                if [ "$_poll" -gt 0 ] 2>/dev/null; then sleep "$_poll" || true; fi
+                continue
+            fi
+        fi
         _autospec_conductor_maybe_refresh_self_repair "$_repo_root" "$_repo" "$_dry" || true
         local _cycle_main_sha
         _cycle_main_sha="$(_autospec_conductor_main_sha "$_repo_root" | sed -n '1p')"

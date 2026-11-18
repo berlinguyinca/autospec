@@ -31,6 +31,7 @@
 #   2  worktree creation/removal failed (propagated from worktree-guard.sh)
 #   3  prompt-file missing or unreadable
 #   4  dirty/wrong-branch reuse refused (propagated from worktree-guard.sh)
+#  75  disk low (disk-hygiene.sh preflight): issue parked, fresh worktree removed
 
 set -eu
 
@@ -87,12 +88,32 @@ fi
 
 WT_PATH="/tmp/wt-${BRANCH}"
 
+# disk-hygiene.sh lives next to this script (repo) or in ~/.autospec/scripts/.
+DISK_HYGIENE=""
+if [ -n "$SCRIPT_DIR" ] && [ -x "$SCRIPT_DIR/disk-hygiene.sh" ]; then
+    DISK_HYGIENE="$SCRIPT_DIR/disk-hygiene.sh"
+elif [ -x "${HOME}/.autospec/scripts/disk-hygiene.sh" ]; then
+    DISK_HYGIENE="${HOME}/.autospec/scripts/disk-hygiene.sh"
+fi
+
 if [ "$CLEANUP" -eq 1 ]; then
     if [ -d "$WT_PATH" ]; then
-        git worktree remove --force "$WT_PATH" 2>/dev/null \
-            || rm -rf "$WT_PATH" \
-            || { echo "dispatch-implementer.sh: failed to remove $WT_PATH" >&2; exit 2; }
-        git worktree prune 2>/dev/null || true
+        # Guarded removal: a dirty / unpushed worktree is KEPT and logged (exit 0
+        # so callers never treat "kept" as a failure). Without disk-hygiene.sh
+        # fall back to the legacy forced removal.
+        if [ -n "$DISK_HYGIENE" ]; then
+            hygiene_rc=0
+            bash "$DISK_HYGIENE" cleanup-worktree --reason dispatch-cleanup "$WT_PATH" || hygiene_rc=$?
+            if [ "$hygiene_rc" -eq 2 ]; then
+                echo "dispatch-implementer.sh: failed to remove $WT_PATH" >&2
+                exit 2
+            fi
+        else
+            git worktree remove --force "$WT_PATH" 2>/dev/null \
+                || rm -rf "$WT_PATH" \
+                || { echo "dispatch-implementer.sh: failed to remove $WT_PATH" >&2; exit 2; }
+            git worktree prune 2>/dev/null || true
+        fi
     fi
     exit 0
 fi
@@ -119,11 +140,37 @@ fi
 # Step 2: delegate worktree creation to worktree-guard.sh create.
 # This enforces: no silent dirty reuse (exit 4 with code_health:worktree_dirty_reuse_refused),
 # fetch-before-branch (G4), and idempotent clean reuse.
+# A worktree this run creates is removed again (guarded: clean + pushed only)
+# if the run aborts before the prompt is handed off.
+WT_PREEXISTED=0
+[ -e "$WT_PATH" ] && WT_PREEXISTED=1
+HANDOFF_DONE=0
+abort_cleanup() {
+    if [ "$HANDOFF_DONE" -eq 0 ] && [ "$WT_PREEXISTED" -eq 0 ] && [ -n "$DISK_HYGIENE" ] && [ -e "$WT_PATH" ]; then
+        bash "$DISK_HYGIENE" cleanup-worktree --reason dispatch-abort "$WT_PATH" >/dev/null 2>&1 || true
+    fi
+}
+trap abort_cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
 guard_exit=0
 "$GUARD" create --branch "$BRANCH" --path "$WT_PATH" --base "$BASE_REF" 2>&1 || guard_exit=$?
 if [ "$guard_exit" -ne 0 ]; then
     echo "dispatch-implementer.sh: worktree-guard.sh create exited $guard_exit for $WT_PATH (branch=$BRANCH)" >&2
     exit "$guard_exit"
+fi
+
+# Shared build output + disk pre-flight (ON by default; see disk-hygiene.sh).
+HYGIENE_ENV=""
+if [ -n "$DISK_HYGIENE" ]; then
+    HYGIENE_ENV="$(bash "$DISK_HYGIENE" env "$WT_PATH" 2>/dev/null || true)"
+    preflight_rc=0
+    bash "$DISK_HYGIENE" preflight --label "issue-$ISSUE" --path "$WT_PATH" >&2 || preflight_rc=$?
+    if [ "$preflight_rc" -eq 75 ]; then
+        echo "dispatch-implementer.sh: disk low; parked issue #$ISSUE (code_health:disk_low_parked)" >&2
+        exit 75
+    fi
 fi
 
 # Emit the augmented prompt: verdict header + worktree directive + original prompt body.
@@ -144,7 +191,11 @@ per autospec-run Phase 4 worktree contract (issue #690).
 Issue: #$ISSUE
 Branch: $BRANCH
 
----
-
 EOF
+if [ -n "$HYGIENE_ENV" ]; then
+    # shellcheck disable=SC2016 # literal markdown backticks
+    printf '**Build output (shared, do not override):** run this in your shell before any cargo command.\n\n```bash\n%s\n```\n\n' "$HYGIENE_ENV"
+fi
+printf -- '---\n\n'
 cat "$PROMPT_FILE"
+HANDOFF_DONE=1

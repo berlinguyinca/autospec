@@ -327,6 +327,27 @@ cmd_resolve_base() {
 }
 
 # ---------------------------------------------------------------------------
+# write_hygiene_env — drop a git-excluded `.autospec-env.sh` in a new worktree
+# exporting the shared CARGO_TARGET_DIR / CARGO_INCREMENTAL=0 (disk-hygiene.sh
+# env). Best-effort; silent for non-Rust repos and when hygiene is disabled.
+# ---------------------------------------------------------------------------
+write_hygiene_env() {
+    local path="$1" hygiene env_out exclude
+    hygiene="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)/disk-hygiene.sh"
+    [ -f "$hygiene" ] || hygiene="${HOME}/.autospec/scripts/disk-hygiene.sh"
+    [ -f "$hygiene" ] || return 0
+    env_out="$(bash "$hygiene" env "$path" 2>/dev/null || true)"
+    [ -n "$env_out" ] || return 0
+    printf '%s\n' "$env_out" > "$path/.autospec-env.sh" 2>/dev/null || return 0
+    exclude="$(git -C "$path" rev-parse --path-format=absolute --git-path info/exclude 2>/dev/null || true)"
+    if [ -n "$exclude" ]; then
+        mkdir -p "$(dirname "$exclude")" 2>/dev/null || true
+        grep -qxF '.autospec-env.sh' "$exclude" 2>/dev/null || printf '.autospec-env.sh\n' >> "$exclude"
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # create
 # ---------------------------------------------------------------------------
 cmd_create() {
@@ -409,6 +430,7 @@ cmd_create() {
         fi
     fi
 
+    write_hygiene_env "$path"
     exit 0
 }
 
