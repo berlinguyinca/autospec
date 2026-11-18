@@ -78,6 +78,7 @@ WATCHDOG_SCRIPT_DIR="$SCRIPT_DIR"
 WORKER_LIVENESS_SH="${AUTOSPEC_WORKER_LIVENESS_SH:-$WATCHDOG_SCRIPT_DIR/worker-liveness.sh}"
 REPO_SLUG_SH="${AUTOSPEC_REPO_SLUG_SH:-$WATCHDOG_SCRIPT_DIR/repo-slug.sh}"
 RUNTIME_WORKTREE_CLEANUP_SH="${AUTOSPEC_RUNTIME_WORKTREE_CLEANUP:-$WATCHDOG_SCRIPT_DIR/autospec-runtime-worktree-cleanup.sh}"
+WATCHDOG_GC_GH_TIMEOUT_SECS="${AUTOSPEC_WATCHDOG_GC_GH_TIMEOUT_SECS:-30}"
 DISK_HYGIENE_SH="${AUTOSPEC_DISK_HYGIENE_SH:-$WATCHDOG_SCRIPT_DIR/disk-hygiene.sh}"
 
 if ! command -v gh >/dev/null 2>&1; then
@@ -234,7 +235,7 @@ state_unset() {
 
 issue_meta() {
     # shellcheck disable=SC2086
-    gh issue view "$1" $REPO_ARGS \
+    _gc_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh issue view "$1" $REPO_ARGS \
         --json state,labels \
         --jq '.state + " " + ([.labels[].name] | join(","))' \
         2>/dev/null || true
@@ -397,10 +398,47 @@ _gc_wt_idle_secs() {
     newest=0
     for f in "$gdir/index" "$gdir/logs/HEAD"; do
         [ -e "$f" ] || continue
-        m="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)"
+        # GNU first (BSD `stat -f` on GNU prints filesystem info and pollutes m).
+        m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || true)"
+        case "$m" in
+            ''|*[!0-9]*) echo 0; return 0 ;;   # unknown mtime => "recently active" (keep)
+        esac
         [ "$m" -gt "$newest" ] && newest="$m"
     done
+    [ "$newest" -gt 0 ] || { echo 0; return 0; }
     echo $(( now_ts - newest ))
+}
+
+# Bounded run: `timeout`/`gtimeout` when present, else unbounded.
+_gc_timeout() { # $1 secs, rest = command
+    _t_secs="$1"
+    shift
+    for _t_bin in timeout gtimeout; do
+        if command -v "$_t_bin" >/dev/null 2>&1; then
+            "$_t_bin" "$_t_secs" "$@"
+            return $?
+        fi
+    done
+    "$@"
+}
+
+# "<STATE> <headRefOid>" of the branch's newest PR, or nothing. The single PR
+# lookup point: gh in production; AUTOSPEC_WATCHDOG_PR_SOURCE=git answers from
+# real git facts only (MERGED == HEAD is an ancestor of origin's default branch
+# and not its tip), so tests can run against a real local bare remote.
+_gc_pr_line() { # $1 worktree, $2 branch
+    if [ "${AUTOSPEC_WATCHDOG_PR_SOURCE:-gh}" = "git" ]; then
+        _d="$(git -C "$1" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)"
+        _h="$(git -C "$1" rev-parse HEAD 2>/dev/null)" || return 0
+        _tip="$(git -C "$1" rev-parse -q --verify "$_d^{commit}" 2>/dev/null)" || return 0
+        if [ "$_h" != "$_tip" ] && git -C "$1" merge-base --is-ancestor "$_h" "$_tip" 2>/dev/null; then
+            echo "MERGED $_h"
+        fi
+        return 0
+    fi
+    # shellcheck disable=SC2086
+    _gc_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh pr list --head "$2" --state all --limit 1 ${REPO_ARGS:-} \
+        --json state,headRefOid --jq '.[0] | (.state + " " + .headRefOid) // empty' 2>/dev/null || true
 }
 
 # True (0) when the branch's PR provably ended this worktree's work, for an
@@ -409,9 +447,7 @@ _gc_wt_idle_secs() {
 #   CLOSED with headRefOid == worktree HEAD AND the worktree idle for the grace
 #   period (a failed run closes the PR and retries on the same branch).
 _gc_pr_ends_work() {
-    # shellcheck disable=SC2086
-    pr_line="$(gh pr list --head "$2" --state all --limit 1 ${REPO_ARGS:-} \
-        --json state,headRefOid --jq '.[0] | (.state + " " + .headRefOid) // empty' 2>/dev/null || true)"
+    pr_line="$(_gc_pr_line "$1" "$2")"
     pr_state="${pr_line%% *}"
     pr_oid="${pr_line#* }"
     wt_head="$(git -C "$1" rev-parse HEAD 2>/dev/null || true)"
@@ -435,9 +471,10 @@ gc_orphaned_worktrees() {
             ''|HEAD) continue ;;
         esac
 
-        # Derive the issue number from the branch (e.g. feat/...-issue-700 or a
-        # trailing numeric segment). Skip if we cannot identify an issue.
-        issue="$(printf '%s' "$branch" | grep -oE '[0-9]+' | tail -1 || true)"
+        # Only worktrees on an autospec issue branch (`<prefix>/...issue-<N>`,
+        # e.g. fix/issue-700, feat/autospec-issue-700) are issue-owned. Anything
+        # else (explore-qa-gate-<PID>, hand-made branches) belongs to its owner.
+        issue="$(printf '%s' "$branch" | sed -nE 's#^.*(^|[/-])issue-([0-9]+)([/-].*)?$#\2#p')"
         case "$issue" in
             ''|*[!0-9]*) continue ;;
         esac
@@ -450,6 +487,8 @@ gc_orphaned_worktrees() {
         # GUARD 2 — issue closed or unlabeled. Skip if the issue is still OPEN
         # AND still carries an in-flight label. issue_meta is "STATE labels".
         meta="$(issue_meta "$issue")"
+        # gh failed / unreachable: the issue state is unknown, so keep (fail closed).
+        [ -n "$meta" ] || { echo "$WATCHDOG_LOG_PREFIX gc: keeping $wt (issue #$issue): issue_state_unknown" >&2; continue; }
         gc_state="${meta%% *}"
         gc_labels="${meta#* }"
         [ "$gc_state" = "$meta" ] && gc_labels=""
@@ -485,7 +524,7 @@ gc_orphaned_worktrees() {
         # disk-hygiene.sh (prefers `herdr-eng cleanup`; re-checks dirty/unpushed
         # and logs why). Without it, fall back to Git's worktree removal.
         if [ -f "$DISK_HYGIENE_SH" ]; then
-            if bash "$DISK_HYGIENE_SH" cleanup-worktree --reason watchdog-gc "$wt" >&2; then
+            if bash "$DISK_HYGIENE_SH" cleanup-worktree --checked --reason watchdog-gc "$wt" >&2; then
                 garbage_collected=$((garbage_collected + 1))
                 echo "$WATCHDOG_LOG_PREFIX gc: removed orphaned worktree $wt (issue #$issue, branch $branch)" >&2
             fi

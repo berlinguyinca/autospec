@@ -14,8 +14,10 @@
 # `rm -rf`.
 #
 # Real git throughout: a bare origin, a primary clone, real linked worktrees
-# under the GC scan root. The only stand-ins are a PATH `gh` (the GitHub API has
-# no local equivalent) and the broker runtime-cleanup recorder. The real
+# under the GC scan root. The only stand-ins are a PATH `gh` for ISSUE state and
+# CLOSED-PR state (GitHub has no local equivalent; MERGED is answered from real
+# git via AUTOSPEC_WATCHDOG_PR_SOURCE=git) and the broker runtime-cleanup
+# recorder. The real
 # watchdog script runs in GC-only mode (AUTOSPEC_WATCHDOG_GC_ONLY=1).
 
 ROOT="${BATS_TEST_DIRNAME}/../.."
@@ -237,10 +239,18 @@ run_gc() { run bash "$WATCHDOG"; }
     [ -d "$wt" ]
 }
 
-@test "gc_open_active_merged_pr_at_head_is_reclaimed" {
+# Real-git MERGED: the PR lookup point answers from git facts (HEAD is an
+# ancestor of origin/main and not its tip) against the real bare remote.
+@test "gc_open_active_merged_pr_at_head_is_reclaimed (PR state from real git)" {
     wt="$(make_worktree wt-709 feat/autospec-issue-709)"
+    commit_unpushed "$wt"
+    git -C "$wt" push -q origin HEAD:main
+    git -C "$PRIMARY" pull -q --ff-only origin main
+    echo n > "$PRIMARY/n.txt"; git -C "$PRIMARY" add n.txt; git -C "$PRIMARY" commit -q -m n
+    git -C "$PRIMARY" push -q origin main
+    git -C "$wt" fetch -q origin
     export GH_ISSUE_STATE="OPEN" GH_ISSUE_LABELS="auto-implement"
-    export GH_PR_STATE="MERGED" GH_PR_OID="$(git -C "$wt" rev-parse HEAD)"
+    export AUTOSPEC_WATCHDOG_PR_SOURCE=git
 
     run_gc
 
@@ -256,4 +266,29 @@ run_gc() { run bash "$WATCHDOG"; }
 
     [ "$status" -eq 0 ]
     [ -d "$wt" ]
+}
+
+# Round 2: a non-issue branch (explore-qa-gate-<PID>) is never issue-owned.
+@test "gc_non_issue_branch_is_left_alone (explore-qa-gate-<PID>)" {
+    wt="$(make_worktree wt-explore-qa-gate-12345 explore-qa-gate-12345)"
+
+    run_gc
+
+    [ "$status" -eq 0 ]
+    [ -d "$wt" ]
+    [ ! -s "$RUNTIME_CLEANUP_LOG" ]
+}
+
+# Round 2: keep-reason once per candidate (one fetch), not twice.
+@test "gc_fetches_each_candidate_once" {
+    printf '#!/usr/bin/env bash\necho x >> "%s/fetches.log"\nexec "$(git --exec-path)/git-upload-pack" "$@"\n' "$TEST_TMP" > "$TEST_TMP/count-upload-pack"
+    chmod +x "$TEST_TMP/count-upload-pack"
+    git -C "$PRIMARY" config remote.origin.uploadpack "$TEST_TMP/count-upload-pack"
+    wt="$(make_worktree wt-711 feat/autospec-issue-711)"
+
+    run_gc
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$wt" ]
+    [ "$(wc -l < "$TEST_TMP/fetches.log" | tr -d ' ')" -eq 1 ]
 }

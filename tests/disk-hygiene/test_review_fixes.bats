@@ -2,9 +2,8 @@
 # tests/disk-hygiene/test_review_fixes.bats — regression tests for the review
 # findings on the disk-hygiene PR. Real git repos, real bare remotes, real
 # (locked) worktrees and real directories in a per-test temp dir; the real
-# scripts run. The only stand-ins: `gh` (the GitHub API has no local
-# equivalent; used just for the MERGED-PR and watchdog cases) and the conductor's
-# own helper-script seams (control channel / resilience recorders).
+# scripts run. The only stand-in left: one `gh` stub for the "PR MERGED at
+# exactly HEAD after a squash-merge" case (no local git fact equals it).
 
 ROOT="${BATS_TEST_DIRNAME}/../.."
 DH="$ROOT/scripts/disk-hygiene.sh"
@@ -270,29 +269,26 @@ EOS
 
 # ── Finding 7: a disk-parked conductor still heartbeats, polls control, counts ─
 
-@test "F7 a disk-parked conductor cycle heartbeats, polls control and honours CONDUCTOR_MAX_CYCLES" {
-    FS="$TEST_TMP/fake-scripts"; mkdir -p "$FS"
-    cp "$DH" "$FS/disk-hygiene.sh"
-    cp "$ROOT/scripts/autospec-runtime-config.sh" "$FS/"
-    printf '#!/usr/bin/env bash\necho ctl >> "%s/ctl.log"\nexit 0\n' "$TEST_TMP" > "$FS/autonomous-control-channel.sh"
-    cat > "$FS/autonomous-resilience.sh" <<EOS
-#!/usr/bin/env bash
-echo "\$*" >> "$TEST_TMP/resilience.log"
-case "\${1:-}" in lock) printf 'DECISION:lock-acquired\nLOCK_SESSION:t\n' ;; esac
-exit 0
-EOS
-    chmod +x "$FS"/*.sh
-    mkdir -p "$TEST_TMP/bin"
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/bin/gh"; chmod +x "$TEST_TMP/bin/gh"
+@test "F7 a disk-parked conductor cycle heartbeats, writes state and honours CONDUCTOR_MAX_CYCLES (real helper scripts)" {
+    # The REAL control-channel / resilience / runtime-config / disk-hygiene
+    # scripts from the repo, copied into a sandbox scripts dir (no fakes). No gh
+    # on the path to a real host: the control channel polls an unreachable host
+    # and must fail open.
+    FS="$TEST_TMP/scripts"; mkdir -p "$FS"
+    cp "$ROOT/scripts/disk-hygiene.sh" "$ROOT/scripts/autospec-runtime-config.sh" \
+       "$ROOT/scripts/autonomous-control-channel.sh" "$ROOT/scripts/autonomous-resilience.sh" "$FS/"
     export HOME="$TEST_TMP"
-    PATH="$TEST_TMP/bin:$PATH" AUTOSPEC_CONFIG_FILE="$TEST_TMP/none.yml" run perl -e 'alarm 40; exec @ARGV' bash -c "
+    GH_HOST=unreachable.invalid GH_TOKEN=x AUTOSPEC_CONFIG_FILE="$TEST_TMP/none.yml" \
+        run perl -e 'alarm 90; exec @ARGV' bash -c "
         . '$LOOP_LIB'
         CONDUCTOR_SCRIPTS_DIR='$FS' CONDUCTOR_REPO=o/n CONDUCTOR_MAX_CYCLES=2 \
         CONDUCTOR_POLL_INTERVAL=0 AUTOSPEC_DISK_PARK_SLEEP_SECS=0 CONDUCTOR_NO_DIGEST=1 \
         AUTOSPEC_DISK_MIN_FREE_PCT=100 AUTOSPEC_DISK_MIN_FREE_GIB=99999999 \
         autospec_conductor_run"
     [ "$status" -ne 142 ]
-    [ "$(wc -l < "$TEST_TMP/ctl.log" | tr -d ' ')" -eq 2 ]
-    grep -q "parked:disk-low" "$TEST_TMP/resilience.log"
+    [[ "$output" == *"cycle 1 parked: disk low"* ]]
+    [[ "$output" == *"cycle 2 parked: disk low"* ]]
+    [[ "$output" == *"STATUS:parked:disk-low:cycle-2"* ]]
+    [[ "$output" == *"stopped: max-cycles-reached (cycles=2)"* ]]
     [[ "$output" == *"disk_low_parked"* ]]
 }

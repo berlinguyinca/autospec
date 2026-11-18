@@ -108,12 +108,17 @@ if [ "$CLEANUP" -eq 1 ]; then
                 # A leftover that is NOT a git worktree at all (e.g. an aborted
                 # `mkdir`/copy) was removable before disk-hygiene existed and
                 # would wedge the issue. Remove it only when it is a plain
-                # directory we own under our own prefix, outside any git repo
-                # and not a registered worktree. Never a path inside a repo.
-                if [ ! -L "$WT_PATH" ] && [ -O "$WT_PATH" ] \
+                # directory we own under our own prefix that holds NO `.git`
+                # entry (file or dir: a dangling worktree .git file means real
+                # work), is outside any git repo and is not a registered
+                # worktree (compared by canonical path: macOS lists /private/tmp).
+                # Anything else is kept and reported.
+                wt_real="$(cd "$WT_PATH" 2>/dev/null && pwd -P || true)"
+                if [ -n "$wt_real" ] && [ ! -L "$WT_PATH" ] && [ -O "$WT_PATH" ] \
                     && case "$WT_PATH" in *..*) false ;; /tmp/wt-?*) true ;; *) false ;; esac \
+                    && [ ! -e "$WT_PATH/.git" ] && [ ! -L "$WT_PATH/.git" ] \
                     && ! git -C "$WT_PATH" rev-parse --git-dir >/dev/null 2>&1 \
-                    && ! git worktree list --porcelain 2>/dev/null | grep -qxF "worktree $WT_PATH"; then
+                    && ! git worktree list --porcelain 2>/dev/null | grep -qxF "worktree $wt_real"; then
                     rm -rf "$WT_PATH" 2>/dev/null || true
                 fi
                 if [ -e "$WT_PATH" ]; then
@@ -177,7 +182,7 @@ if [ "$guard_exit" -ne 0 ]; then
     exit "$guard_exit"
 fi
 
-# Shared build output + disk pre-flight (ON by default; see disk-hygiene.sh).
+# Per-worktree build output (target/ inside the worktree) + disk pre-flight (ON by default; see disk-hygiene.sh).
 HYGIENE_ENV=""
 if [ -n "$DISK_HYGIENE" ]; then
     HYGIENE_ENV="$(bash "$DISK_HYGIENE" env "$WT_PATH" 2>/dev/null || true)"
@@ -210,7 +215,7 @@ Branch: $BRANCH
 EOF
 if [ -n "$HYGIENE_ENV" ]; then
     # shellcheck disable=SC2016 # literal markdown backticks
-    printf '**Build output (shared, do not override):** run this in your shell before any cargo command.\n\n```bash\n%s\n```\n\n' "$HYGIENE_ENV"
+    printf '**Build env:** each worktree builds into its own `target/` (do not set `CARGO_TARGET_DIR`); run this in your shell before any cargo command.\n\n```bash\n%s\n```\n\n' "$HYGIENE_ENV"
 fi
 printf -- '---\n\n'
 cat "$PROMPT_FILE"

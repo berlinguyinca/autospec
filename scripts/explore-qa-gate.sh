@@ -145,19 +145,13 @@ cleanup_worktree() {
                 kill "$notify_pid" >/dev/null 2>&1 || true
             fi
         fi
-        # Throwaway worktree: forced removal through disk-hygiene.sh (prefers
-        # the sanctioned herdr-eng path); legacy git commands only without it.
-        if [ -f "$DISK_HYGIENE" ]; then
-            bash "$DISK_HYGIENE" cleanup-worktree --force --reason explore-qa-gate "$WT_PATH" >/dev/null 2>&1 || true
-        else
-            git -C "$REPO_ROOT" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
-            git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
-            for _cleanup_try in 1 2 3 4 5; do
-                rm -rf "$WT_PATH" 2>/dev/null || true
-                [ ! -d "$WT_PATH" ] && break
-                sleep 0.2
-            done
-        fi
+        # Throwaway worktree THIS run created (ownership marker above): always
+        # removed, whatever the AUTOSPEC_DISK_CLEANUP / AUTOSPEC_DISK_HYGIENE
+        # opt-outs (those govern implementer worktrees, not this gate's own).
+        # Git only, on the exact registered root; never rm -rf a path git does
+        # not recognise (a refused removal leaves it in place).
+        git -C "$REPO_ROOT" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
+        git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
     fi
 }
 

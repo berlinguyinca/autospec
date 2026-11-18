@@ -7,6 +7,8 @@
 #       Remove a linked worktree (and the target/ dir inside it) when the tree
 #       is clean AND every commit is pushed. Dirty / unpushed work is KEPT and
 #       logged. --force skips both checks (throwaway worktrees only).
+#       --checked: the caller already ran keep-reason and it was empty; skips
+#       the network re-check but still re-verifies dirtiness locally.
 #       The path must be exactly a registered, unlocked linked-worktree root
 #       (never a subdirectory, the primary checkout, or a locked worktree).
 #       Prefers `herdr-eng cleanup --scope worktree --path <p>` when installed
@@ -31,10 +33,10 @@
 #   AUTOSPEC_DISK_HYGIENE=off        master switch, disables everything here
 #   AUTOSPEC_DISK_CLEANUP=off        no automatic worktree cleanup
 #   AUTOSPEC_DISK_PREFLIGHT=off      no free-space gate
-#   AUTOSPEC_DISK_MIN_FREE_PCT       default 5    (a path is low only when free %
-#   AUTOSPEC_DISK_MIN_FREE_GIB       default 20    is below this AND free GiB is
-#                                    below this, so big disks are not parked by
-#                                    the percentage nor small hosts by the floor)
+#   AUTOSPEC_DISK_MIN_FREE_PCT       default 10   (a path is low when free space
+#   AUTOSPEC_DISK_MIN_FREE_GIB       default 20    is below min(GIB, PCT% of the
+#                                    volume size): small volumes park before they
+#                                    are nearly full, big ones are not over-parked)
 #   AUTOSPEC_HERDR_ENG               herdr-eng binary (default `herdr-eng`)
 #
 # Sourceable: `. disk-hygiene.sh` defines dh_* functions and runs nothing.
@@ -111,11 +113,48 @@ dh_wt_state() {
     esac
 }
 
+# Run a command with a timeout when one is available (timeout / gtimeout);
+# without either it runs unbounded (BatchMode still stops ssh prompts).
+dh_timeout() { # $1 = seconds, rest = command
+    local secs="$1" t
+    shift
+    for t in timeout gtimeout; do
+        if command -v "$t" >/dev/null 2>&1; then
+            "$t" "$secs" "$@"
+            return $?
+        fi
+    done
+    "$@"
+}
+
+# Bounded, non-interactive `git fetch --prune origin` (best effort).
+dh_fetch() {
+    GIT_TERMINAL_PROMPT=0     GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}"         dh_timeout "${AUTOSPEC_DISK_FETCH_TIMEOUT_SECS:-30}"         git -C "$1" fetch --prune -q origin >/dev/null 2>&1 || true
+}
+
+# Default branch ref that actually exists (origin/HEAD target, else origin/main|master).
+dh_default_branch() {
+    local wt="$1" d
+    d="$(git -C "$wt" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    if [ -n "$d" ] && git -C "$wt" rev-parse -q --verify "$d^{commit}" >/dev/null 2>&1; then
+        printf '%s\n' "$d"
+        return 0
+    fi
+    for d in origin/main origin/master; do
+        if git -C "$wt" rev-parse -q --verify "$d^{commit}" >/dev/null 2>&1; then
+            printf '%s\n' "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Is HEAD's work safely on a remote? Fetches/prunes first (best effort) so
 # stale remote-tracking refs do not make deleted/rewritten work look pushed.
+# Fails closed: any doubt means "not pushed".
 dh_pushed() {
-    local wt="$1" head upstream branch default oid
-    GIT_TERMINAL_PROMPT=0 git -C "$wt" fetch --prune -q origin >/dev/null 2>&1 || true
+    local wt="$1" head upstream branch default oid cherry merges
+    dh_fetch "$wt"
     head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || return 1
     branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
     # The branch's own remote ref (same name); a `-b x origin/main` worktree's
@@ -131,37 +170,41 @@ dh_pushed() {
     fi
     # Squash/rebase-merged then deleted branch: PR MERGED at exactly this HEAD.
     if [ -n "$branch" ] && [ "$branch" != HEAD ] && command -v gh >/dev/null 2>&1; then
-        oid="$(cd "$wt" && gh pr list --head "$branch" --state merged --limit 5 \
+        oid="$(cd "$wt" && dh_timeout "${AUTOSPEC_DISK_GH_TIMEOUT_SECS:-30}" gh pr list --head "$branch" --state merged --limit 5 \
             --json headRefOid --jq '.[].headRefOid' 2>/dev/null || true)"
         printf '%s\n' "$oid" | grep -qx "$head" && return 0
     fi
     # Patch-equivalent to the default branch (cherry-pick / single-commit squash).
-    default="$(git -C "$wt" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
-    if [ -z "$default" ]; then
-        for default in origin/main origin/master; do
-            git -C "$wt" rev-parse -q --verify "$default" >/dev/null 2>&1 && break
-            default=""
-        done
-    fi
-    if [ -n "$default" ] && ! git -C "$wt" cherry "$default" HEAD 2>/dev/null | grep -q '^+'; then
-        return 0
-    fi
-    return 1
+    # cherry never lists merge commits, so require there are none, and treat a
+    # cherry failure (e.g. dangling origin/HEAD) as NOT pushed.
+    default="$(dh_default_branch "$wt")" || return 1
+    merges="$(git -C "$wt" rev-list --merges "$default..HEAD" 2>/dev/null)" || return 1
+    [ -z "$merges" ] || return 1
+    cherry="$(git -C "$wt" cherry "$default" HEAD 2>/dev/null)" || return 1
+    printf '%s\n' "$cherry" | grep -q '^+' && return 1
+    return 0
 }
 
 # Why a worktree must be kept: prints a reason, or nothing when safe to remove.
-dh_keep_reason() {
+dh_dirty_reason() { # local-only check: status_failed / dirty / nothing
     local wt="$1" porcelain
     porcelain="$(git -C "$wt" status --porcelain 2>/dev/null)" || { echo "status_failed"; return; }
-    [ -z "$porcelain" ] || { echo "dirty"; return; }
+    [ -z "$porcelain" ] || echo "dirty"
+}
+
+dh_keep_reason() {
+    local wt="$1" r
+    r="$(dh_dirty_reason "$wt")"
+    [ -z "$r" ] || { echo "$r"; return; }
     dh_pushed "$wt" || echo "unpushed"
 }
 
 dh_cleanup_worktree() {
-    local force=0 reason="exit" wt top primary state keep bin
+    local force=0 checked=0 reason="exit" wt top primary state keep bin
     while [ $# -gt 0 ]; do
         case "$1" in
             --force) force=1; shift ;;
+            --checked) checked=1; shift ;;
             --reason) reason="$2"; shift 2 ;;
             *) break ;;
         esac
@@ -199,7 +242,11 @@ dh_cleanup_worktree() {
     fi
 
     if [ "$force" -eq 0 ]; then
-        keep="$(dh_keep_reason "$wt")"
+        if [ "$checked" -eq 1 ]; then
+            keep="$(dh_dirty_reason "$wt")"
+        else
+            keep="$(dh_keep_reason "$wt")"
+        fi
         if [ -n "$keep" ]; then
             dh_log "disk_hygiene:worktree_kept path=$wt why=$keep reason=$reason"
             return 1
@@ -228,22 +275,26 @@ dh_cleanup_worktree() {
     return 0
 }
 
-dh_free_line() { # $1 path -> "pct_free gib_free"
+dh_free_line() { # $1 path -> "avail_kib total_kib"
     local p="$1"
     while [ ! -e "$p" ] && [ "$p" != "/" ]; do p="$(dirname "$p")"; done
-    df -Pk "$p" 2>/dev/null | awk 'NR==2 { tot=$2; av=$4; if (tot>0) printf "%d %d\n", av*100/tot, av/1048576 }'
+    df -Pk "$p" 2>/dev/null | awk 'NR==2 && $2>0 { printf "%d %d\n", $4, $2 }'
 }
 
+# A path is low when free space < min(MIN_FREE_GIB, MIN_FREE_PCT% of the volume).
 dh_low_paths() { # echoes "path pct gib" for each low path
-    local p line pct gib min_pct min_gib
-    min_pct="${AUTOSPEC_DISK_MIN_FREE_PCT:-5}"
+    local p line avail tot min_pct min_gib floor_kib pct_kib
+    min_pct="${AUTOSPEC_DISK_MIN_FREE_PCT:-10}"
     min_gib="${AUTOSPEC_DISK_MIN_FREE_GIB:-20}"
     for p in "$@"; do
         line="$(dh_free_line "$p")"
         [ -n "$line" ] || continue
-        pct="${line% *}"; gib="${line#* }"
-        if [ "$pct" -lt "$min_pct" ] && [ "$gib" -lt "$min_gib" ]; then
-            printf '%s %s %s\n' "$p" "$pct" "$gib"
+        avail="${line% *}"; tot="${line#* }"
+        floor_kib=$((min_gib * 1048576))
+        pct_kib=$((tot * min_pct / 100))
+        [ "$pct_kib" -lt "$floor_kib" ] && floor_kib="$pct_kib"
+        if [ "$avail" -lt "$floor_kib" ]; then
+            printf '%s %s %s\n' "$p" $((avail * 100 / tot)) $((avail / 1048576))
         fi
     done
 }
@@ -276,7 +327,7 @@ dh_preflight() {
         low="$(dh_low_paths "${paths[@]}")"
     fi
     if [ -n "$low" ]; then
-        dh_log "disk_hygiene:disk_low_parked label=$label low=\"$(printf '%s' "$low" | tr '\n' ';')\" min_pct=${AUTOSPEC_DISK_MIN_FREE_PCT:-5} min_gib=${AUTOSPEC_DISK_MIN_FREE_GIB:-20}"
+        dh_log "disk_hygiene:disk_low_parked label=$label low=\"$(printf '%s' "$low" | tr '\n' ';')\" min_pct=${AUTOSPEC_DISK_MIN_FREE_PCT:-10} min_gib=${AUTOSPEC_DISK_MIN_FREE_GIB:-20}"
         return 75
     fi
     dh_log "disk_hygiene:preflight_ok label=$label"
@@ -292,7 +343,7 @@ dh_main() {
         env) dh_env "$@" ;;
         preflight) dh_preflight "$@" ;;
         docker-args) dh_docker_args ;;
-        ""|-h|--help) sed -n '2,45p' "$0" ;;
+        ""|-h|--help) sed -n '2,50p' "$0" ;;
         *) dh_log "$DH_PROG: unknown subcommand: $cmd"; return 2 ;;
     esac
 }
