@@ -129,21 +129,27 @@ dh_timeout() { # $1 = seconds, rest = command
     "$@"
 }
 
-# Bounded, non-interactive `git fetch --prune origin` (best effort). The
-# BatchMode default is applied only when neither GIT_SSH_COMMAND nor the repo's
-# core.sshCommand is set, so a configured key/identity is never overridden.
+# Bounded, non-interactive `git fetch --prune origin` (best effort). Git's ssh
+# precedence is GIT_SSH_COMMAND > core.sshCommand > GIT_SSH. A configured command
+# keeps its identity and gets `-o BatchMode=yes -o ConnectTimeout=10` appended
+# (unless GIT_SSH_VARIANT/ssh.variant says it is not OpenSSH-style); a GIT_SSH
+# program and its variant are left untouched; with none of them set, plain ssh
+# gets the same options.
 dh_fetch() {
-    local ssh_cmd="${GIT_SSH_COMMAND:-}"
-    if [ -z "$ssh_cmd" ] && [ -z "$(git -C "$1" config --get core.sshCommand 2>/dev/null)" ]; then
-        ssh_cmd="ssh -o BatchMode=yes -o ConnectTimeout=10"
-    fi
+    local ssh_cmd="${GIT_SSH_COMMAND:-}" variant="${GIT_SSH_VARIANT:-}" opts="-o BatchMode=yes -o ConnectTimeout=10"
+    local -a env_args=(GIT_TERMINAL_PROMPT=0)
+    [ -n "$variant" ] || variant="$(git -C "$1" config --get ssh.variant 2>/dev/null || true)"
+    [ -n "$ssh_cmd" ] || ssh_cmd="$(git -C "$1" config --get core.sshCommand 2>/dev/null || true)"
     if [ -n "$ssh_cmd" ]; then
-        GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$ssh_cmd" \
-            dh_timeout "${AUTOSPEC_DISK_FETCH_TIMEOUT_SECS:-30}" git -C "$1" fetch --prune -q origin >/dev/null 2>&1 || true
-    else
-        GIT_TERMINAL_PROMPT=0 \
-            dh_timeout "${AUTOSPEC_DISK_FETCH_TIMEOUT_SECS:-30}" git -C "$1" fetch --prune -q origin >/dev/null 2>&1 || true
+        case "$variant" in
+            ''|ssh|auto) env_args+=("GIT_SSH_COMMAND=$ssh_cmd $opts") ;;
+            *) env_args+=("GIT_SSH_COMMAND=$ssh_cmd") ;;
+        esac
+    elif [ -z "${GIT_SSH:-}" ]; then
+        env_args+=("GIT_SSH_COMMAND=ssh $opts")
     fi
+    dh_timeout "${AUTOSPEC_DISK_FETCH_TIMEOUT_SECS:-30}" env "${env_args[@]}" \
+        git -C "$1" fetch --prune -q origin >/dev/null 2>&1 || true
 }
 
 # Default branch ref that actually exists (origin/HEAD target, else origin/main|master).
@@ -219,8 +225,15 @@ dh_cleanup_worktree() {
         case "$1" in
             --force) force=1; shift ;;
             --checked) checked=1; shift ;;
-            --expect-head) expect_head="$2"; shift 2 ;;
-            --reason) reason="$2"; shift 2 ;;
+            --expect-head|--reason)
+                # A guard option with no (or an empty) value fails closed: an
+                # empty --expect-head must never mean "no HEAD check".
+                if [ $# -lt 2 ] || [ -z "$2" ]; then
+                    dh_log "$DH_PROG: cleanup-worktree: $1 requires a non-empty value"
+                    return 2
+                fi
+                if [ "$1" = "--expect-head" ]; then expect_head="$2"; else reason="$2"; fi
+                shift 2 ;;
             *) break ;;
         esac
     done
@@ -361,6 +374,7 @@ dh_main() {
     [ $# -gt 0 ] && shift
     case "$cmd" in
         cleanup-worktree) dh_cleanup_worktree "$@" ;;
+        cleanup-enabled) ! dh_off "${AUTOSPEC_DISK_CLEANUP:-on}" ;;
         keep-reason) dh_keep_reason "$(dh_abs "${1:-.}")" ;;
         env) dh_env "$@" ;;
         preflight) dh_preflight "$@" ;;
