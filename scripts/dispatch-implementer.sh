@@ -105,8 +105,21 @@ if [ "$CLEANUP" -eq 1 ]; then
             hygiene_rc=0
             bash "$DISK_HYGIENE" cleanup-worktree --reason dispatch-cleanup "$WT_PATH" || hygiene_rc=$?
             if [ "$hygiene_rc" -eq 2 ]; then
-                echo "dispatch-implementer.sh: failed to remove $WT_PATH" >&2
-                exit 2
+                # A leftover that is NOT a git worktree at all (e.g. an aborted
+                # `mkdir`/copy) was removable before disk-hygiene existed and
+                # would wedge the issue. Remove it only when it is a plain
+                # directory we own under our own prefix, outside any git repo
+                # and not a registered worktree. Never a path inside a repo.
+                if [ ! -L "$WT_PATH" ] && [ -O "$WT_PATH" ] \
+                    && case "$WT_PATH" in *..*) false ;; /tmp/wt-?*) true ;; *) false ;; esac \
+                    && ! git -C "$WT_PATH" rev-parse --git-dir >/dev/null 2>&1 \
+                    && ! git worktree list --porcelain 2>/dev/null | grep -qxF "worktree $WT_PATH"; then
+                    rm -rf "$WT_PATH" 2>/dev/null || true
+                fi
+                if [ -e "$WT_PATH" ]; then
+                    echo "dispatch-implementer.sh: failed to remove $WT_PATH" >&2
+                    exit 2
+                fi
             fi
         else
             git worktree remove --force "$WT_PATH" 2>/dev/null \
@@ -140,22 +153,25 @@ fi
 # Step 2: delegate worktree creation to worktree-guard.sh create.
 # This enforces: no silent dirty reuse (exit 4 with code_health:worktree_dirty_reuse_refused),
 # fetch-before-branch (G4), and idempotent clean reuse.
-# A worktree this run creates is removed again (guarded: clean + pushed only)
-# if the run aborts before the prompt is handed off.
-WT_PREEXISTED=0
-[ -e "$WT_PATH" ] && WT_PREEXISTED=1
+# A worktree this run CREATES is removed again (guarded: clean + pushed only)
+# if the run aborts before the prompt is handed off. Ownership comes from
+# worktree-guard itself (it writes this file only when it really created the
+# worktree), never from a pre-create existence check: when two dispatchers race
+# on one branch the loser reuses the winner's worktree and must not delete it.
+CREATED_FILE="$(mktemp "${TMPDIR:-/tmp}/dispatch-created.XXXXXX")"
 HANDOFF_DONE=0
 abort_cleanup() {
-    if [ "$HANDOFF_DONE" -eq 0 ] && [ "$WT_PREEXISTED" -eq 0 ] && [ -n "$DISK_HYGIENE" ] && [ -e "$WT_PATH" ]; then
+    if [ "$HANDOFF_DONE" -eq 0 ] && [ -s "$CREATED_FILE" ] && [ -n "$DISK_HYGIENE" ] && [ -e "$WT_PATH" ]; then
         bash "$DISK_HYGIENE" cleanup-worktree --reason dispatch-abort "$WT_PATH" >/dev/null 2>&1 || true
     fi
+    rm -f "$CREATED_FILE"
 }
 trap abort_cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
 guard_exit=0
-"$GUARD" create --branch "$BRANCH" --path "$WT_PATH" --base "$BASE_REF" 2>&1 || guard_exit=$?
+WORKTREE_GUARD_CREATED_FILE="$CREATED_FILE" "$GUARD" create --branch "$BRANCH" --path "$WT_PATH" --base "$BASE_REF" 2>&1 || guard_exit=$?
 if [ "$guard_exit" -ne 0 ]; then
     echo "dispatch-implementer.sh: worktree-guard.sh create exited $guard_exit for $WT_PATH (branch=$BRANCH)" >&2
     exit "$guard_exit"

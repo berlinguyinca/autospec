@@ -66,6 +66,9 @@ if command -v autospec_runtime_config_int >/dev/null 2>&1; then
 else
     WATCHDOG_GC_HEARTBEAT_FRESH_SECS="${AUTOSPEC_WATCHDOG_GC_HEARTBEAT_FRESH_SECS:-${AUTOSPEC_WATCHDOG_STALE_SECS:-1800}}"
 fi
+# A CLOSED PR (same head as the worktree) only releases an open+active issue's
+# worktree after the worktree has been idle this long.
+WATCHDOG_GC_PR_CLOSED_GRACE_SECS="${AUTOSPEC_WATCHDOG_GC_PR_CLOSED_GRACE_SECS:-3600}"
 
 WATCHDOG_LOG_PREFIX="[autospec-watchdog]"
 
@@ -388,6 +391,38 @@ _gc_heartbeat_is_live() {
     [ "$hb_age" -lt "$WATCHDOG_GC_HEARTBEAT_FRESH_SECS" ]
 }
 
+# Seconds since the worktree last saw git activity (index / HEAD reflog).
+_gc_wt_idle_secs() {
+    gdir="$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null || true)"
+    newest=0
+    for f in "$gdir/index" "$gdir/logs/HEAD"; do
+        [ -e "$f" ] || continue
+        m="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)"
+        [ "$m" -gt "$newest" ] && newest="$m"
+    done
+    echo $(( now_ts - newest ))
+}
+
+# True (0) when the branch's PR provably ended this worktree's work, for an
+# issue that is still open with active labels:
+#   MERGED with headRefOid == worktree HEAD, or
+#   CLOSED with headRefOid == worktree HEAD AND the worktree idle for the grace
+#   period (a failed run closes the PR and retries on the same branch).
+_gc_pr_ends_work() {
+    # shellcheck disable=SC2086
+    pr_line="$(gh pr list --head "$2" --state all --limit 1 ${REPO_ARGS:-} \
+        --json state,headRefOid --jq '.[0] | (.state + " " + .headRefOid) // empty' 2>/dev/null || true)"
+    pr_state="${pr_line%% *}"
+    pr_oid="${pr_line#* }"
+    wt_head="$(git -C "$1" rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$wt_head" ] && [ "$pr_oid" = "$wt_head" ] || return 1
+    case "$pr_state" in
+        MERGED) return 0 ;;
+        CLOSED) [ "$(_gc_wt_idle_secs "$1")" -ge "$WATCHDOG_GC_PR_CLOSED_GRACE_SECS" ] ;;
+        *) return 1 ;;
+    esac
+}
+
 gc_orphaned_worktrees() {
     command -v git >/dev/null 2>&1 || return 0
     for wt in "$WATCHDOG_GC_DIR"/wt-*; do
@@ -407,11 +442,6 @@ gc_orphaned_worktrees() {
             ''|*[!0-9]*) continue ;;
         esac
 
-        # GUARD 1 — un-pushed commits. NEVER prune if a local commit is not on
-        # a remote. This is the load-bearing data-integrity check.
-        unpushed="$(git -C "$wt" log HEAD --not --remotes --oneline 2>/dev/null || echo "x")"
-        [ -z "$unpushed" ] || continue
-
         # GUARD 3 — live heartbeat (cheap local file check; do it before gh).
         if _gc_heartbeat_is_live "$issue"; then
             continue
@@ -423,29 +453,37 @@ gc_orphaned_worktrees() {
         gc_state="${meta%% *}"
         gc_labels="${meta#* }"
         [ "$gc_state" = "$meta" ] && gc_labels=""
-        # A merged/closed PR for the branch also ends the work (the issue can
-        # lag behind): everything is pushed, so the worktree is reclaimable.
-        # shellcheck disable=SC2086
-        gc_pr_state="$(gh pr list --head "$branch" --state all --limit 1 $REPO_ARGS --json state --jq '.[0].state // empty' 2>/dev/null || true)"
-        case "$gc_pr_state" in
-            MERGED|CLOSED) gc_state="PR_$gc_pr_state" ;;
-        esac
-        if [ "$gc_state" = "OPEN" ]; then
-            if printf '%s' ",${gc_labels}," | grep -qE ',(auto-implement|in-progress-by-bot),'; then
-                continue
-            fi
+        if [ "$gc_state" = "OPEN" ] \
+            && printf '%s' ",${gc_labels}," | grep -qE ',(auto-implement|in-progress-by-bot),'; then
+            # Active issue. Only a PR that provably ended THIS worktree's work
+            # releases it: autospec-run's failure path closes the PR and retries
+            # on the same branch, so a CLOSED PR alone proves nothing.
+            _gc_pr_ends_work "$wt" "$branch" || continue
         fi
 
-        # All three Git guards passed. Release broker-owned resources before
-        # asking Git to remove the worktree; adapter failure preserves it.
+        # GUARD 1 — dirty tree or commits not on a remote. NEVER prune either.
+        # Before any teardown, so a kept worktree keeps its runtime resources.
+        if [ -f "$DISK_HYGIENE_SH" ]; then
+            keep="$(bash "$DISK_HYGIENE_SH" keep-reason "$wt" 2>/dev/null || echo status_failed)"
+            if [ -n "$keep" ]; then
+                echo "$WATCHDOG_LOG_PREFIX gc: keeping $wt (issue #$issue): $keep" >&2
+                continue
+            fi
+        else
+            unpushed="$(git -C "$wt" log HEAD --not --remotes --oneline 2>/dev/null || echo "x")"
+            [ -z "$unpushed" ] || continue
+        fi
+
+        # All guards passed. Release broker-owned resources before asking Git
+        # to remove the worktree; adapter failure preserves it.
         if ! "$RUNTIME_WORKTREE_CLEANUP_SH" "$wt"; then
             echo "$WATCHDOG_LOG_PREFIX gc: runtime cleanup failed for $wt; preserving worktree" >&2
             continue
         fi
 
         # Runtime cleanup passed → remove the worktree and its target dir via
-        # disk-hygiene.sh (prefers `herdr-eng cleanup`; keeps dirty trees and
-        # logs why). Without it, fall back to Git's worktree removal.
+        # disk-hygiene.sh (prefers `herdr-eng cleanup`; re-checks dirty/unpushed
+        # and logs why). Without it, fall back to Git's worktree removal.
         if [ -f "$DISK_HYGIENE_SH" ]; then
             if bash "$DISK_HYGIENE_SH" cleanup-worktree --reason watchdog-gc "$wt" >&2; then
                 garbage_collected=$((garbage_collected + 1))

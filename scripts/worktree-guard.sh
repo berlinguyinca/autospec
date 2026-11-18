@@ -328,8 +328,8 @@ cmd_resolve_base() {
 
 # ---------------------------------------------------------------------------
 # write_hygiene_env — drop a git-excluded `.autospec-env.sh` in a new worktree
-# exporting the shared CARGO_TARGET_DIR / CARGO_INCREMENTAL=0 (disk-hygiene.sh
-# env). Best-effort; silent for non-Rust repos and when hygiene is disabled.
+# exporting CARGO_INCREMENTAL=0 (disk-hygiene.sh env). Best-effort; silent for
+# non-Rust repos and when hygiene is disabled. Written on create AND reuse.
 # ---------------------------------------------------------------------------
 write_hygiene_env() {
     local path="$1" hygiene env_out exclude
@@ -399,6 +399,9 @@ cmd_create() {
         if [ "$existing_branch" = "$branch" ] && [ -z "$existing_porcelain" ] \
                 && [ "$is_linked_worktree" -eq 1 ]; then
             # Clean, same branch, genuine linked worktree -> idempotent reuse.
+            # Not a creation: WORKTREE_GUARD_CREATED_FILE stays untouched so the
+            # caller never takes ownership of (and later deletes) a reused tree.
+            write_hygiene_env "$path"
             exit 0
         fi
         emit "code_health:worktree_dirty_reuse_refused path=$path branch=$existing_branch want=$branch linked=$is_linked_worktree"
@@ -430,6 +433,11 @@ cmd_create() {
         fi
     fi
 
+    # Ownership record: only a process that really created the worktree writes
+    # its PID here (callers pass a private file via WORKTREE_GUARD_CREATED_FILE).
+    if [ -n "${WORKTREE_GUARD_CREATED_FILE:-}" ]; then
+        printf '%s\n' "$$" > "$WORKTREE_GUARD_CREATED_FILE" 2>/dev/null || true
+    fi
     write_hygiene_env "$path"
     exit 0
 }

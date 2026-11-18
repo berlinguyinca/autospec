@@ -125,9 +125,16 @@ fi
 # ---------------------------------------------------------------------------
 WT_PATH="${AUTOSPEC_QA_GATE_WORKTREE:-/tmp/wt-explore-qa-gate-$$}"
 
-# Inline cleanup (no RETURN trap): remove the worktree we created.
+# Ownership: only a worktree THIS run created is ever removed. The guard writes
+# its PID to WT_CREATED_FILE on a real creation (never on reuse or refusal), so a
+# refused dirty/foreign worktree at WT_PATH is left strictly alone.
+WT_CREATED_FILE="$(mktemp "${TMPDIR:-/tmp}/explore-qa-gate-created.XXXXXX")"
+
+# Idempotent cleanup (no RETURN trap): removes the worktree we created, once.
 cleanup_worktree() {
     local notify_pid=""
+    [ -s "$WT_CREATED_FILE" ] || return 0
+    : > "$WT_CREATED_FILE"
     if [ -n "${WT_PATH:-}" ] && [ -d "$WT_PATH" ]; then
         if [ -f "$WT_PATH/.omx/state/notify-fallback.pid" ]; then
             notify_pid="$(cat "$WT_PATH/.omx/state/notify-fallback.pid" 2>/dev/null || true)"
@@ -138,24 +145,31 @@ cleanup_worktree() {
                 kill "$notify_pid" >/dev/null 2>&1 || true
             fi
         fi
-        # Throwaway worktree: forced removal, preferring the sanctioned
-        # herdr-eng path via disk-hygiene.sh; legacy git commands otherwise.
+        # Throwaway worktree: forced removal through disk-hygiene.sh (prefers
+        # the sanctioned herdr-eng path); legacy git commands only without it.
         if [ -f "$DISK_HYGIENE" ]; then
             bash "$DISK_HYGIENE" cleanup-worktree --force --reason explore-qa-gate "$WT_PATH" >/dev/null 2>&1 || true
+        else
+            git -C "$REPO_ROOT" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
+            git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
+            for _cleanup_try in 1 2 3 4 5; do
+                rm -rf "$WT_PATH" 2>/dev/null || true
+                [ ! -d "$WT_PATH" ] && break
+                sleep 0.2
+            done
         fi
-        git -C "$REPO_ROOT" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
-        git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
-        for _cleanup_try in 1 2 3 4 5; do
-            rm -rf "$WT_PATH" 2>/dev/null || true
-            [ ! -d "$WT_PATH" ] && break
-            sleep 0.2
-        done
     fi
 }
 
-# Every exit path (including an abort by signal) removes the worktree.
-# cleanup_worktree is idempotent, so the inline calls below stay valid.
-trap cleanup_worktree EXIT
+# shellcheck disable=SC2329 # invoked via the EXIT trap
+finish() {
+    cleanup_worktree
+    rm -f "$WT_CREATED_FILE"
+}
+
+# Every exit path (including an abort by signal) runs the idempotent cleanup.
+# Safe before creation: with no ownership record it removes nothing.
+trap finish EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
@@ -165,7 +179,7 @@ trap 'exit 130' INT
 WT_BRANCH="explore-qa-gate-$$"
 WT_CREATE_OK=0
 if [ -f "$WORKTREE_GUARD" ]; then
-    if bash "$WORKTREE_GUARD" create \
+    if WORKTREE_GUARD_CREATED_FILE="$WT_CREATED_FILE" bash "$WORKTREE_GUARD" create \
         --branch "$WT_BRANCH" \
         --base "$SANDBOX_HEAD_SHA" \
         --path "$WT_PATH" >/dev/null 2>&1; then
@@ -176,6 +190,7 @@ if [ "$WT_CREATE_OK" -ne 1 ]; then
     # Fallback: direct worktree add off the sandbox HEAD sha.
     if git -C "$REPO_ROOT" worktree add -b "$WT_BRANCH" "$WT_PATH" "$SANDBOX_HEAD_SHA" >/dev/null 2>&1; then
         WT_CREATE_OK=1
+        printf '%s\n' "$$" > "$WT_CREATED_FILE"
     fi
 fi
 if [ "$WT_CREATE_OK" -ne 1 ]; then
@@ -204,8 +219,8 @@ if ! command -v "$QA_BIN" >/dev/null 2>&1; then
     exit 1
 fi
 
-# Shared per-repo CARGO_TARGET_DIR / CARGO_INCREMENTAL=0 for Rust repos
-# (ON by default; AUTOSPEC_SHARED_TARGET=off opts out).
+# CARGO_INCREMENTAL=0 for Rust repos (ON by default; AUTOSPEC_DISK_HYGIENE=off
+# opts out).
 HYGIENE_ENV=""
 if [ -f "$DISK_HYGIENE" ]; then
     HYGIENE_ENV="$(bash "$DISK_HYGIENE" env "$WT_PATH" 2>/dev/null || true)"

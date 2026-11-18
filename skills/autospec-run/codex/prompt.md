@@ -817,19 +817,18 @@ do not fall back to an inline label-swap path.
 >    until the PR has merged so the worktree stays available for retries. Raw
 >    `rm -rf` / `git worktree remove` / `docker rm` are blocked by the permission
 >    classifier; use the sanctioned command.
-> 4. **Shared build output.** For Rust repos `worktree-guard.sh create` writes a
->    git-excluded `.autospec-env.sh` exporting a shared per-repo `CARGO_TARGET_DIR`
->    (`${AUTOSPEC_CARGO_TARGET_ROOT:-$HOME/.cache/autospec/targets}/<repo-slug>`) and
->    `CARGO_INCREMENTAL=0`; implementers `. ./.autospec-env.sh` before `cargo`. A caller-set
->    `CARGO_TARGET_DIR`, or `herdr-eng cargo-host` managing targets, wins.
+> 4. **Build output.** For Rust repos `worktree-guard.sh create` (on create AND reuse) writes a
+>    git-excluded `.autospec-env.sh` exporting `CARGO_INCREMENTAL=0`; implementers `. ./.autospec-env.sh`
+>    before `cargo`. `CARGO_TARGET_DIR` is left alone: the in-worktree `target/` goes away with the
+>    worktree, and concurrent branches never share (and overwrite) one another's test binaries.
 > 5. **Docker.** Every test container an implementer starts MUST use
 >    `--rm --label herdr.ephemeral=1`.
 > 6. **Disk pre-flight.** Before starting a build, `dispatch-implementer.sh` runs
->    `disk-hygiene.sh preflight`. Free space below `AUTOSPEC_DISK_MIN_FREE_PCT` (10) or
->    `AUTOSPEC_DISK_MIN_FREE_GIB` (100) triggers `herdr-eng cleanup`/`build-cleanup`, a
+>    `disk-hygiene.sh preflight`. Free space below `AUTOSPEC_DISK_MIN_FREE_PCT` (5) AND
+>    `AUTOSPEC_DISK_MIN_FREE_GIB` (20) on the worktree, `$CARGO_TARGET_DIR` or `$HOME` volume triggers `herdr-eng cleanup`/`build-cleanup`, a
 >    re-check, and otherwise exit 75: park the issue (comment `disk_low_parked`, restore
 >    `auto-implement`) instead of starting a build that will fail. Opt-outs:
->    `AUTOSPEC_DISK_HYGIENE=off` (all), `AUTOSPEC_SHARED_TARGET=off`,
+>    `AUTOSPEC_DISK_HYGIENE=off` (all),
 >    `AUTOSPEC_DISK_CLEANUP=off`, `AUTOSPEC_DISK_PREFLIGHT=off`.
 >
 > Sequential dispatch in the main checkout is the safe default; worktree-isolated
@@ -1714,10 +1713,9 @@ Each session derives its own `AUTOSPEC_WORKER_ID` if not overridden; the default
 | `AUTOSPEC_CLAIM_LEASE_SECONDS` | `10800` | Cross-machine claim lease TTL written into the GitHub run-state comment and used by `autospec claim acquire` stale-reclaim decisions. |
 | `AUTOSPEC_CLAIM_SETTLE_SECONDS` | `0.2` | Short post-upsert readback delay so simultaneous comment creates converge before a worker reports claim success. |
 | `AUTOSPEC_CLAIM_CONFIRM_READS` | `5` | Number of settled lowest-lock readbacks required before `autospec claim acquire` reports claim success. |
-| `AUTOSPEC_DISK_HYGIENE` | `on` | Master switch for disk hygiene (shared `CARGO_TARGET_DIR`, guarded worktree cleanup, disk pre-flight). `off` disables all of it. |
-| `AUTOSPEC_SHARED_TARGET` / `AUTOSPEC_DISK_CLEANUP` / `AUTOSPEC_DISK_PREFLIGHT` | `on` | Individual opt-outs (`off`) for the shared Rust target dir, automatic worktree cleanup, and the free-space gate. |
-| `AUTOSPEC_CARGO_TARGET_ROOT` | `$HOME/.cache/autospec/targets` | Root of the shared per-repo `CARGO_TARGET_DIR`. Ignored when the caller set `CARGO_TARGET_DIR` or `herdr-eng cargo-host` manages targets. |
-| `AUTOSPEC_DISK_MIN_FREE_PCT` / `AUTOSPEC_DISK_MIN_FREE_GIB` | `10` / `100` | Pre-flight parks the issue (exit 75, `code_health:disk_low_parked`) when free space on the build volume is below either value, after trying `herdr-eng cleanup`/`build-cleanup`. |
+| `AUTOSPEC_DISK_HYGIENE` | `on` | Master switch for disk hygiene (guarded worktree cleanup, disk pre-flight). `off` disables all of it. |
+| `AUTOSPEC_DISK_CLEANUP` / `AUTOSPEC_DISK_PREFLIGHT` | `on` | Individual opt-outs (`off`) for automatic worktree cleanup and the free-space gate. |
+| `AUTOSPEC_DISK_MIN_FREE_PCT` / `AUTOSPEC_DISK_MIN_FREE_GIB` | `5` / `20` | Pre-flight parks the issue (exit 75, `code_health:disk_low_parked`) when a checked path (worktree, `$CARGO_TARGET_DIR`, `$HOME`) is below BOTH values, after trying `herdr-eng cleanup`/`build-cleanup`. |
 | `AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS` | `1800` | Minimum age before a `claimed` heartbeat triggers the GitHub cross-check. Set higher (e.g., `3600`) for hosts with slow worktree setup. |
 | `AUTOSPEC_WATCHDOG_RECLAIM_SECS` | `10800` | Legacy fallback for claim lease age when `AUTOSPEC_CLAIM_LEASE_SECONDS` is unset; also used by watchdog stale cleanup. |
 | `AUTOSPEC_WATCHDOG_STALE_SECS` | `1800` | Age at which a heartbeat is considered stale for nudging. |

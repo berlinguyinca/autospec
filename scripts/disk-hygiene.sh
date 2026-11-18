@@ -7,29 +7,34 @@
 #       Remove a linked worktree (and the target/ dir inside it) when the tree
 #       is clean AND every commit is pushed. Dirty / unpushed work is KEPT and
 #       logged. --force skips both checks (throwaway worktrees only).
+#       The path must be exactly a registered, unlocked linked-worktree root
+#       (never a subdirectory, the primary checkout, or a locked worktree).
 #       Prefers `herdr-eng cleanup --scope worktree --path <p>` when installed
-#       and supported; falls back to git worktree remove (+ rm of leftovers).
+#       and supported; falls back to git worktree remove. Leftover untracked
+#       files are removed only AFTER git removal succeeded, never as a fallback.
 #       exit 0 removed / already gone / disabled, 1 kept, 2 refused or failed.
+#   keep-reason <path>
+#       Print why a worktree must be kept (dirty, unpushed, status_failed);
+#       print nothing when it is safe to remove. Read-only apart from a
+#       best-effort `git fetch --prune`.
 #   env [<repo-or-worktree>]
-#       Print `export` lines for a Rust repo: a shared per-repo
-#       CARGO_TARGET_DIR and CARGO_INCREMENTAL=0. Silent for non-Rust repos.
-#   target-dir [<repo-or-worktree>]
-#       Print the shared target dir (empty when not applicable).
+#       Print `export CARGO_INCREMENTAL=0` for a Rust repo. CARGO_TARGET_DIR is
+#       left alone (builds use the in-worktree target/, removed with it).
 #   preflight [--path P]... [--label L]
-#       Free-space gate for builds. Below threshold: run herdr-eng
-#       cleanup/build-cleanup if available, re-check, else exit 75 (park).
+#       Free-space gate for builds, over every given path plus $HOME and
+#       $CARGO_TARGET_DIR. Below threshold: run herdr-eng cleanup/build-cleanup
+#       if available, re-check, else exit 75 (park).
 #   docker-args
 #       Print the flags every test container must carry.
 #
 # Environment (all optional):
 #   AUTOSPEC_DISK_HYGIENE=off        master switch, disables everything here
 #   AUTOSPEC_DISK_CLEANUP=off        no automatic worktree cleanup
-#   AUTOSPEC_SHARED_TARGET=off       no shared CARGO_TARGET_DIR
 #   AUTOSPEC_DISK_PREFLIGHT=off      no free-space gate
-#   AUTOSPEC_CARGO_TARGET_ROOT       shared target root (default
-#                                    $HOME/.cache/autospec/targets)
-#   AUTOSPEC_DISK_MIN_FREE_PCT       default 10   (low if free % is below)
-#   AUTOSPEC_DISK_MIN_FREE_GIB       default 100  (or free GiB is below)
+#   AUTOSPEC_DISK_MIN_FREE_PCT       default 5    (a path is low only when free %
+#   AUTOSPEC_DISK_MIN_FREE_GIB       default 20    is below this AND free GiB is
+#                                    below this, so big disks are not parked by
+#                                    the percentage nor small hosts by the floor)
 #   AUTOSPEC_HERDR_ENG               herdr-eng binary (default `herdr-eng`)
 #
 # Sourceable: `. disk-hygiene.sh` defines dh_* functions and runs nothing.
@@ -62,46 +67,15 @@ dh_repo_root() { # main (primary) checkout root for any path inside a repo
     esac
 }
 
-dh_repo_slug() {
-    local root name sum
-    root="$(dh_repo_root "${1:-.}")" || return 1
-    name="$(basename "$root" | tr -c 'A-Za-z0-9._-\n' '-')"
-    sum="$(printf '%s' "$root" | cksum | cut -d' ' -f1)"
-    printf '%s-%s\n' "$name" "$sum"
-}
-
 dh_is_rust() {
     local p="${1:-.}" top
     top="$(git -C "$p" rev-parse --show-toplevel 2>/dev/null)" || return 1
     [ -f "$top/Cargo.toml" ]
 }
 
-dh_herdr_manages_targets() {
-    local bin
-    bin="$(dh_herdr)"
-    command -v "$bin" >/dev/null 2>&1 || return 1
-    "$bin" cargo-host status 2>/dev/null | grep -Eq '"manage_targets": *true'
-}
-
-# Shared target dir, or empty when it must not be set.
-dh_target_dir() {
-    local p="${1:-.}" root slug
-    dh_off "${AUTOSPEC_SHARED_TARGET:-on}" && return 0
-    [ -z "${CARGO_TARGET_DIR:-}" ] || return 0
-    dh_is_rust "$p" || return 0
-    dh_herdr_manages_targets && return 0
-    slug="$(dh_repo_slug "$p")" || return 0
-    root="${AUTOSPEC_CARGO_TARGET_ROOT:-$HOME/.cache/autospec/targets}"
-    printf '%s/%s\n' "$root" "$slug"
-}
-
 dh_env() {
-    local p="${1:-.}" td
+    local p="${1:-.}"
     dh_off && return 0
-    td="$(dh_target_dir "$p")"
-    if [ -n "$td" ]; then
-        printf 'export CARGO_TARGET_DIR=%q\n' "$td"
-    fi
     if dh_is_rust "$p" && [ -z "${CARGO_INCREMENTAL:-}" ]; then
         printf 'export CARGO_INCREMENTAL=0\n'
     fi
@@ -109,17 +83,82 @@ dh_env() {
 
 dh_docker_args() { printf '%s\n' '--rm --label herdr.ephemeral=1'; }
 
+# Canonical absolute path (symlinks resolved) of an existing directory.
+dh_abs() { (cd "$1" 2>/dev/null && pwd -P); }
+
+# Registration state of <abs-path> in <primary>'s worktree list:
+# prints "registered", "locked", or nothing when it is not a linked worktree.
+dh_wt_state() {
+    local primary="$1" want="$2" line path="" locked=0 first=1 found=""
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*)
+                path="$(dh_abs "${line#worktree }" 2>/dev/null || true)"
+                locked=0
+                ;;
+            locked*) locked=1 ;;
+            "")
+                if [ "$first" -eq 0 ] && [ -n "$path" ] && [ "$path" = "$want" ]; then
+                    found=$((1 + locked)); break
+                fi
+                first=0; path=""
+                ;;
+        esac
+    done < <(git -C "$primary" worktree list --porcelain 2>/dev/null; echo)
+    case "$found" in
+        1) echo registered ;;
+        2) echo locked ;;
+    esac
+}
+
+# Is HEAD's work safely on a remote? Fetches/prunes first (best effort) so
+# stale remote-tracking refs do not make deleted/rewritten work look pushed.
+dh_pushed() {
+    local wt="$1" head upstream branch default oid
+    GIT_TERMINAL_PROMPT=0 git -C "$wt" fetch --prune -q origin >/dev/null 2>&1 || true
+    head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || return 1
+    branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    # The branch's own remote ref (same name); a `-b x origin/main` worktree's
+    # configured upstream is the BASE branch and says nothing about pushing.
+    upstream=""
+    if [ -n "$branch" ] && [ "$branch" != HEAD ]; then
+        upstream="$(git -C "$wt" for-each-ref --format='%(refname:short)' "refs/remotes/*/$branch" 2>/dev/null | head -1)"
+    fi
+    if [ -n "$upstream" ]; then
+        git -C "$wt" merge-base --is-ancestor "$head" "$upstream" 2>/dev/null && return 0
+    elif [ -z "$(git -C "$wt" log HEAD --not --remotes --oneline 2>/dev/null || echo x)" ]; then
+        return 0
+    fi
+    # Squash/rebase-merged then deleted branch: PR MERGED at exactly this HEAD.
+    if [ -n "$branch" ] && [ "$branch" != HEAD ] && command -v gh >/dev/null 2>&1; then
+        oid="$(cd "$wt" && gh pr list --head "$branch" --state merged --limit 5 \
+            --json headRefOid --jq '.[].headRefOid' 2>/dev/null || true)"
+        printf '%s\n' "$oid" | grep -qx "$head" && return 0
+    fi
+    # Patch-equivalent to the default branch (cherry-pick / single-commit squash).
+    default="$(git -C "$wt" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    if [ -z "$default" ]; then
+        for default in origin/main origin/master; do
+            git -C "$wt" rev-parse -q --verify "$default" >/dev/null 2>&1 && break
+            default=""
+        done
+    fi
+    if [ -n "$default" ] && ! git -C "$wt" cherry "$default" HEAD 2>/dev/null | grep -q '^+'; then
+        return 0
+    fi
+    return 1
+}
+
 # Why a worktree must be kept: prints a reason, or nothing when safe to remove.
 dh_keep_reason() {
-    local wt="$1" porcelain unpushed
+    local wt="$1" porcelain
     porcelain="$(git -C "$wt" status --porcelain 2>/dev/null)" || { echo "status_failed"; return; }
     [ -z "$porcelain" ] || { echo "dirty"; return; }
-    unpushed="$(git -C "$wt" log HEAD --not --remotes --oneline 2>/dev/null || echo x)"
-    [ -z "$unpushed" ] || { echo "unpushed"; return; }
+    dh_pushed "$wt" || echo "unpushed"
 }
 
 dh_cleanup_worktree() {
-    local force=0 reason="exit" wt common primary keep bin
+    local force=0 reason="exit" wt top primary state keep bin
     while [ $# -gt 0 ]; do
         case "$1" in
             --force) force=1; shift ;;
@@ -132,15 +171,31 @@ dh_cleanup_worktree() {
     dh_off "${AUTOSPEC_DISK_CLEANUP:-on}" && return 0
     [ -e "$wt" ] || return 0
 
-    if ! git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    # Canonicalise once: git (against the primary) and rm (against $PWD) must
+    # agree on what is being removed.
+    wt="$(dh_abs "$wt")" || { dh_log "disk_hygiene:worktree_refused path=$1 why=not_a_directory"; return 2; }
+    if ! top="$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null)"; then
         dh_log "disk_hygiene:worktree_refused path=$wt why=not_a_git_worktree"
         return 2
     fi
+    if [ "$(dh_abs "$top")" != "$wt" ]; then
+        dh_log "disk_hygiene:worktree_refused path=$wt why=not_worktree_root"
+        return 2
+    fi
     primary="$(dh_repo_root "$wt")" || return 2
-    common="$(git -C "$wt" rev-parse --path-format=absolute --git-dir 2>/dev/null)"
-    if [ "$common" = "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]; then
+    primary="$(dh_abs "$primary")"
+    if [ "$wt" = "$primary" ] || [ "$(git -C "$wt" rev-parse --path-format=absolute --git-dir 2>/dev/null)" = "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]; then
         dh_log "disk_hygiene:worktree_refused path=$wt why=primary_checkout"
         return 2
+    fi
+    state="$(dh_wt_state "$primary" "$wt")"
+    if [ -z "$state" ]; then
+        dh_log "disk_hygiene:worktree_refused path=$wt why=not_a_registered_worktree"
+        return 2
+    fi
+    if [ "$state" = locked ]; then
+        dh_log "disk_hygiene:worktree_kept path=$wt why=locked reason=$reason"
+        return 1
     fi
 
     if [ "$force" -eq 0 ]; then
@@ -155,11 +210,15 @@ dh_cleanup_worktree() {
         bin="$(dh_herdr)"
         "$bin" cleanup --scope worktree --path "$wt" >/dev/null 2>&1 || true
     fi
-    if [ -e "$wt" ]; then
-        git -C "$primary" worktree remove --force "$wt" >/dev/null 2>&1 || true
-        # Leftovers (target/, untracked build output) the git removal skipped.
-        [ -e "$wt" ] && rm -rf "$wt" 2>/dev/null
+    if [ -n "$(dh_wt_state "$primary" "$wt")" ]; then
+        if ! git -C "$primary" worktree remove --force "$wt" >/dev/null 2>&1; then
+            dh_log "disk_hygiene:worktree_remove_failed path=$wt"
+            return 2
+        fi
     fi
+    # Git removal succeeded (or herdr-eng did it); sweep untracked leftovers
+    # (target/, build output) it skipped. Never reached after a failure.
+    [ -e "$wt" ] && rm -rf "$wt" 2>/dev/null
     git -C "$primary" worktree prune >/dev/null 2>&1 || true
     if [ -e "$wt" ]; then
         dh_log "disk_hygiene:worktree_remove_failed path=$wt"
@@ -177,13 +236,13 @@ dh_free_line() { # $1 path -> "pct_free gib_free"
 
 dh_low_paths() { # echoes "path pct gib" for each low path
     local p line pct gib min_pct min_gib
-    min_pct="${AUTOSPEC_DISK_MIN_FREE_PCT:-10}"
-    min_gib="${AUTOSPEC_DISK_MIN_FREE_GIB:-100}"
+    min_pct="${AUTOSPEC_DISK_MIN_FREE_PCT:-5}"
+    min_gib="${AUTOSPEC_DISK_MIN_FREE_GIB:-20}"
     for p in "$@"; do
         line="$(dh_free_line "$p")"
         [ -n "$line" ] || continue
         pct="${line% *}"; gib="${line#* }"
-        if [ "$pct" -lt "$min_pct" ] || [ "$gib" -lt "$min_gib" ]; then
+        if [ "$pct" -lt "$min_pct" ] && [ "$gib" -lt "$min_gib" ]; then
             printf '%s %s %s\n' "$p" "$pct" "$gib"
         fi
     done
@@ -199,9 +258,10 @@ dh_preflight() {
         esac
     done
     dh_off "${AUTOSPEC_DISK_PREFLIGHT:-on}" && return 0
-    if [ "${#paths[@]}" -eq 0 ]; then
-        paths=("$PWD" "${AUTOSPEC_CARGO_TARGET_ROOT:-$HOME/.cache/autospec/targets}")
-    fi
+    [ "${#paths[@]}" -gt 0 ] || paths=("$PWD")
+    # Build output and caches live elsewhere than the worktree: check them too.
+    [ -z "${CARGO_TARGET_DIR:-}" ] || paths+=("$CARGO_TARGET_DIR")
+    [ -z "${HOME:-}" ] || paths+=("$HOME")
     low="$(dh_low_paths "${paths[@]}")"
     if [ -n "$low" ]; then
         bin="$(dh_herdr)"
@@ -216,7 +276,7 @@ dh_preflight() {
         low="$(dh_low_paths "${paths[@]}")"
     fi
     if [ -n "$low" ]; then
-        dh_log "disk_hygiene:disk_low_parked label=$label low=\"$(printf '%s' "$low" | tr '\n' ';')\" min_pct=${AUTOSPEC_DISK_MIN_FREE_PCT:-10} min_gib=${AUTOSPEC_DISK_MIN_FREE_GIB:-100}"
+        dh_log "disk_hygiene:disk_low_parked label=$label low=\"$(printf '%s' "$low" | tr '\n' ';')\" min_pct=${AUTOSPEC_DISK_MIN_FREE_PCT:-5} min_gib=${AUTOSPEC_DISK_MIN_FREE_GIB:-20}"
         return 75
     fi
     dh_log "disk_hygiene:preflight_ok label=$label"
@@ -228,11 +288,11 @@ dh_main() {
     [ $# -gt 0 ] && shift
     case "$cmd" in
         cleanup-worktree) dh_cleanup_worktree "$@" ;;
+        keep-reason) dh_keep_reason "$(dh_abs "${1:-.}")" ;;
         env) dh_env "$@" ;;
-        target-dir) dh_target_dir "$@" ;;
         preflight) dh_preflight "$@" ;;
         docker-args) dh_docker_args ;;
-        ""|-h|--help) sed -n '2,40p' "$0" ;;
+        ""|-h|--help) sed -n '2,45p' "$0" ;;
         *) dh_log "$DH_PROG: unknown subcommand: $cmd"; return 2 ;;
     esac
 }

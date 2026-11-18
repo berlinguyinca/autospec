@@ -12,9 +12,8 @@ setup() {
     export GIT_AUTHOR_NAME="t" GIT_AUTHOR_EMAIL="t@e" \
            GIT_COMMITTER_NAME="t" GIT_COMMITTER_EMAIL="t@e"
     unset CARGO_TARGET_DIR CARGO_INCREMENTAL AUTOSPEC_DISK_HYGIENE \
-          AUTOSPEC_DISK_CLEANUP AUTOSPEC_SHARED_TARGET AUTOSPEC_DISK_PREFLIGHT
+          AUTOSPEC_DISK_CLEANUP AUTOSPEC_DISK_PREFLIGHT
     export AUTOSPEC_HERDR_ENG="$TEST_TMP/no-such-herdr-eng"
-    export AUTOSPEC_CARGO_TARGET_ROOT="$TEST_TMP/targets"
     ORIGIN="$TEST_TMP/origin.git"
     PRIMARY="$TEST_TMP/primary"
     git init -q --bare "$ORIGIN"
@@ -98,18 +97,14 @@ teardown() {
     [ -d "$WT" ]
 }
 
-@test "env: Rust repo gets a shared per-repo CARGO_TARGET_DIR and CARGO_INCREMENTAL=0" {
+@test "env: Rust repo gets CARGO_INCREMENTAL=0 and never a shared CARGO_TARGET_DIR" {
     run bash "$DH" env "$WT"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"export CARGO_TARGET_DIR="*"$TEST_TMP/targets/"* ]]
     [[ "$output" == *"export CARGO_INCREMENTAL=0"* ]]
-    run bash "$DH" target-dir "$WT"
-    first="$output"
-    run bash "$DH" target-dir "$PRIMARY"
-    [ "$output" = "$first" ]
+    [[ "$output" != *"CARGO_TARGET_DIR"* ]]
 }
 
-@test "env: non-Rust repo emits nothing for the target dir" {
+@test "env: non-Rust repo emits nothing" {
     git -C "$PRIMARY" rm -q Cargo.toml
     git -C "$PRIMARY" commit -q -m norust
     git -C "$PRIMARY" push -q origin main
@@ -117,20 +112,13 @@ teardown() {
     git -C "$PRIMARY" worktree add -q -b feat/nr "$NR" main
     run bash "$DH" env "$NR"
     [ "$status" -eq 0 ]
-    [[ "$output" != *"CARGO_TARGET_DIR"* ]]
+    [ -z "$output" ]
 }
 
-@test "env: a caller-provided CARGO_TARGET_DIR and CARGO_INCREMENTAL win" {
-    CARGO_TARGET_DIR=/somewhere/else CARGO_INCREMENTAL=1 run bash "$DH" env "$WT"
+@test "env: a caller-provided CARGO_INCREMENTAL wins" {
+    CARGO_INCREMENTAL=1 run bash "$DH" env "$WT"
     [ "$status" -eq 0 ]
-    [[ "$output" != *"CARGO_TARGET_DIR"* ]]
     [[ "$output" != *"CARGO_INCREMENTAL"* ]]
-}
-
-@test "env: AUTOSPEC_SHARED_TARGET=off disables the shared target but keeps incremental off" {
-    AUTOSPEC_SHARED_TARGET=off run bash "$DH" env "$WT"
-    [[ "$output" != *"CARGO_TARGET_DIR"* ]]
-    [[ "$output" == *"CARGO_INCREMENTAL=0"* ]]
 }
 
 @test "preflight passes with satisfiable thresholds" {
@@ -140,13 +128,13 @@ teardown() {
 }
 
 @test "preflight parks (exit 75) when free space is below the threshold" {
-    AUTOSPEC_DISK_MIN_FREE_GIB=99999999 run bash "$DH" preflight --path "$TEST_TMP"
+    AUTOSPEC_DISK_MIN_FREE_PCT=100 AUTOSPEC_DISK_MIN_FREE_GIB=99999999 run bash "$DH" preflight --path "$TEST_TMP"
     [ "$status" -eq 75 ]
     [[ "$output" == *"disk_hygiene:disk_low_parked"* ]]
 }
 
 @test "preflight is skipped with AUTOSPEC_DISK_PREFLIGHT=off" {
-    AUTOSPEC_DISK_PREFLIGHT=off AUTOSPEC_DISK_MIN_FREE_GIB=99999999 run bash "$DH" preflight --path "$TEST_TMP"
+    AUTOSPEC_DISK_PREFLIGHT=off AUTOSPEC_DISK_MIN_FREE_PCT=100 AUTOSPEC_DISK_MIN_FREE_GIB=99999999 run bash "$DH" preflight --path "$TEST_TMP"
     [ "$status" -eq 0 ]
 }
 
@@ -163,7 +151,7 @@ esac
 exit 1
 EOS
     chmod +x "$BIN"
-    AUTOSPEC_HERDR_ENG="$BIN" AUTOSPEC_DISK_MIN_FREE_GIB=99999999 run bash "$DH" preflight --path "$TEST_TMP"
+    AUTOSPEC_HERDR_ENG="$BIN" AUTOSPEC_DISK_MIN_FREE_PCT=100 AUTOSPEC_DISK_MIN_FREE_GIB=99999999 run bash "$DH" preflight --path "$TEST_TMP"
     [ "$status" -eq 75 ]
     grep -q "build-cleanup run" "$TEST_TMP/cleanup.log"
 }
@@ -184,7 +172,7 @@ EOS
     AUTOSPEC_HERDR_ENG="$BIN" run bash "$DH" cleanup-worktree "$WT"
     [ "$status" -eq 0 ]
     [ ! -e "$WT" ]
-    grep -q -- "--scope worktree --path $WT" "$TEST_TMP/cleanup.log"
+    grep -q -- "--scope worktree --path $(cd "$TEST_TMP" && pwd -P)/wt-a" "$TEST_TMP/cleanup.log"
 }
 
 @test "dispatch-implementer --cleanup keeps dirty work and removes clean worktrees" {
@@ -218,7 +206,8 @@ EOS
     NEW="$TEST_TMP/wt-guard"
     run bash "$ROOT/scripts/worktree-guard.sh" create --branch feat/guard --path "$NEW" --base origin/main
     [ "$status" -eq 0 ]
-    grep -q "CARGO_TARGET_DIR" "$NEW/.autospec-env.sh"
+    run grep -q "CARGO_TARGET_DIR" "$NEW/.autospec-env.sh"
+    [ "$status" -ne 0 ]
     grep -q "CARGO_INCREMENTAL=0" "$NEW/.autospec-env.sh"
     [ -z "$(git -C "$NEW" status --porcelain)" ]
 }
