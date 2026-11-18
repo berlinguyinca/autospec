@@ -14,17 +14,19 @@
 # `rm -rf`.
 #
 # Real git throughout: a bare origin, a primary clone, real linked worktrees
-# under the GC scan root. The only stand-ins are a PATH `gh` for ISSUE state and
-# CLOSED-PR state (GitHub has no local equivalent; MERGED is answered from real
-# git via AUTOSPEC_WATCHDOG_PR_SOURCE=git) and the broker runtime-cleanup
-# recorder. The real
-# watchdog script runs in GC-only mode (AUTOSPEC_WATCHDOG_GC_ONLY=1).
+# under the GC scan root. The only stand-ins are a PATH `gh` (ISSUE and PR
+# state: GitHub has no local equivalent, gh always speaks TLS to a hosted API,
+# so the stub sits at that external-service process boundary with canned
+# answers and there is no test-only seam in production code) and the broker
+# runtime-cleanup recorder. The real watchdog script runs in GC-only mode
+# (AUTOSPEC_WATCHDOG_GC_ONLY=1). Scratch lives under the gitignored .test-tmp/.
 
-ROOT="${BATS_TEST_DIRNAME}/../.."
+ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
 WATCHDOG="$ROOT/scripts/autospec-watchdog.sh"
 
 setup() {
-    TEST_TMP="$(mktemp -d)"
+    mkdir -p "$ROOT/.test-tmp"
+    TEST_TMP="$(mktemp -d "$ROOT/.test-tmp/gc.XXXXXX")"
     export GIT_AUTHOR_NAME="t" GIT_AUTHOR_EMAIL="t@e" \
            GIT_COMMITTER_NAME="t" GIT_COMMITTER_EMAIL="t@e"
 
@@ -37,7 +39,8 @@ setup() {
     export AUTOSPEC_HERDR_ENG="$TEST_TMP/no-such-herdr-eng"
     mkdir -p "$AUTOSPEC_WATCHDOG_DIR/o_n" "$AUTOSPEC_WATCHDOG_GC_DIR"
 
-    ORIGIN="$TEST_TMP/origin.git"
+    ORIGIN="$TEST_TMP/o/n.git"   # origin URL ends in o/n: the worktree belongs to repo o/n
+    mkdir -p "$TEST_TMP/o"
     PRIMARY="$TEST_TMP/primary"
     git init -q --bare "$ORIGIN"
     git clone -q "$ORIGIN" "$PRIMARY" 2>/dev/null
@@ -77,7 +80,7 @@ HEOF
     chmod +x "$MOCK_DIR/hostname"
 }
 
-# GitHub API stand-in (the one unavoidable stub).
+# GitHub API stand-in at the external-service boundary (see header).
 write_gh_mock() {
     cat > "$MOCK_DIR/gh" <<'GEOF'
 #!/usr/bin/env bash
@@ -239,18 +242,11 @@ run_gc() { run bash "$WATCHDOG"; }
     [ -d "$wt" ]
 }
 
-# Real-git MERGED: the PR lookup point answers from git facts (HEAD is an
-# ancestor of origin/main and not its tip) against the real bare remote.
-@test "gc_open_active_merged_pr_at_head_is_reclaimed (PR state from real git)" {
+# MERGED PR at exactly the worktree HEAD releases an open+active issue.
+@test "gc_open_active_merged_pr_at_head_is_reclaimed" {
     wt="$(make_worktree wt-709 feat/autospec-issue-709)"
-    commit_unpushed "$wt"
-    git -C "$wt" push -q origin HEAD:main
-    git -C "$PRIMARY" pull -q --ff-only origin main
-    echo n > "$PRIMARY/n.txt"; git -C "$PRIMARY" add n.txt; git -C "$PRIMARY" commit -q -m n
-    git -C "$PRIMARY" push -q origin main
-    git -C "$wt" fetch -q origin
     export GH_ISSUE_STATE="OPEN" GH_ISSUE_LABELS="auto-implement"
-    export AUTOSPEC_WATCHDOG_PR_SOURCE=git
+    export GH_PR_STATE="MERGED" GH_PR_OID="$(git -C "$wt" rev-parse HEAD)"
 
     run_gc
 

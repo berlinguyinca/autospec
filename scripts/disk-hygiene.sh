@@ -9,6 +9,8 @@
 #       logged. --force skips both checks (throwaway worktrees only).
 #       --checked: the caller already ran keep-reason and it was empty; skips
 #       the network re-check but still re-verifies dirtiness locally.
+#       --expect-head <oid>: keep the worktree (exit 1, why=head_changed) when
+#       HEAD is no longer <oid>, i.e. the caller's judgement is stale.
 #       The path must be exactly a registered, unlocked linked-worktree root
 #       (never a subdirectory, the primary checkout, or a locked worktree).
 #       Prefers `herdr-eng cleanup --scope worktree --path <p>` when installed
@@ -127,9 +129,21 @@ dh_timeout() { # $1 = seconds, rest = command
     "$@"
 }
 
-# Bounded, non-interactive `git fetch --prune origin` (best effort).
+# Bounded, non-interactive `git fetch --prune origin` (best effort). The
+# BatchMode default is applied only when neither GIT_SSH_COMMAND nor the repo's
+# core.sshCommand is set, so a configured key/identity is never overridden.
 dh_fetch() {
-    GIT_TERMINAL_PROMPT=0     GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}"         dh_timeout "${AUTOSPEC_DISK_FETCH_TIMEOUT_SECS:-30}"         git -C "$1" fetch --prune -q origin >/dev/null 2>&1 || true
+    local ssh_cmd="${GIT_SSH_COMMAND:-}"
+    if [ -z "$ssh_cmd" ] && [ -z "$(git -C "$1" config --get core.sshCommand 2>/dev/null)" ]; then
+        ssh_cmd="ssh -o BatchMode=yes -o ConnectTimeout=10"
+    fi
+    if [ -n "$ssh_cmd" ]; then
+        GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$ssh_cmd" \
+            dh_timeout "${AUTOSPEC_DISK_FETCH_TIMEOUT_SECS:-30}" git -C "$1" fetch --prune -q origin >/dev/null 2>&1 || true
+    else
+        GIT_TERMINAL_PROMPT=0 \
+            dh_timeout "${AUTOSPEC_DISK_FETCH_TIMEOUT_SECS:-30}" git -C "$1" fetch --prune -q origin >/dev/null 2>&1 || true
+    fi
 }
 
 # Default branch ref that actually exists (origin/HEAD target, else origin/main|master).
@@ -200,11 +214,12 @@ dh_keep_reason() {
 }
 
 dh_cleanup_worktree() {
-    local force=0 checked=0 reason="exit" wt top primary state keep bin
+    local force=0 checked=0 reason="exit" expect_head="" wt top primary state keep bin
     while [ $# -gt 0 ]; do
         case "$1" in
             --force) force=1; shift ;;
             --checked) checked=1; shift ;;
+            --expect-head) expect_head="$2"; shift 2 ;;
             --reason) reason="$2"; shift 2 ;;
             *) break ;;
         esac
@@ -238,6 +253,13 @@ dh_cleanup_worktree() {
     fi
     if [ "$state" = locked ]; then
         dh_log "disk_hygiene:worktree_kept path=$wt why=locked reason=$reason"
+        return 1
+    fi
+
+    # The caller judged this exact HEAD; a moved HEAD (adopted, new commit) is
+    # unvalidated work, so keep it.
+    if [ -n "$expect_head" ] && [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" != "$expect_head" ]; then
+        dh_log "disk_hygiene:worktree_kept path=$wt why=head_changed reason=$reason"
         return 1
     fi
 

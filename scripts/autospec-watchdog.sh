@@ -233,9 +233,15 @@ state_unset() {
     STATE_LINES="$(printf '%s\n' "$STATE_LINES" | awk -v issue="$issue" 'NF && $1 != issue { print }')"
 }
 
+# issue_meta <issue> [prefix-command...]: "STATE labels". The optional prefix
+# (e.g. `_gc_timeout 30`) wraps the gh call. Only the GC pass bounds it: the
+# main heartbeat loop deletes the heartbeat on empty meta, so a timeout there
+# would remove the live heartbeat that GC GUARD 3 relies on.
 issue_meta() {
+    _im_issue="$1"
+    shift
     # shellcheck disable=SC2086
-    _gc_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh issue view "$1" $REPO_ARGS \
+    "$@" gh issue view "$_im_issue" $REPO_ARGS \
         --json state,labels \
         --jq '.state + " " + ([.labels[].name] | join(","))' \
         2>/dev/null || true
@@ -422,20 +428,8 @@ _gc_timeout() { # $1 secs, rest = command
     "$@"
 }
 
-# "<STATE> <headRefOid>" of the branch's newest PR, or nothing. The single PR
-# lookup point: gh in production; AUTOSPEC_WATCHDOG_PR_SOURCE=git answers from
-# real git facts only (MERGED == HEAD is an ancestor of origin's default branch
-# and not its tip), so tests can run against a real local bare remote.
+# "<STATE> <headRefOid>" of the branch's newest PR, or nothing.
 _gc_pr_line() { # $1 worktree, $2 branch
-    if [ "${AUTOSPEC_WATCHDOG_PR_SOURCE:-gh}" = "git" ]; then
-        _d="$(git -C "$1" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)"
-        _h="$(git -C "$1" rev-parse HEAD 2>/dev/null)" || return 0
-        _tip="$(git -C "$1" rev-parse -q --verify "$_d^{commit}" 2>/dev/null)" || return 0
-        if [ "$_h" != "$_tip" ] && git -C "$1" merge-base --is-ancestor "$_h" "$_tip" 2>/dev/null; then
-            echo "MERGED $_h"
-        fi
-        return 0
-    fi
     # shellcheck disable=SC2086
     _gc_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh pr list --head "$2" --state all --limit 1 ${REPO_ARGS:-} \
         --json state,headRefOid --jq '.[0] | (.state + " " + .headRefOid) // empty' 2>/dev/null || true
@@ -459,25 +453,53 @@ _gc_pr_ends_work() {
     esac
 }
 
+# True (0) when the worktree belongs to the repo this watchdog serves: its
+# origin URL ends in <owner>/<name> of REPO_FULL, or it shares the git common dir
+# of the watchdog's own checkout. Issue numbers collide across repos, so a
+# foreign worktree must never be judged by this repo's issues and heartbeats.
+_gc_wt_belongs() {
+    _wb_url="$(git -C "$1" config --get remote.origin.url 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+    _wb_url="${_wb_url%/}"
+    _wb_url="${_wb_url%.git}"
+    _wb_repo="$(printf '%s' "${REPO_FULL:-}" | tr '[:upper:]' '[:lower:]')"
+    if [ -n "$_wb_repo" ] && [ -n "$_wb_url" ]; then
+        case "$_wb_url" in
+            "$_wb_repo"|*/"$_wb_repo"|*:"$_wb_repo") return 0 ;;
+        esac
+    fi
+    _wb_mine="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    _wb_theirs="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    [ -n "$_wb_mine" ] && [ "$_wb_mine" = "$_wb_theirs" ]
+}
+
 gc_orphaned_worktrees() {
     command -v git >/dev/null 2>&1 || return 0
+    # Operator opt-out: no automatic worktree cleanup means no teardown either.
+    [ "${AUTOSPEC_DISK_HYGIENE:-on}" = "off" ] && return 0
+    [ "${AUTOSPEC_DISK_CLEANUP:-on}" = "off" ] && return 0
     for wt in "$WATCHDOG_GC_DIR"/wt-*; do
         [ -d "$wt" ] || continue
         # Must be a real git worktree before we touch it.
         git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
+        _gc_wt_belongs "$wt" || continue
 
         branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
         case "$branch" in
             ''|HEAD) continue ;;
         esac
 
-        # Only worktrees on an autospec issue branch (`<prefix>/...issue-<N>`,
-        # e.g. fix/issue-700, feat/autospec-issue-700) are issue-owned. Anything
-        # else (explore-qa-gate-<PID>, hand-made branches) belongs to its owner.
+        # Only worktrees on an autospec issue branch are issue-owned:
+        # `<prefix>/...issue-<N>` (fix/issue-700, feat/autospec-issue-700) or
+        # `<prefix>/<N>-<slug>` (feat/2879-released-heartbeat). Anything else
+        # (explore-qa-gate-<PID>, hand-made branches) belongs to its owner.
         issue="$(printf '%s' "$branch" | sed -nE 's#^.*(^|[/-])issue-([0-9]+)([/-].*)?$#\2#p')"
+        [ -n "$issue" ] || issue="$(printf '%s' "$branch" | sed -nE 's#^[^/]+/([0-9]+)([/-].*)?$#\1#p')"
         case "$issue" in
             ''|*[!0-9]*) continue ;;
         esac
+        # The HEAD every guard below judges; cleanup re-verifies it is unchanged.
+        wt_head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
+        [ -n "$wt_head" ] || continue
 
         # GUARD 3 — live heartbeat (cheap local file check; do it before gh).
         if _gc_heartbeat_is_live "$issue"; then
@@ -486,7 +508,7 @@ gc_orphaned_worktrees() {
 
         # GUARD 2 — issue closed or unlabeled. Skip if the issue is still OPEN
         # AND still carries an in-flight label. issue_meta is "STATE labels".
-        meta="$(issue_meta "$issue")"
+        meta="$(issue_meta "$issue" _gc_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS")"
         # gh failed / unreachable: the issue state is unknown, so keep (fail closed).
         [ -n "$meta" ] || { echo "$WATCHDOG_LOG_PREFIX gc: keeping $wt (issue #$issue): issue_state_unknown" >&2; continue; }
         gc_state="${meta%% *}"
@@ -501,7 +523,7 @@ gc_orphaned_worktrees() {
         fi
 
         # GUARD 1 — dirty tree or commits not on a remote. NEVER prune either.
-        # Before any teardown, so a kept worktree keeps its runtime resources.
+        # Before teardown, so a kept worktree keeps its runtime resources.
         if [ -f "$DISK_HYGIENE_SH" ]; then
             keep="$(bash "$DISK_HYGIENE_SH" keep-reason "$wt" 2>/dev/null || echo status_failed)"
             if [ -n "$keep" ]; then
@@ -511,6 +533,8 @@ gc_orphaned_worktrees() {
         else
             unpushed="$(git -C "$wt" log HEAD --not --remotes --oneline 2>/dev/null || echo "x")"
             [ -z "$unpushed" ] || continue
+            dirty="$(git -C "$wt" status --porcelain 2>/dev/null || echo "x")"
+            [ -z "$dirty" ] || continue
         fi
 
         # All guards passed. Release broker-owned resources before asking Git
@@ -524,11 +548,13 @@ gc_orphaned_worktrees() {
         # disk-hygiene.sh (prefers `herdr-eng cleanup`; re-checks dirty/unpushed
         # and logs why). Without it, fall back to Git's worktree removal.
         if [ -f "$DISK_HYGIENE_SH" ]; then
-            if bash "$DISK_HYGIENE_SH" cleanup-worktree --checked --reason watchdog-gc "$wt" >&2; then
+            if bash "$DISK_HYGIENE_SH" cleanup-worktree --checked --expect-head "$wt_head" --reason watchdog-gc "$wt" >&2; then
                 garbage_collected=$((garbage_collected + 1))
                 echo "$WATCHDOG_LOG_PREFIX gc: removed orphaned worktree $wt (issue #$issue, branch $branch)" >&2
             fi
-        elif git worktree remove --force "$wt" >/dev/null 2>&1; then
+        elif [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" = "$wt_head" ] \
+            && git --git-dir="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)" \
+                worktree remove --force "$wt" >/dev/null 2>&1; then
             garbage_collected=$((garbage_collected + 1))
             echo "$WATCHDOG_LOG_PREFIX gc: removed orphaned worktree $wt (issue #$issue, branch $branch)" >&2
         fi

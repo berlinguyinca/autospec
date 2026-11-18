@@ -17,7 +17,8 @@ setup() {
     unset CARGO_TARGET_DIR CARGO_INCREMENTAL AUTOSPEC_DISK_HYGIENE \
           AUTOSPEC_DISK_CLEANUP AUTOSPEC_DISK_PREFLIGHT
     export AUTOSPEC_HERDR_ENG="$TEST_TMP/no-such-herdr-eng"
-    ORIGIN="$TEST_TMP/origin.git"
+    ORIGIN="$TEST_TMP/o/n.git"   # origin URL ends in o/n (GC ownership)
+    mkdir -p "$TEST_TMP/o"
     PRIMARY="$TEST_TMP/primary"
     git init -q --bare "$ORIGIN"
     git clone -q "$ORIGIN" "$PRIMARY" 2>/dev/null
