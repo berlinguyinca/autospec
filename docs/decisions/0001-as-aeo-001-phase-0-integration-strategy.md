@@ -368,3 +368,4 @@ model identity, not profile alias).
 3. Whether `executor_bridge/waterfall_policy.rs` and `review_evidence.rs` encode
    policy rather than delegating to `core` — a suspected §66.1 violation
    ("provider adapters shall not contain policy logic"), unverified.
+4. Evaluator co-evolution (handoff 2026-09-05) is reconciled in ADR 0002; its AS-AEO-001 Epic 3/4/6 touch points consume D3, D6, D10.
