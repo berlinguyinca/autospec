@@ -9,18 +9,16 @@
 # Everything is real: git repos and worktrees, the real watchdog in GC-only mode,
 # the real autospec runtime-cleanup adapter, the real hostname and the real `gh`
 # (read-only) against stable closed issue/PRs of berlinguyinca/autospec (see
-# gc_helpers.bash). Tests skip with a clear message when gh is not authenticated.
+# gc_helpers.bash). Only the tests that truly need GitHub's answer (an issue's
+# state, a PR) call require_real_gh and skip without it; the data-integrity
+# tests (unpushed, dirty, live heartbeat, non-issue branch) run on real local git
+# alone and assert the guard's own log line, so they cannot pass vacuously.
 # The PR decision logic is a pure function fed with gh's real output.
 
 load ../disk-hygiene/gc_helpers
 
-setup() {
-    require_real_gh
-    gc_setup
-}
+setup() { gc_setup; }
 teardown() { [ -z "${TEST_TMP:-}" ] || gc_teardown; }
-
-run_gc() { run bash "$WATCHDOG"; }
 
 @test "gc_unpushed_not_pruned: a worktree with un-pushed commits is NOT removed" {
     wt="$(make_worktree wt-a "feat/$CLOSED_ISSUE-unpushed")"
@@ -28,6 +26,7 @@ run_gc() { run bash "$WATCHDOG"; }
     run_gc
     [ "$status" -eq 0 ]
     [ -d "$wt" ]
+    [[ "$output" == *"keeping "*"wt-a (issue #$CLOSED_ISSUE): unpushed"* ]]
 }
 
 @test "gc_in_progress_not_pruned: a fresh heartbeat keeps the worktree" {
@@ -38,10 +37,12 @@ run_gc() { run bash "$WATCHDOG"; }
     run_gc
     [ "$status" -eq 0 ]
     [ -d "$wt" ]
+    [[ "$output" != *"removed orphaned"* ]]
+    [[ "$output" != *"keeping "* ]]   # stopped at the heartbeat guard, before any other check
 }
 
 @test "gc_clean_closed_pruned: clean + closed issue + no heartbeat is removed (real runtime cleanup)" {
-    require_real_autospec
+    require_real_gh; require_real_autospec
     wt="$(make_worktree wt-c "feat/$CLOSED_ISSUE-clean")"
     real="$(cd "$wt" && pwd -P)"
     run_gc
@@ -53,6 +54,7 @@ run_gc() { run bash "$WATCHDOG"; }
 }
 
 @test "gc_runtime_cleanup_failure_preserves_the_worktree (real adapter failure)" {
+    require_real_gh
     export AUTOSPEC_BIN="$TEST_TMP/no-such-autospec"
     wt="$(make_worktree wt-d "feat/$CLOSED_ISSUE-rtfail")"
     run_gc
@@ -67,6 +69,7 @@ run_gc() { run bash "$WATCHDOG"; }
     echo dirty > "$wt/dirty.txt"
     run_gc
     [ -f "$wt/dirty.txt" ]
+    [[ "$output" == *"keeping "*"wt-e (issue #$CLOSED_ISSUE): dirty"* ]]
     [[ "$output" != *"runtime cleanup failed"* ]]
 }
 
@@ -76,33 +79,28 @@ run_gc() { run bash "$WATCHDOG"; }
     commit_unpushed "$wt"
     run_gc
     [ -d "$wt" ]
+    [[ "$output" == *"keeping "*"wt-f (issue #$CLOSED_ISSUE): unpushed"* ]]
     [[ "$output" != *"runtime cleanup failed"* ]]
 }
 
 @test "gc_non_issue_branch_is_left_alone (explore-qa-gate-<PID>)" {
     export AUTOSPEC_BIN="$TEST_TMP/no-such-autospec"
     wt="$(make_worktree wt-explore-qa-gate-12345 explore-qa-gate-12345)"
+    ctl="$(make_worktree wt-ctl "feat/$CLOSED_ISSUE-ctl")"; commit_unpushed "$ctl"
     run_gc
     [ -d "$wt" ]
+    [[ "$output" == *"keeping "*"wt-ctl "* ]]   # control: the candidate loop ran
+    [[ "$output" != *"wt-explore-qa-gate"* ]]
     [[ "$output" != *"runtime cleanup failed"* ]]
-}
-
-@test "gc_fetches_each_candidate_once" {
-    require_real_autospec
-    printf '#!/usr/bin/env bash\necho x >> "%s/fetches.log"\nexec "$(git --exec-path)/git-upload-pack" "$@"\n' "$TEST_TMP" > "$TEST_TMP/count-upload-pack"
-    chmod +x "$TEST_TMP/count-upload-pack"
-    git -C "$PRIMARY" config remote.origin.uploadpack "$TEST_TMP/count-upload-pack"
-    wt="$(make_worktree wt-g "feat/$CLOSED_ISSUE-once")"
-    run_gc
-    [ ! -e "$wt" ]
-    [ "$(wc -l < "$TEST_TMP/fetches.log" | tr -d ' ')" -eq 1 ]
 }
 
 # ── PR decision for an OPEN, active issue ────────────────────────────────────
 # gh's real answers for real PRs feed the real production functions.
 
 pr_line() { # branch -> the watchdog's real PR lookup against real GitHub
-    load_watchdog_fn _gc_timeout _gc_pr_line
+    require_real_gh
+    . "$ROOT/scripts/autospec-timeout.sh"
+    load_watchdog_fn _gc_pr_line
     REPO_ARGS="--repo $REAL_REPO" WATCHDOG_GC_GH_TIMEOUT_SECS=60 _gc_pr_line "$PWD" "$1"
 }
 

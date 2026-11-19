@@ -5,3 +5,4 @@
 ### Fixed
 
 - The watchdog orphaned-worktree GC un-pushed-commits guard used `git log --not --remotes`, which lists nothing without a positive revision, so it never detected unpushed commits. It now uses `git log HEAD --not --remotes`.
+- The watchdog orphaned-worktree GC now enumerates `git worktree list --porcelain` (so nested slash-branch worktrees like `/tmp/wt-feat/autonomous-issue-42` are seen), judges only branches autospec owns (heartbeat record, `feat/autonomous-issue-<N>`, `feat/<N>-<slug>`) in a checkout whose origin matches the watchdog's host and owner/name, checks dirty/unpushed before asking gh, and treats a deleted issue as closed. All gh and `git fetch` calls share `scripts/autospec-timeout.sh` (pure-bash fallback); `BatchMode` is added only for OpenSSH variants.

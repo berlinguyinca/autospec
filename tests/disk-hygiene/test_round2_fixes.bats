@@ -17,11 +17,16 @@ setup() {
     unset CARGO_TARGET_DIR CARGO_INCREMENTAL AUTOSPEC_DISK_HYGIENE \
           AUTOSPEC_DISK_CLEANUP AUTOSPEC_DISK_PREFLIGHT
     export AUTOSPEC_HERDR_ENG="$TEST_TMP/no-such-herdr-eng"
-    ORIGIN="$TEST_TMP/o/n.git"   # origin URL ends in o/n (GC ownership)
+    ORIGIN="$TEST_TMP/o/n.git"   # origin's recorded URL is github.com/o/n (GC ownership)
     mkdir -p "$TEST_TMP/o"
     PRIMARY="$TEST_TMP/primary"
     git init -q --bare "$ORIGIN"
     git clone -q "$ORIGIN" "$PRIMARY" 2>/dev/null
+    # GC ownership compares origin's host + owner/name: record the GitHub URL and
+    # let git itself serve it from the local bare repo (url.<base>.insteadOf).
+    git -C "$PRIMARY" config remote.origin.url "https://github.com/o/n.git"
+    git -C "$PRIMARY" config "url.$ORIGIN.insteadOf" "https://github.com/o/n.git"
+    export AUTOSPEC_WATCHDOG_REPO_DIR="$PRIMARY"
     git -C "$PRIMARY" checkout -q -b main
     echo seed > "$PRIMARY/seed.txt"
     echo "target/" > "$PRIMARY/.gitignore"
@@ -175,7 +180,10 @@ gate_setup() {
 
 @test "R2-5 the watchdog GC keeps an issue worktree when gh fails (state unknown)" {
     command -v gh >/dev/null 2>&1 || skip "gh not installed"
-    wt="$(gc_worktree wt-702 feat/autospec-issue-702)"
+    # gh talks to GH_HOST, so origin must name that host too (git serves it locally)
+    git -C "$PRIMARY" config remote.origin.url "https://unreachable.invalid/o/n.git"
+    git -C "$PRIMARY" config "url.$ORIGIN.insteadOf" "https://unreachable.invalid/o/n.git"
+    wt="$(gc_worktree wt-702 feat/702-gh-down)"
     GH_HOST=unreachable.invalid GH_TOKEN=x run_gc
     [ "$status" -eq 0 ]
     [ -d "$wt" ]

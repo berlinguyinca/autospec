@@ -9,6 +9,8 @@
 #   AUTOSPEC_WATCHDOG_DIR              heartbeat directory (default: ~/.autospec/process-heartbeats);
 #                                     AUTOSPEC_HEARTBEAT_DIR (writers' var) takes precedence so both agree
 #   AUTOSPEC_WATCHDOG_REPO              override repo for gh calls (default: gh repo context)
+#   AUTOSPEC_WATCHDOG_REPO_DIR          checkout whose `git worktree list` feeds the orphaned-worktree GC
+#                                     (default: the current directory)
 #   AUTOSPEC_WATCHDOG_STALE_SECS         stale threshold (default: 1800)
 #   AUTOSPEC_WATCHDOG_RECLAIM_SECS       reclaim threshold (default: 10800)
 #   AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS claimed-step release threshold (default: 1800)
@@ -24,6 +26,17 @@ if [ -f "$SCRIPT_DIR/autospec-runtime-config.sh" ]; then
 elif [ -f "$HOME/.autospec/scripts/autospec-runtime-config.sh" ]; then
     # shellcheck source=/dev/null
     . "$HOME/.autospec/scripts/autospec-runtime-config.sh"
+fi
+
+# One bounded-run helper (autospec_timeout) for every gh call in this script.
+if [ -f "$SCRIPT_DIR/autospec-timeout.sh" ]; then
+    # shellcheck source=scripts/autospec-timeout.sh
+    . "$SCRIPT_DIR/autospec-timeout.sh"
+elif [ -f "$HOME/.autospec/scripts/autospec-timeout.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$HOME/.autospec/scripts/autospec-timeout.sh"
+else
+    autospec_timeout() { return 127; }   # fail closed: no gh answer, nothing is removed
 fi
 
 if command -v autospec_runtime_config_get >/dev/null 2>&1; then
@@ -91,7 +104,7 @@ fi
 _resolve_repo_full() {
     local repo="${WATCHDOG_REPO:-}"
     if [ -z "$repo" ]; then
-        repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+        repo="$(autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
     fi
     printf '%s' "$repo"
 }
@@ -233,16 +246,23 @@ state_unset() {
     STATE_LINES="$(printf '%s\n' "$STATE_LINES" | awk -v issue="$issue" 'NF && $1 != issue { print }')"
 }
 
-# "STATE labels" of an issue, bounded by the gh timeout. Empty means gh failed
-# or timed out: the caller must treat the state as unknown (skip / keep), never
-# as "gone" -- deleting a live heartbeat on a transient gh error would defeat
-# GC GUARD 3.
+# "STATE labels" of an issue, bounded by the gh timeout. Two kinds of failure:
+#   GONE  -- gh says the issue does not exist (deleted, transferred, not an
+#            issue): permanent, the caller may clean up its state for it;
+#   empty -- anything else (network, auth, rate limit, timeout): transient, the
+#            caller must skip / keep and retry -- deleting a live heartbeat on a
+#            transient gh error would defeat GC GUARD 3.
 issue_meta() {
+    local out rc=0
     # shellcheck disable=SC2086
-    _gc_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh issue view "$1" $REPO_ARGS \
+    out="$(autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh issue view "$1" $REPO_ARGS \
         --json state,labels \
-        --jq '.state + " " + ([.labels[].name] | join(","))' \
-        2>/dev/null || true
+        --jq '.state + " " + ([.labels[].name] | join(","))' 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf '%s' "$out" | tail -n 1
+    elif printf '%s' "$out" | grep -qiE 'Could not resolve to an (issue|Issue)|issue .*not found|HTTP 404|was deleted|has been transferred'; then
+        printf 'GONE'
+    fi
 }
 
 run_state_comment_ids_for_issue() {
@@ -251,7 +271,7 @@ run_state_comment_ids_for_issue() {
     # Fetch via the REST comments endpoint because `gh issue view --json
     # comments` exposes GraphQL node ids, while DELETE needs the numeric REST
     # comment id.
-    gh api --paginate "repos/$REPO_FULL/issues/$issue/comments?per_page=100" \
+    autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh api --paginate "repos/$REPO_FULL/issues/$issue/comments?per_page=100" \
         --jq '[.[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->"))] | sort_by(.created_at, .id) | .[].id' \
         2>/dev/null
 }
@@ -261,7 +281,7 @@ clear_run_state_comments_for_issue() {
     ids="$(run_state_comment_ids_for_issue "$issue")" || return 1
     for comment_id in $ids; do
         # shellcheck disable=SC2086
-        gh api "repos/$REPO_FULL/issues/comments/$comment_id" -X DELETE >/dev/null 2>&1 || return 1
+        autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh api "repos/$REPO_FULL/issues/comments/$comment_id" -X DELETE >/dev/null 2>&1 || return 1
     done
     return 0
 }
@@ -278,11 +298,11 @@ reclaim_issue() {
     clear_run_state_comments_for_issue "$issue" || return 1
 
     # shellcheck disable=SC2086
-    gh issue edit "$issue" $REPO_ARGS \
+    autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh issue edit "$issue" $REPO_ARGS \
         --remove-label in-progress-by-bot \
         --add-label auto-implement >/dev/null 2>&1 || return 1
     # shellcheck disable=SC2086
-    gh issue comment "$issue" $REPO_ARGS \
+    autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh issue comment "$issue" $REPO_ARGS \
         --body "autospec watchdog released and reclaimed this issue after ${age}s with no live owner." >/dev/null 2>&1 || true
 }
 
@@ -290,7 +310,7 @@ nudge_issue() {
     local issue="$1"
 
     # shellcheck disable=SC2086
-    gh issue comment "$issue" $REPO_ARGS \
+    autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh issue comment "$issue" $REPO_ARGS \
         --body "autospec watchdog: please check in; if stuck, post blocker and clear in-progress-by-bot." \
         >/dev/null 2>&1 || return 1
 }
@@ -377,9 +397,12 @@ normalize_heartbeat() {
 # force-deletes a path and NEVER removes a worktree with un-pushed work or a
 # live heartbeat. It
 # only ever invokes `git worktree remove --force` after all three guards pass.
-# The pass is bounded (it only globs WATCHDOG_GC_DIR/wt-*) and must not block or
-# slow the reclaim loop; every guard short-circuits on the cheap local checks
-# (rev-parse, log) before the single per-candidate `gh` call.
+# Candidates are the linked worktrees `git worktree list --porcelain` reports for
+# the watchdog's own checkout (AUTOSPEC_WATCHDOG_REPO_DIR, default the cwd) whose
+# path lies under WATCHDOG_GC_DIR/wt-* -- dispatch puts a slash branch at
+# /tmp/wt-feat/<name>, so a flat glob would never see it. The pass must not block
+# or slow the reclaim loop; every guard short-circuits on the local checks
+# (heartbeat, dirty, unpushed) before the single per-candidate `gh` call.
 
 # True (0) if a heartbeat for $issue is live (fresh ts within the freshness
 # window). Conservative: a parse failure is treated as "not live" so it does
@@ -414,23 +437,10 @@ _gc_wt_idle_secs() {
     echo $(( now_ts - newest ))
 }
 
-# Bounded run: `timeout`/`gtimeout` when present, else unbounded.
-_gc_timeout() { # $1 secs, rest = command
-    _t_secs="$1"
-    shift
-    for _t_bin in timeout gtimeout; do
-        if command -v "$_t_bin" >/dev/null 2>&1; then
-            "$_t_bin" "$_t_secs" "$@"
-            return $?
-        fi
-    done
-    "$@"
-}
-
 # "<STATE> <headRefOid>" of the branch's newest PR, or nothing.
 _gc_pr_line() { # $1 worktree, $2 branch
     # shellcheck disable=SC2086
-    _gc_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh pr list --head "$2" --state all --limit 1 ${REPO_ARGS:-} \
+    autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh pr list --head "$2" --state all --limit 1 ${REPO_ARGS:-} \
         --json state,headRefOid --jq '.[0] | (.state + " " + .headRefOid) // empty' 2>/dev/null || true
 }
 
@@ -456,40 +466,108 @@ _gc_pr_ends_work() {
     _gc_pr_decision "$(_gc_pr_line "$1" "$2")" "$3" "$(_gc_wt_idle_secs "$1")"
 }
 
-# Issue number owned by an autospec branch, or nothing: `<prefix>/...issue-<N>`
-# (fix/issue-700, feat/autospec-issue-700) or `<prefix>/<N>-<slug>` with a
-# letter-led slug (feat/2879-released-heartbeat). release/2026-11-18,
-# backup/20261118, hotfix/1 and explore-qa-gate-<PID> are not issue branches.
+# Issue number owned by this branch, or nothing. Ownership comes from autospec's
+# own records, never from the shape of an arbitrary name:
+#   1. a heartbeat in WATCHDOG_DIR whose `branch` field is this branch (its file
+#      name is the issue number), else
+#   2. the two branch formats autospec itself generates, under its `feat/`
+#      prefix: feat/autonomous-issue-<N> (autonomous.rs) and feat/<N>-<slug>
+#      with a letter-led slug (dispatch-implementer.sh / autospec-run).
+# release/2026-q4, backup/20261118-nightly, fix/issue-12, explore-qa-gate-<PID>
+# and hand-made branches belong to their owner.
 _gc_issue_of_branch() {
-    _ib_n="$(printf '%s' "$1" | sed -nE 's#^.*(^|[/-])issue-([0-9]{1,9})([/-].*)?$#\2#p')"
-    [ -n "$_ib_n" ] || _ib_n="$(printf '%s' "$1" | sed -nE 's#^[^/]+/([0-9]{1,9})-[A-Za-z][^/]*$#\1#p')"
+    for _ib_hb in "$WATCHDOG_DIR"/*.json; do
+        [ -f "$_ib_hb" ] || continue
+        [ "$(json_value branch "$_ib_hb")" = "$1" ] || continue
+        _ib_n="${_ib_hb##*/}"; _ib_n="${_ib_n%.json}"
+        case "$_ib_n" in ''|*[!0-9]*) continue ;; esac
+        printf '%s' "$_ib_n"
+        return 0
+    done
+    _ib_n="$(printf '%s' "$1" | sed -nE 's#^feat/autonomous-issue-([0-9]{1,9})$#\1#p')"
+    [ -n "$_ib_n" ] || _ib_n="$(printf '%s' "$1" | sed -nE 's#^feat/([0-9]{1,9})-[A-Za-z][^/]*$#\1#p')"
     printf '%s' "$_ib_n"
 }
 
-# True (0) when the worktree belongs to the repo this watchdog serves: ANY of
-# its remote URLs ends in <owner>/<name> of REPO_FULL (so a fork-origin checkout
-# with an `upstream` remote still matches), or it shares the git common dir of
-# the watchdog's own checkout. Issue numbers collide across repos, so a foreign
-# worktree must never be judged by this repo's issues and heartbeats.
-# GC_REPO_LC / GC_COMMON_DIR are computed once per pass.
-_gc_wt_belongs() {
-    if [ -n "$GC_REPO_LC" ]; then
-        while IFS= read -r _wb_url; do
-            _wb_url="$(printf '%s' "$_wb_url" | tr '[:upper:]' '[:lower:]')"
-            _wb_url="${_wb_url%/}"
-            _wb_url="${_wb_url%.git}"
-            case "$_wb_url" in
-                "$GC_REPO_LC"|*/"$GC_REPO_LC"|*:"$GC_REPO_LC") return 0 ;;
-            esac
-        done < <(git -C "$1" config --get-regexp '^remote\..*\.url$' 2>/dev/null | sed -E 's/^[^ ]+ //')
-    fi
-    [ -n "$GC_COMMON_DIR" ] && [ "$GC_COMMON_DIR" = "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)" ]
+# "host/owner/name" (lower case) of a git remote URL, or nothing when it has no
+# host (a local path) or is not exactly owner/name. Forms: scheme://[user@]host
+# [:port]/owner/name[.git] and scp-like [user@]host:owner/name[.git].
+_gc_remote_slug() {
+    _rs_u="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$_rs_u" in
+        *://*) _rs_rest="${_rs_u#*://}"; _rs_host="${_rs_rest%%/*}"; _rs_path="${_rs_rest#*/}"
+               [ "$_rs_host" != "$_rs_rest" ] || return 0 ;;
+        /*|./*|../*) return 0 ;;
+        *:*)   _rs_host="${_rs_u%%:*}"; _rs_path="${_rs_u#*:}" ;;
+        *)     return 0 ;;
+    esac
+    _rs_host="${_rs_host##*@}"; _rs_host="${_rs_host%%:*}"
+    _rs_path="${_rs_path%/}"; _rs_path="${_rs_path%.git}"; _rs_path="${_rs_path#/}"
+    case "$_rs_path" in
+        */*/*|*/|/*|'') return 0 ;;
+        */*) [ -n "$_rs_host" ] && printf '%s/%s' "$_rs_host" "$_rs_path" ;;
+    esac
+    return 0
+}
+
+# True (0) when the watchdog's checkout is this repo: its `origin` URL names the
+# same host AND owner/name as the repo the watchdog serves (REPO_FULL, on
+# GH_HOST, default github.com; REPO_FULL may also be HOST/OWNER/NAME). Other
+# remotes (a `src` pointing here, a mirror on another host) do not count.
+_gc_origin_is_ours() { # $1 checkout dir
+    _oo_want="$(printf '%s' "${REPO_FULL:-}" | tr '[:upper:]' '[:lower:]')"
+    [ -n "$_oo_want" ] || return 1
+    case "$_oo_want" in
+        */*/*) ;;
+        *) _oo_want="$(printf '%s' "${GH_HOST:-github.com}" | tr '[:upper:]' '[:lower:]')/$_oo_want" ;;
+    esac
+    _oo_have="$(_gc_remote_slug "$(git -C "$1" config --get remote.origin.url 2>/dev/null || true)")"
+    [ -n "$_oo_have" ] && [ "$_oo_have" = "$_oo_want" ]
+}
+
+# "<physical path><TAB><branch>" for every linked worktree of the checkout $1
+# (default AUTOSPEC_WATCHDOG_REPO_DIR or the cwd) that sits under
+# WATCHDOG_GC_DIR/wt-*, is on a branch, and is neither the primary nor
+# detached/bare/prunable. Reads `git worktree list --porcelain`.
+_gc_candidates() {
+    _gcand_dir="${1:-${AUTOSPEC_WATCHDOG_REPO_DIR:-.}}"
+    _gcand_root="$(cd "$WATCHDOG_GC_DIR" 2>/dev/null && pwd -P)" || return 0
+    _gcand_first=1; _gcand_path=""; _gcand_branch=""; _gcand_skip=0
+    while IFS= read -r _gcand_line; do
+        case "$_gcand_line" in
+            "worktree "*) _gcand_path="${_gcand_line#worktree }"; _gcand_branch=""; _gcand_skip=0 ;;
+            "branch refs/heads/"*) _gcand_branch="${_gcand_line#branch refs/heads/}" ;;
+            bare|detached|prunable*) _gcand_skip=1 ;;
+            "")
+                if [ "$_gcand_first" -eq 1 ]; then
+                    _gcand_first=0                     # the primary checkout
+                elif [ "$_gcand_skip" -eq 0 ] && [ -n "$_gcand_branch" ] && [ -d "$_gcand_path" ]; then
+                    _gcand_phys="$(cd "$_gcand_path" 2>/dev/null && pwd -P)" || _gcand_phys=""
+                    case "$_gcand_phys" in
+                        "$_gcand_root"/wt-*) printf '%s\t%s\n' "$_gcand_phys" "$_gcand_branch" ;;
+                    esac
+                fi
+                _gcand_path=""; _gcand_branch=""; _gcand_skip=0
+                ;;
+        esac
+    done < <(git -C "$_gcand_dir" worktree list --porcelain 2>/dev/null; echo)
+}
+
+# True (0) when worktree $1 is still exactly what was judged: HEAD is $2 and the
+# tree is clean. Re-checked after the runtime teardown, which can take a while
+# and during which a worker may adopt the worktree.
+_gc_unchanged_since() {
+    [ "$(git -C "$1" rev-parse HEAD 2>/dev/null)" = "$2" ] \
+        && [ -z "$(git -C "$1" status --porcelain 2>/dev/null || echo x)" ]
 }
 
 gc_orphaned_worktrees() {
     command -v git >/dev/null 2>&1 || return 0
-    GC_REPO_LC="$(printf '%s' "${REPO_FULL:-}" | tr '[:upper:]' '[:lower:]')"
-    GC_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    gc_dir="${AUTOSPEC_WATCHDOG_REPO_DIR:-.}"
+    if ! _gc_origin_is_ours "$gc_dir"; then
+        echo "$WATCHDOG_LOG_PREFIX gc: skipping pass: origin of $gc_dir is not this repo (${REPO_FULL:-unknown}); no worktree is judged" >&2
+        return 0
+    fi
     # disk-hygiene.sh does the removal unless it is missing or opted out
     # (AUTOSPEC_DISK_CLEANUP=off / AUTOSPEC_DISK_HYGIENE=off); the GC itself is
     # older than disk hygiene and then keeps its plain guarded removal.
@@ -497,39 +575,45 @@ gc_orphaned_worktrees() {
     if [ -f "$DISK_HYGIENE_SH" ] && bash "$DISK_HYGIENE_SH" cleanup-enabled >/dev/null 2>&1; then
         use_dh=1
     fi
-    for wt in "$WATCHDOG_GC_DIR"/wt-*; do
-        [ -d "$wt" ] || continue
-        # Must be a real git worktree before we touch it.
-        git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
+    gc_cands="$(_gc_candidates "$gc_dir")"
+    [ -n "$gc_cands" ] || return 0
+    while IFS=$'\t' read -r wt branch <&3; do
+        [ -n "$wt" ] || continue
 
-        branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-        case "$branch" in
-            ''|HEAD) continue ;;
-        esac
-
-        # Only autospec issue branches are issue-owned (see _gc_issue_of_branch);
+        # Only autospec-owned branches are judged (see _gc_issue_of_branch);
         # explore-qa-gate-<PID> and hand-made branches belong to their owner.
         issue="$(_gc_issue_of_branch "$branch")"
         case "$issue" in
             ''|*[!0-9]*) continue ;;
         esac
-        if ! _gc_wt_belongs "$wt"; then
-            echo "$WATCHDOG_LOG_PREFIX gc: skipping $wt: foreign repo" >&2
-            continue
-        fi
         # The HEAD every guard below judges; cleanup re-verifies it is unchanged.
         wt_head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
         [ -n "$wt_head" ] || continue
 
-        # GUARD 3 — live heartbeat (cheap local file check; do it before gh).
+        # GUARD 3 — live heartbeat (cheap local file check; do it first).
         if _gc_heartbeat_is_live "$issue"; then
             continue
         fi
 
-        # GUARD 2 — issue closed or unlabeled. Skip if the issue is still OPEN
-        # AND still carries an in-flight label. issue_meta is "STATE labels".
+        # GUARD 1 — dirty tree or commits not on a remote. NEVER prune either.
+        # Before gh and before a teardown, so a kept worktree keeps its runtime
+        # resources and a gh outage cannot mask unsaved work.
+        if [ "$use_dh" -eq 1 ]; then
+            keep="$(bash "$DISK_HYGIENE_SH" keep-reason "$wt" 2>/dev/null || echo status_failed)"
+        else
+            keep=""
+            [ -z "$(git -C "$wt" status --porcelain 2>/dev/null || echo x)" ] || keep="dirty"
+            [ -n "$keep" ] || [ -z "$(git -C "$wt" log HEAD --not --remotes --oneline 2>/dev/null || echo x)" ] || keep="unpushed"
+        fi
+        if [ -n "$keep" ]; then
+            echo "$WATCHDOG_LOG_PREFIX gc: keeping $wt (issue #$issue): $keep" >&2
+            continue
+        fi
+
+        # GUARD 2 — issue closed, unlabeled or gone. Skip if the issue is still
+        # OPEN AND still carries an in-flight label. issue_meta is "STATE labels",
+        # GONE (permanent not-found) or empty (transient: state unknown, keep).
         meta="$(issue_meta "$issue")"
-        # gh failed / unreachable: the issue state is unknown, so keep (fail closed).
         [ -n "$meta" ] || { echo "$WATCHDOG_LOG_PREFIX gc: keeping $wt (issue #$issue): issue_state_unknown" >&2; continue; }
         gc_state="${meta%% *}"
         gc_labels="${meta#* }"
@@ -540,21 +624,6 @@ gc_orphaned_worktrees() {
             # releases it: autospec-run's failure path closes the PR and retries
             # on the same branch, so a CLOSED PR alone proves nothing.
             _gc_pr_ends_work "$wt" "$branch" "$wt_head" || continue
-        fi
-
-        # GUARD 1 — dirty tree or commits not on a remote. NEVER prune either.
-        # Before teardown, so a kept worktree keeps its runtime resources.
-        if [ "$use_dh" -eq 1 ]; then
-            keep="$(bash "$DISK_HYGIENE_SH" keep-reason "$wt" 2>/dev/null || echo status_failed)"
-            if [ -n "$keep" ]; then
-                echo "$WATCHDOG_LOG_PREFIX gc: keeping $wt (issue #$issue): $keep" >&2
-                continue
-            fi
-        else
-            unpushed="$(git -C "$wt" log HEAD --not --remotes --oneline 2>/dev/null || echo "x")"
-            [ -z "$unpushed" ] || continue
-            dirty="$(git -C "$wt" status --porcelain 2>/dev/null || echo "x")"
-            [ -z "$dirty" ] || continue
         fi
 
         # All guards passed. Release broker-owned resources before asking Git
@@ -575,15 +644,14 @@ gc_orphaned_worktrees() {
         else
             # Plain guarded removal: re-verify HEAD and cleanliness after the
             # teardown, and let git refuse (no --force) a tree that changed.
-            if [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" = "$wt_head" ] \
-                && [ -z "$(git -C "$wt" status --porcelain 2>/dev/null || echo x)" ] \
+            if _gc_unchanged_since "$wt" "$wt_head" \
                 && git --git-dir="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)" \
                     worktree remove "$wt" >/dev/null 2>&1; then
                 garbage_collected=$((garbage_collected + 1))
                 echo "$WATCHDOG_LOG_PREFIX gc: removed orphaned worktree $wt (issue #$issue, branch $branch)" >&2
             fi
         fi
-    done
+    done 3<<<"$gc_cands"
 }
 
 # GC-only mode: run just the orphaned-worktree GC pass and exit. Used by the
@@ -617,7 +685,7 @@ run_state_body_for_issue() {
     # GitHub is unreachable; suppressing it would make a transient outage
     # indistinguishable from "no comment" and trigger a spurious reclaim.
     # shellcheck disable=SC2086
-    gh issue view "$issue" $REPO_ARGS \
+    autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh issue view "$issue" $REPO_ARGS \
         --json comments \
         --jq '[.comments[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->"))] | sort_by(.createdAt, .id) | (.[0].body // "")' \
         2>/dev/null
@@ -722,7 +790,7 @@ pr_is_open() {
     pr="$1"
     [ -n "$pr" ] || return 1
     # shellcheck disable=SC2086
-    state="$(gh pr view "$pr" $REPO_ARGS --json state --jq .state 2>/dev/null || true)"
+    state="$(autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh pr view "$pr" $REPO_ARGS --json state --jq .state 2>/dev/null || true)"
     [ "$state" = "OPEN" ]
 }
 
@@ -733,7 +801,7 @@ pr_is_open() {
 linked_open_pr_json_for_issue() {
     lop_issue="$1"
     # shellcheck disable=SC2086
-    lop_prs="$(gh pr list $REPO_ARGS --state open --limit 100 --json number,state,body,statusCheckRollup 2>/dev/null)" || return 1
+    lop_prs="$(autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh pr list $REPO_ARGS --state open --limit 100 --json number,state,body,statusCheckRollup 2>/dev/null)" || return 1
     printf '%s\n' "$lop_prs" | jq -c --arg issue "$lop_issue" '
       [ .[]
         | select(((.state // "OPEN") | ascii_upcase) == "OPEN")
@@ -940,7 +1008,7 @@ done
 
 reconcile_run_state_comments() {
     # shellcheck disable=SC2086
-    issue_numbers="$(gh issue list $REPO_ARGS \
+    issue_numbers="$(autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh issue list $REPO_ARGS \
         --state open \
         --label in-progress-by-bot \
         --limit 200 \

@@ -17,6 +17,10 @@
 #       and supported; falls back to git worktree remove. Leftover untracked
 #       files are removed only AFTER git removal succeeded, never as a fallback.
 #       exit 0 removed / already gone / disabled, 1 kept, 2 refused or failed.
+#   cleanup-enabled
+#       Exit 0 when automatic worktree cleanup is on, 1 when AUTOSPEC_DISK_CLEANUP
+#       or AUTOSPEC_DISK_HYGIENE is "off". The watchdog GC asks this to decide
+#       whether to delegate removal here.
 #   keep-reason <path>
 #       Print why a worktree must be kept (dirty, unpushed, status_failed);
 #       print nothing when it is safe to remove. Read-only apart from a
@@ -32,8 +36,11 @@
 #       Print the flags every test container must carry.
 #
 # Environment (all optional):
-#   AUTOSPEC_DISK_HYGIENE=off        master switch, disables everything here
-#   AUTOSPEC_DISK_CLEANUP=off        no automatic worktree cleanup
+#   AUTOSPEC_DISK_HYGIENE=off        master switch for everything in THIS script
+#   AUTOSPEC_DISK_CLEANUP=off        cleanup-worktree does nothing. NOT a stop for
+#                                    the watchdog orphaned-worktree GC: it then
+#                                    falls back to its own guarded `git worktree
+#                                    remove` (see docs/disk-hygiene.md)
 #   AUTOSPEC_DISK_PREFLIGHT=off      no free-space gate
 #   AUTOSPEC_DISK_MIN_FREE_PCT       default 10   (a path is low when free space
 #   AUTOSPEC_DISK_MIN_FREE_GIB       default 20    is below min(GIB, PCT% of the
@@ -45,6 +52,19 @@
 # Conventions: bash 3.2 safe, no RETURN traps.
 
 DH_PROG="disk-hygiene.sh"
+
+# Shared bounded-run helper (autospec_timeout): sibling of this script, else the
+# installed copy. Without it every bounded call fails closed (rc 127 = "kept").
+_dh_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+if [ -f "$_dh_dir/autospec-timeout.sh" ]; then
+    # shellcheck source=scripts/autospec-timeout.sh
+    . "$_dh_dir/autospec-timeout.sh"
+elif [ -f "$HOME/.autospec/scripts/autospec-timeout.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$HOME/.autospec/scripts/autospec-timeout.sh"
+else
+    autospec_timeout() { return 127; }
+fi
 
 dh_log() { printf '%s\n' "$*" >&2; }
 
@@ -115,41 +135,37 @@ dh_wt_state() {
     esac
 }
 
-# Run a command with a timeout when one is available (timeout / gtimeout);
-# without either it runs unbounded (BatchMode still stops ssh prompts).
-dh_timeout() { # $1 = seconds, rest = command
-    local secs="$1" t
-    shift
-    for t in timeout gtimeout; do
-        if command -v "$t" >/dev/null 2>&1; then
-            "$t" "$secs" "$@"
-            return $?
-        fi
-    done
-    "$@"
+# The ssh command git should use for a fetch, following git's own variant rules:
+# OpenSSH options (`-o BatchMode=yes -o ConnectTimeout=10`) are appended only when
+# the variant is `ssh`, or `auto`/unset with a command whose basename is ssh
+# (ssh, ssh.exe). plink/putty/tortoiseplink/simple and unrecognised wrappers are
+# left as configured.
+dh_ssh_command() { # $1 = configured command (may be empty), $2 = variant
+    local cmd="${1:-ssh}" variant="${2:-}" first base
+    first="${cmd%% *}"
+    base="${first##*/}"
+    base="${base%.exe}"
+    case "$variant" in
+        ssh) ;;
+        ''|auto) [ "$base" = ssh ] || { printf '%s' "$cmd"; return 0; } ;;
+        *) printf '%s' "$cmd"; return 0 ;;
+    esac
+    printf '%s -o BatchMode=yes -o ConnectTimeout=10' "$cmd"
 }
 
 # Bounded, non-interactive `git fetch --prune origin` (best effort). Git's ssh
-# precedence is GIT_SSH_COMMAND > core.sshCommand > GIT_SSH. A configured command
-# keeps its identity and gets `-o BatchMode=yes -o ConnectTimeout=10` appended
-# (unless GIT_SSH_VARIANT/ssh.variant says it is not OpenSSH-style); a GIT_SSH
-# program and its variant are left untouched; with none of them set, plain ssh
-# gets the same options.
+# precedence is GIT_SSH_COMMAND > core.sshCommand > GIT_SSH: a configured command
+# keeps its identity (dh_ssh_command decides about BatchMode); a GIT_SSH program
+# is left untouched; with none of them set, plain ssh is used.
 dh_fetch() {
-    local ssh_cmd="${GIT_SSH_COMMAND:-}" variant="${GIT_SSH_VARIANT:-}" opts="-o BatchMode=yes -o ConnectTimeout=10"
+    local ssh_cmd="${GIT_SSH_COMMAND:-}" variant="${GIT_SSH_VARIANT:-}"
     local -a env_args=(GIT_TERMINAL_PROMPT=0)
     [ -n "$variant" ] || variant="$(git -C "$1" config --get ssh.variant 2>/dev/null || true)"
     [ -n "$ssh_cmd" ] || ssh_cmd="$(git -C "$1" config --get core.sshCommand 2>/dev/null || true)"
-    if [ -n "$ssh_cmd" ]; then
-        case "$variant" in
-            ''|ssh|auto) env_args+=("GIT_SSH_COMMAND=$ssh_cmd $opts") ;;
-            *) env_args+=("GIT_SSH_COMMAND=$ssh_cmd") ;;
-        esac
-    elif [ -z "${GIT_SSH:-}" ]; then
-        env_args+=("GIT_SSH_COMMAND=ssh $opts")
+    if [ -n "$ssh_cmd" ] || [ -z "${GIT_SSH:-}" ]; then
+        env_args+=("GIT_SSH_COMMAND=$(dh_ssh_command "$ssh_cmd" "$variant")")
     fi
-    dh_timeout "${AUTOSPEC_DISK_FETCH_TIMEOUT_SECS:-30}" env "${env_args[@]}" \
-        git -C "$1" fetch --prune -q origin >/dev/null 2>&1 || true
+    autospec_timeout "${AUTOSPEC_DISK_FETCH_TIMEOUT_SECS:-30}" env "${env_args[@]}" git -C "$1" fetch --prune -q origin >/dev/null 2>&1 || true
 }
 
 # Default branch ref that actually exists (origin/HEAD target, else origin/main|master).
@@ -190,7 +206,7 @@ dh_pushed() {
     fi
     # Squash/rebase-merged then deleted branch: PR MERGED at exactly this HEAD.
     if [ -n "$branch" ] && [ "$branch" != HEAD ] && command -v gh >/dev/null 2>&1; then
-        oid="$(cd "$wt" && dh_timeout "${AUTOSPEC_DISK_GH_TIMEOUT_SECS:-30}" gh pr list --head "$branch" --state merged --limit 5 \
+        oid="$(cd "$wt" && autospec_timeout "${AUTOSPEC_DISK_GH_TIMEOUT_SECS:-30}" gh pr list --head "$branch" --state merged --limit 5 \
             --json headRefOid --jq '.[].headRefOid' 2>/dev/null || true)"
         printf '%s\n' "$oid" | grep -qx "$head" && return 0
     fi

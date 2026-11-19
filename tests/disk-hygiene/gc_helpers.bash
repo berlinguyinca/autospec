@@ -34,6 +34,7 @@ require_real_autospec() {
 # gc_setup [real]: scratch dir, env, and a repo whose origin URL is
 # .../berlinguyinca/autospec.git so the watchdog treats its worktrees as its own.
 gc_setup() {
+    unset AUTOSPEC_WATCHDOG_REPO GH_HOST
     mkdir -p "$ROOT/.test-tmp"
     TEST_TMP="$(mktemp -d "$ROOT/.test-tmp/gc.XXXXXX")"
     export GIT_AUTHOR_NAME="t" GIT_AUTHOR_EMAIL="t@e" \
@@ -53,6 +54,11 @@ gc_setup() {
     PRIMARY="$TEST_TMP/primary"
     git clone -q --bare "$ROOT" "$ORIGIN"
     git clone -q "$ORIGIN" "$PRIMARY" 2>/dev/null
+    # origin's recorded URL is the real GitHub one (what the watchdog compares);
+    # git transparently serves it from the local bare repo via insteadOf.
+    git -C "$PRIMARY" config remote.origin.url "https://github.com/$REAL_REPO.git"
+    git -C "$PRIMARY" config "url.$ORIGIN.insteadOf" "https://github.com/$REAL_REPO.git"
+    export AUTOSPEC_WATCHDOG_REPO_DIR="$PRIMARY"
     BASE="origin/$(git -C "$PRIMARY" rev-parse --abbrev-ref HEAD)"
 }
 
@@ -72,3 +78,7 @@ load_watchdog_fn() {
     local f
     for f in "$@"; do eval "$(sed -n "/^$f()/,/^}/p" "$WATCHDOG")"; done
 }
+
+# make_worktree's <name> may contain slashes (dispatch-implementer.sh puts a
+# slash branch at /tmp/wt-feat/autonomous-issue-42).
+run_gc() { run bash "$WATCHDOG"; }
