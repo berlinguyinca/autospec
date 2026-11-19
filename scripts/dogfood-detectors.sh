@@ -101,7 +101,7 @@ verdict_tuples() {
     [ -s "$verdict_file" ] || return 0
     if command -v jq >/dev/null 2>&1; then
         jq -r 'select(.rule_id != null)
-            | select((.file // "") | startswith(".claude/worktrees/") | not)
+            | select((.file // "") | (startswith(".claude/worktrees/") or startswith(".test-tmp/")) | not)
             | [.file, .function, .rule_id] | @tsv' \
             "$verdict_file" 2>/dev/null | LC_ALL=C sort -u
     else
@@ -119,7 +119,7 @@ verdict_tuples() {
                 if (match($0, /"rule_id":"[^"]*"/)) {
                     s = substr($0, RSTART+11, RLENGTH-12); rid=s
                 }
-                if (rid != "" && file !~ /^\.claude\/worktrees\//) printf "%s\t%s\t%s\n", file, func, rid
+                if (rid != "" && file !~ /^\.claude\/worktrees\// && file !~ /^\.test-tmp\//) printf "%s\t%s\t%s\n", file, func, rid
             }
         ' "$verdict_file" | LC_ALL=C sort -u
     fi
