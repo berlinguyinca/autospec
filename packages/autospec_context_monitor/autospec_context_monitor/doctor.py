@@ -143,6 +143,15 @@ def _recent_events(n: int = 5) -> list[str]:
 # Checks table
 # ---------------------------------------------------------------------------
 
+def _herdr_skip() -> str:
+    """Report the Herdr-skip setting and whether this environment would be skipped."""
+    from .__main__ import _SKIP_HERDR_SETTING, is_herdr_managed
+
+    setting = os.environ.get(_SKIP_HERDR_SETTING, "1")
+    verdict = "skipped (Herdr-managed)" if is_herdr_managed(os.environ) else "not skipped"
+    return f"{_SKIP_HERDR_SETTING}={setting}; this environment: {verdict}"
+
+
 def _build_checks() -> List[Tuple[str, Callable[[], Any]]]:
     return [
         ("tmux", _tmux_version),
@@ -151,6 +160,7 @@ def _build_checks() -> List[Tuple[str, Callable[[], Any]]]:
         ("opencode binary", lambda: _binary("opencode")),
         ("transcripts writable", _transcripts_writable),
         ("adapters importable", _import_all_adapters),
+        ("herdr skip", _herdr_skip),
         ("monitor PIDs", _list_pids),
         ("recent events", _recent_events),
     ]
