@@ -224,8 +224,9 @@ unpublish() {
 @test "AUTOSPEC_WATCHDOG_DRY_RUN=1 makes reclaim, nudge and run-state clearing skip every GitHub write" {
     load_watchdog_fn _wd_dry_run clear_run_state_comments_for_issue reclaim_issue nudge_issue
     WATCHDOG_LOG_PREFIX="wd:"
-    # gh is not even reachable: any write attempt would fail the call.
-    export PATH="/usr/bin:/bin"
+    # gh must never reach GitHub from this test, even where gh lives in
+    # /usr/bin: an unresolvable host and a dummy token make every call fail.
+    export PATH="/usr/bin:/bin" GH_HOST=unreachable.invalid GH_TOKEN=x
     AUTOSPEC_WATCHDOG_DRY_RUN=1 run nudge_issue 7
     [ "$status" -eq 0 ]
     [[ "$output" == *"dry-run: skipping GitHub write: nudge #7"* ]]
@@ -234,8 +235,9 @@ unpublish() {
     [[ "$output" == *"reclaim #7"* ]]
     AUTOSPEC_WATCHDOG_DRY_RUN=1 run clear_run_state_comments_for_issue 7
     [ "$status" -eq 0 ]
-    # control: without the switch the write is attempted (and fails, no gh)
-    REPO_ARGS="" WATCHDOG_GC_GH_TIMEOUT_SECS=5
+    # control: without the switch the write is attempted and fails (the host
+    # cannot resolve, so nothing is ever posted)
+    REPO_ARGS="--repo berlinguyinca/autospec" WATCHDOG_GC_GH_TIMEOUT_SECS=5
     autospec_timeout() { shift; "$@"; }
     run nudge_issue 7
     [ "$status" -ne 0 ]

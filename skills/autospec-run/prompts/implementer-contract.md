@@ -164,7 +164,7 @@ heartbeat-write.sh --issue <N> --step <step> [--branch <b>] [--pr <p>] --repo <o
 
   ```bash
   git fetch origin
-  git worktree add -b feat/<slug> /tmp/wt-feat-<slug> origin/main
+  bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh" create --branch feat/<slug> --path /tmp/wt-feat-<slug> --base origin/main
   cd /tmp/wt-feat-<slug>
   ```
 

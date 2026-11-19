@@ -5,7 +5,7 @@
 # scripts run. No stand-ins: the squash-merge ("PR MERGED at exactly HEAD") case
 # runs against the real gh and real PRs in test_round6_fixes.bats.
 
-ROOT="${BATS_TEST_DIRNAME}/../.."
+ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
 DH="$ROOT/scripts/disk-hygiene.sh"
 DISPATCH="$ROOT/scripts/dispatch-implementer.sh"
 GUARD="$ROOT/scripts/worktree-guard.sh"
@@ -14,7 +14,8 @@ PROMPT_GEN="$ROOT/scripts/gen-implementer-prompt.sh"
 LOOP_LIB="$ROOT/scripts/lib/autospec-loop.sh"
 
 setup() {
-    TEST_TMP="$(mktemp -d)"
+    mkdir -p "$ROOT/.test-tmp"
+    TEST_TMP="$(mktemp -d "$ROOT/.test-tmp/rv.XXXXXX")"
     export GIT_AUTHOR_NAME="t" GIT_AUTHOR_EMAIL="t@e" \
            GIT_COMMITTER_NAME="t" GIT_COMMITTER_EMAIL="t@e"
     unset CARGO_TARGET_DIR CARGO_INCREMENTAL AUTOSPEC_DISK_HYGIENE \
@@ -160,14 +161,12 @@ teardown() {
     [ "$status" -eq 0 ]
     [[ "$output" != *"git worktree add"* ]]
     printf '%s\n' "$output" | awk '/^### Worktree setup/{f=1;next} f&&/^```bash/{b=1;next} b&&/^```/{exit} b' > "$TEST_TMP/setup.sh"
-    sed -i.bak "s#cd /path/to/autospec#cd '$PRIMARY'#" "$TEST_TMP/setup.sh"
+    sed -i.bak "s#cd /path/to/autospec#cd '$PRIMARY'#; s#/tmp/wt-feat-prompted#$TEST_TMP/wt-feat-prompted#g" "$TEST_TMP/setup.sh"
     grep -q 'worktree-guard.sh" create' "$TEST_TMP/setup.sh"
-    BR="feat-prompted"
-    BRS+=("$BR")
     AUTOSPEC_SCRIPTS_DIR="$ROOT/scripts" run bash -c "set -e; . '$TEST_TMP/setup.sh'; test -f .autospec-env.sh; pwd"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"/tmp/wt-feat-prompted" ]]
-    git -C "$PRIMARY" worktree remove --force /tmp/wt-feat-prompted
+    [[ "$output" == *"$TEST_TMP/wt-feat-prompted" ]]
+    git -C "$PRIMARY" worktree remove --force "$TEST_TMP/wt-feat-prompted"
 }
 
 # ── Finding 8: ownership across a dispatcher race ────────────────────────────
