@@ -566,12 +566,13 @@ _gc_candidates() {
     done < <(git -C "$_gcand_dir" worktree list --porcelain 2>/dev/null; echo)
 }
 
-# True (0) when worktree $1 is still exactly what was judged: HEAD is $2 and the
-# tree is clean. Re-checked after the runtime teardown, which can take a while
+# True (0) when worktree $1 is still exactly what was judged: HEAD is $2 and
+# disk-hygiene.sh keep-reason is empty (nested, dirty and unpushed checks). Re-checked after the runtime teardown, which can take a while
 # and during which a worker may adopt the worktree.
 _gc_unchanged_since() {
     [ "$(git -C "$1" rev-parse HEAD 2>/dev/null)" = "$2" ] \
-        && [ -z "$(git -C "$1" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || echo x)" ]
+        && [ -f "$DISK_HYGIENE_SH" ] \
+        && [ -z "$(bash "$DISK_HYGIENE_SH" keep-reason "$1" 2>/dev/null || echo x)" ]
 }
 
 gc_orphaned_worktrees() {
@@ -611,12 +612,13 @@ gc_orphaned_worktrees() {
         # GUARD 1 — dirty tree or commits not on a remote. NEVER prune either.
         # Before gh and before a teardown, so a kept worktree keeps its runtime
         # resources and a gh outage cannot mask unsaved work.
-        if [ "$use_dh" -eq 1 ]; then
+        # One source of truth for every path, including the cleanup opt-out:
+        # disk-hygiene.sh keep-reason (nested, dirty, unpushed). A missing
+        # helper or any error keeps the worktree.
+        if [ -f "$DISK_HYGIENE_SH" ]; then
             keep="$(bash "$DISK_HYGIENE_SH" keep-reason "$wt" 2>/dev/null || echo status_failed)"
         else
-            keep=""
-            [ -z "$(git -C "$wt" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || echo x)" ] || keep="dirty"
-            [ -n "$keep" ] || [ -z "$(git -C "$wt" log HEAD --not --remotes --oneline 2>/dev/null || echo x)" ] || keep="unpushed"
+            keep="disk_hygiene_missing"
         fi
         if [ -n "$keep" ]; then
             echo "$WATCHDOG_LOG_PREFIX gc: keeping $wt (issue #$issue): $keep" >&2

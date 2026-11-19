@@ -80,12 +80,13 @@ write_live_hb() {
 
 # ── fallback and opt-out (round 3 #5/#6, round 4 #5/#7); dirty-guard and
 # teardown-window coverage lives in test_round5_fixes.bats ───────────────────
-@test "gc_fallback_without_hygiene_removes_a_clean_pushed_worktree" {
+@test "gc_without_hygiene_script_fails_closed_and_keeps_a_clean_pushed_worktree" {
     require_real_gh; require_real_autospec
     export AUTOSPEC_DISK_HYGIENE_SH="$TEST_TMP/missing-hygiene.sh"
     wt="$(make_worktree wt-21 "feat/$CLOSED_ISSUE-fb2")"
     run bash "$WATCHDOG"
-    [ ! -e "$wt" ]
+    [ -d "$wt" ]
+    [[ "$output" == *"keeping "*"disk_hygiene_missing"* ]]
 }
 
 @test "gc_cleanup_off_still_reclaims_via_the_pre-existing guarded removal" {

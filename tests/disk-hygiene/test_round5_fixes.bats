@@ -224,13 +224,13 @@ load_issue_meta() { . "$TIMEOUT_SH"; load_watchdog_fn issue_meta; WATCHDOG_GC_GH
 }
 
 # ── #6 the dirty-tree guard really ran ───────────────────────────────────────
-@test "gc_fallback_dirty_guard_runs_before_any_runtime_teardown" {
+@test "gc_missing_hygiene_keeps_before_any_runtime_teardown" {
     export AUTOSPEC_DISK_HYGIENE_SH="$TEST_TMP/missing-hygiene.sh"
     wt="$(make_worktree wt-fd feat/8-fb)"
     echo wip > "$wt/wip.txt"
     run_gc
     [ -f "$wt/wip.txt" ]
-    [[ "$output" == *"keeping "*"wt-fd (issue #8): dirty"* ]]
+    [[ "$output" == *"keeping "*"wt-fd (issue #8): disk_hygiene_missing"* ]]
     [[ "$output" != *"runtime cleanup"* ]]
 }
 
@@ -247,6 +247,7 @@ load_issue_meta() { . "$TIMEOUT_SH"; load_watchdog_fn issue_meta; WATCHDOG_GC_GH
 # ── #8 the teardown-window re-check is a pure decision over a real worktree ──
 @test "_gc_unchanged_since: true for an untouched worktree, false after an edit or a commit" {
     load_watchdog_fn _gc_unchanged_since
+    DISK_HYGIENE_SH="$DH"
     wt="$(make_worktree wt-u feat/10-u)"
     head="$(git -C "$wt" rev-parse HEAD)"
     _gc_unchanged_since "$wt" "$head"

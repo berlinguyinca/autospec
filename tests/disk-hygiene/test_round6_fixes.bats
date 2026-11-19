@@ -72,6 +72,29 @@ ignore_nested() {
     [[ "$output" == *"keeping "*"nested_worktree"* ]]
 }
 
+@test "the watchdog fallback (cleanup opted out) keeps a worktree holding a nested worktree" {
+    require_real_gh
+    require_real_autospec
+    OUTER="$(make_worktree wt-outer "feat/$CLOSED_ISSUE-outer")"
+    ignore_nested "$OUTER"
+    git -C "$OUTER" worktree add -q -b nested-agent "$OUTER/.claude/worktrees/agent-a" "$BASE"
+    echo wip > "$OUTER/.claude/worktrees/agent-a/wip.rs"
+    export AUTOSPEC_DISK_CLEANUP=off
+    run_gc
+    [ -f "$OUTER/.claude/worktrees/agent-a/wip.rs" ]
+    [[ "$output" == *"keeping "*"nested_worktree"* ]]
+}
+
+@test "the watchdog fallback fails closed and keeps the worktree when disk-hygiene.sh is missing" {
+    require_real_gh
+    require_real_autospec
+    OUTER="$(make_worktree wt-outer "feat/$CLOSED_ISSUE-outer")"
+    export AUTOSPEC_DISK_HYGIENE_SH="$TEST_TMP/no-such-disk-hygiene.sh"
+    run_gc
+    [ -d "$OUTER" ]
+    [[ "$output" == *"keeping "* ]]
+}
+
 # ── #2 dirty checks ignore status.showUntrackedFiles ─────────────────────────
 @test "keep-reason sees a new untracked file under status.showUntrackedFiles=no" {
     clean_outer
@@ -87,6 +110,7 @@ ignore_nested() {
 
 @test "_gc_unchanged_since sees an untracked file under status.showUntrackedFiles=no" {
     load_watchdog_fn _gc_unchanged_since
+    DISK_HYGIENE_SH="$DH"
     clean_outer
     head="$(git -C "$OUTER" rev-parse HEAD)"
     git -C "$OUTER" config status.showUntrackedFiles no
