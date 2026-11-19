@@ -286,20 +286,6 @@ is_shipped() {
 # (sources it, calls it, or reads it) must find it shipped in the SAME list, or
 # the installed copy breaks (round 6: the watchdog shipped without
 # autospec-timeout.sh and disk-hygiene.sh, so every gh call failed).
-# SHIP_GAP_BASELINE lists the gaps that predate round 6 (optional or guarded
-# references); a NEW gap fails, and a baseline entry that no longer exists must
-# be deleted from it.
-SHIP_GAP_BASELINE="
-autospec-run-registry.sh needs repo-slug.sh
-autospec-watchdog.sh needs autospec-runtime-config.sh
-autospec-watchdog.sh needs autospec-runtime-worktree-cleanup.sh
-autospec-watchdog.sh needs repo-slug.sh
-autospec-watchdog.sh needs worker-liveness.sh
-claim-guard.sh needs repo-slug.sh
-gen-implementer-prompt.sh needs worktree-guard.sh
-lint-implementation.sh needs lint-path-classifiers.sh
-"
-
 @test "per-skill installers ship every sibling script a shipped script references" {
   local missing="" f line x y
   for f in "$REPO_ROOT"/skills/*/install.sh; do
@@ -315,9 +301,5 @@ lint-implementation.sh needs lint-path-classifiers.sh
       done
     done
   done
-  local new stale
-  new="$(printf '%s\n' "$missing" | sed '/^$/d' | sort -u | grep -vxF -f <(printf '%s\n' "$SHIP_GAP_BASELINE" | sed '/^$/d') || true)"
-  [ -z "$new" ] || { echo "new shipping gaps:"; echo "$new"; false; }
-  stale="$(printf '%s\n' "$SHIP_GAP_BASELINE" | sed '/^$/d' | grep -vxF -f <(printf '%s\n' "$missing" | sed '/^$/d' | sort -u) || true)"
-  [ -z "$stale" ] || { echo "baseline entries no longer needed:"; echo "$stale"; false; }
+  [ -z "$missing" ] || { echo "shipping gaps:$missing"; false; }
 }

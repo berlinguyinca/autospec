@@ -17,7 +17,7 @@ USE_SYMLINK=0
 DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=
-SHARED_SCRIPT_FILES="claim-guard.sh lint-issue.sh worktree-guard.sh disk-hygiene.sh autospec-timeout.sh"
+SHARED_SCRIPT_FILES="claim-guard.sh lint-issue.sh worktree-guard.sh disk-hygiene.sh autospec-timeout.sh repo-slug.sh"
 SHARED_LIB_SCRIPT_FILES="project-sync-issue.sh"
 SKILL_SCRIPT_FILES="workflow-guard.sh"
 

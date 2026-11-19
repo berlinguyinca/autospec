@@ -40,7 +40,7 @@ USE_SYMLINK=0
 DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
-SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-timeout.sh disk-hygiene.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
+SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-timeout.sh disk-hygiene.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh worktree-guard.sh lint-path-classifiers.sh autospec-runtime-config.sh autospec-runtime-worktree-cleanup.sh repo-slug.sh worker-liveness.sh"
 AUTONOMOUS_SCRIPT_FILES="autospec-autonomous.sh autospec-autonomous-launcher.sh autospec-autonomous-run-drain.sh autonomous-runtime-refresh.sh autospec-runtime-install.sh autonomous-control-channel.sh autonomous-guardrails.sh autonomous-persona-sources.sh autonomous-persona-synth.sh autonomous-persona-mine.sh autonomous-priority-match.sh autonomous-premerge-gate.sh autonomous-resilience.sh autonomous-spend-ledger.sh autonomous-usage-governor.sh autonomous-waterfall.sh autospec-autonomy-gate.sh usage-observe.sh project-board-resolve.sh project-board-normalize.sh project-board-deps.sh project-board-writeback.sh project-board-control-mirror.sh autonomous-promote-open-issues.sh list-groomable.sh classify-model-fit.sh promote-eligibility.sh groom-fill.sh"
 LIB_FILES="autospec-loop.sh autospec-harness-detect.sh"
 # Scripts that live under skills/autospec-shared/scripts/ rather than the

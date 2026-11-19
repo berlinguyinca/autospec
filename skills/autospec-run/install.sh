@@ -44,7 +44,7 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 SKILL_REFERENCE_FILES="end-of-run.md"
-SHARED_SCRIPT_FILES="autospec-runtime-config.sh autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-timeout.sh disk-hygiene.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh ci-status-compare.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
+SHARED_SCRIPT_FILES="autospec-runtime-config.sh autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-timeout.sh disk-hygiene.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh ci-status-compare.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh worktree-guard.sh lint-path-classifiers.sh autospec-runtime-worktree-cleanup.sh repo-slug.sh worker-liveness.sh"
 SHARED_LIB_SCRIPT_FILES="project-sync-issue.sh"
 
 # ---------- helpers --------------------------------------------------------

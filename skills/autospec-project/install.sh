@@ -17,14 +17,7 @@ USE_SYMLINK=0
 DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
-SHARED_SCRIPT_FILES="
-project-board-resolve.sh
-project-board-normalize.sh
-project-board-deps.sh
-project-board-writeback.sh
-autonomous-promote-open-issues.sh
-project-ship.sh
-"
+SHARED_SCRIPT_FILES="project-board-resolve.sh project-board-normalize.sh project-board-deps.sh project-board-writeback.sh autonomous-promote-open-issues.sh project-ship.sh classify-model-fit.sh groom-fill.sh list-groomable.sh promote-eligibility.sh lint-issue.sh groom-validate.sh"
 # project-ship.sh (the `ship` chain) sources fleet-lib.sh and shells out to
 # fleet-run.sh at runtime — both must land alongside it or `ship` hard-
 # crashes on a clean install. Mirrors autospec-fleet/install.sh's own
