@@ -33,7 +33,11 @@ def test_skip_disabled_by_setting_zero():
     assert is_herdr_managed(env) is True
 
 
-def _run_monitor(tmp_path: Path, extra_env: dict[str, str]) -> tuple[subprocess.CompletedProcess, Path, Path]:
+def _run_monitor(
+    tmp_path: Path,
+    extra_env: dict[str, str],
+    args: list[str] | None = None,
+) -> tuple[subprocess.CompletedProcess, Path, Path]:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     bindir = tmp_path / "bin"
@@ -42,6 +46,10 @@ def _run_monitor(tmp_path: Path, extra_env: dict[str, str]) -> tuple[subprocess.
     tmux = bindir / "tmux"
     tmux.write_text(f'#!/bin/sh\necho "$@" >> "{tmux_calls}"\nexit 1\n')
     tmux.chmod(0o755)
+    for notifier in ("osascript", "notify-send"):
+        stub = bindir / notifier
+        stub.write_text(f'#!/bin/sh\necho "$@" >> "{tmux_calls}.{notifier}"\nexit 0\n')
+        stub.chmod(0o755)
     env = {
         "HOME": str(home),
         "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
@@ -50,7 +58,7 @@ def _run_monitor(tmp_path: Path, extra_env: dict[str, str]) -> tuple[subprocess.
     }
     proc = subprocess.run(
         [sys.executable, "-m", "autospec_context_monitor",
-         "--tmux-session", "s1", "--harness", "claude", "--cwd", str(tmp_path)],
+         *(args or ["--tmux-session", "s1", "--harness", "claude", "--cwd", str(tmp_path)])],
         env=env, capture_output=True, text=True, timeout=60, cwd=str(tmp_path),
     )
     return proc, home / ".autospec" / "monitors" / "s1.log", tmux_calls
@@ -78,3 +86,38 @@ def test_kill_switch_still_works_unchanged(tmp_path):
     names = [e["event"] for e in _events(log)]
     assert names[:2] == ["start", "kill_switch"]
     assert not tmux_calls.exists()
+
+
+def test_hook_mode_skipped_logs_to_hook_event_log(tmp_path):
+    proc, _, tmux_calls = _run_monitor(
+        tmp_path, {"HERDR_PANE_ID": "w1:p1"}, args=["--hook-event", "PreCompact"]
+    )
+    assert proc.returncode == 0, proc.stderr
+    log = tmp_path / "home" / ".autospec" / "monitors" / "hook-PreCompact.log"
+    assert [e["event"] for e in _events(log)] == ["herdr_managed"]
+    assert not (tmp_path / "home" / ".autospec" / "monitors" / "hook.log").exists()
+    assert not tmux_calls.exists()
+    for notifier in ("osascript", "notify-send"):
+        assert not Path(f"{tmux_calls}.{notifier}").exists()
+
+
+def test_skip_wins_alongside_kill_switch_flag(tmp_path):
+    home = tmp_path / "home"
+    (home / ".autospec").mkdir(parents=True)
+    (home / ".autospec" / "no-auto-rollover.flag").touch()
+    proc, log, tmux_calls = _run_monitor(tmp_path, {"HERDR_PANE_ID": "w1:p1"})
+    assert proc.returncode == 0, proc.stderr
+    assert [e["event"] for e in _events(log)] == ["herdr_managed"]
+    assert not tmux_calls.exists()
+
+
+def test_setting_zero_runs_like_outside_herdr(tmp_path):
+    home = tmp_path / "home"
+    (home / ".autospec").mkdir(parents=True)
+    (home / ".autospec" / "no-auto-rollover.flag").touch()
+    proc, log, _ = _run_monitor(
+        tmp_path,
+        {"HERDR_PANE_ID": "w1:p1", "AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR": "0"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert [e["event"] for e in _events(log)][:2] == ["start", "kill_switch"]

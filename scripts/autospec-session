@@ -124,6 +124,9 @@ if [[ "$no_monitor" -eq 0 ]]; then
     mon_pid=$!
 
     info "Monitor daemon started (PID ${mon_pid}). Boot log: ${boot_log}"
+    if [[ -n "${HERDR_PANE_ID:-}" && "${AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR:-1}" != "0" ]]; then
+        err "started from a Herdr pane: the monitor skips this session and exits (Herdr owns handoff). Set AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR=0 to keep it."
+    fi
 
     # Register tmux hook to SIGTERM the monitor when the session closes.
     # session-closed fires after the last window exits.

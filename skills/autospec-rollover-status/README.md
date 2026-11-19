@@ -53,16 +53,26 @@ When no monitor is active it says so and exits cleanly.
 
 ## Herdr-managed panes
 
-The monitor does not run in a Herdr pane: Herdr has its own automatic handoff
-controller, and two policies must never act on one session. The skip is keyed on a
-non-empty `HERDR_PANE_ID`; such a session logs `{"event": "herdr_managed"}` and the
-monitor exits 0 before touching tmux, so there is no context percentage to report
-for it. A shell inside Herdr with `HERDR_PANE_ID` unset (for example a remote shell)
-is **not** skipped. When the Herdr controller is switched off for a pane, the monitor
-stays off there too, so that pane has no handoff policy at all. Set
-`AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR=0` to keep the monitor running inside Herdr; the
-`no-auto-rollover.flag` kill switch is unchanged. `python -m autospec_context_monitor.doctor`
-shows the setting and whether the current environment would be skipped.
+Herdr has its own automatic handoff controller, and two policies must never act on
+one session. The monitor therefore tests the environment of the process that starts
+it (`autospec-session` run from a Herdr pane): a non-empty `HERDR_PANE_ID` means it
+logs `{"event": "herdr_managed"}` and exits 0 before touching tmux, so there is no
+context percentage to report, and `autospec-session` prints a line to stderr saying so.
+
+- A monitor started from outside Herdr (cron, a daemon, a shell without the
+  variable) for a session that is displayed in a Herdr pane is **not** skipped.
+- A monitor started from a Herdr pane is skipped even if Herdr's controller does not
+  manage what runs inside tmux; that session then has no automatic policy. Set
+  `AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR=0` to keep the monitor.
+- When the Herdr controller is switched off for a pane, the monitor stays off there
+  too, so that pane has no handoff policy at all.
+- Hook mode is skipped the same way (log: `hook-<event>.log`), so the hook's desktop
+  notifications are also silent in Herdr panes.
+- `no-auto-rollover.flag` is unchanged. `python -m autospec_context_monitor.doctor`
+  shows the setting and whether the current environment would be skipped.
+
+Open point: whether Herdr's controller recognises a harness running inside tmux has
+not been verified.
 
 ## Hard rules
 

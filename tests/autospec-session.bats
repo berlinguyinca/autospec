@@ -158,3 +158,38 @@ TMUX
     grep -q "claude" "${args_file}"
     grep -q "somevalue" "${args_file}"
 }
+
+# ---------------------------------------------------------------------------
+# Herdr launch message: a monitor started from a Herdr pane will skip itself;
+# say so at launch. tmux/python3/setsid are stubs, as in the tests above.
+# ---------------------------------------------------------------------------
+
+_herdr_stubs() {
+    for name in tmux python3 setsid; do
+        printf '#!/usr/bin/env bash\nexit 0\n' > "${STUB_DIR}/${name}"
+        chmod +x "${STUB_DIR}/${name}"
+    done
+    printf '#!/usr/bin/env bash\nprintf "abcdef12-3456-7890-abcd-ef1234567890\\n"\n' \
+        > "${STUB_DIR}/uuidgen"
+    chmod +x "${STUB_DIR}/uuidgen"
+}
+
+@test "warns on stderr when the monitor will skip inside a Herdr pane" {
+    _herdr_stubs
+    run --separate-stderr env PATH="${STUB_DIR}:${PATH}" HERDR_PANE_ID=w1:p1 \
+        bash "${SESSION_SCRIPT}" claude
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *"AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR=0"* ]]
+}
+
+@test "no Herdr warning outside Herdr or with the skip disabled" {
+    _herdr_stubs
+    run --separate-stderr env -u HERDR_PANE_ID PATH="${STUB_DIR}:${PATH}" \
+        bash "${SESSION_SCRIPT}" claude
+    [ "$status" -eq 0 ]
+    [[ "$stderr" != *"AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR"* ]]
+    run --separate-stderr env PATH="${STUB_DIR}:${PATH}" HERDR_PANE_ID=w1:p1 \
+        AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR=0 bash "${SESSION_SCRIPT}" claude
+    [ "$status" -eq 0 ]
+    [[ "$stderr" != *"AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR"* ]]
+}

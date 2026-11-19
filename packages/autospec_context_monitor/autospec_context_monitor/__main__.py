@@ -93,7 +93,12 @@ def _log(logf: Path, record: dict) -> None:
 def is_herdr_managed(env: Mapping[str, str]) -> bool:
     """True when *env* is a Herdr pane and the Herdr skip is not disabled.
 
-    Keyed on a non-empty ``HERDR_PANE_ID``; ``AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR=0``
+    *env* is the environment of the process that starts the monitor
+    (``autospec-session`` run from a Herdr pane), not of the monitored tmux
+    session. A monitor started outside Herdr (cron, a daemon, a shell without
+    ``HERDR_PANE_ID``) is not skipped even if its session is shown in a Herdr
+    pane; one started from a Herdr pane is skipped even if Herdr's controller
+    does not manage what runs inside tmux. ``AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR=0``
     turns the skip off (default ``1``).
     """
     return bool(env.get("HERDR_PANE_ID")) and env.get(_SKIP_HERDR_SETTING, "1") != "0"
@@ -721,7 +726,8 @@ def main(argv: list[str] | None = None) -> None:
     # touching tmux or any session.
     if is_herdr_managed(os.environ):
         _MONITORS_DIR.mkdir(parents=True, exist_ok=True)
-        _log(_MONITORS_DIR / f"{args.tmux_session or 'hook'}.log", {"event": "herdr_managed"})
+        logname = f"hook-{args.hook_event}" if args.hook_event else args.tmux_session
+        _log(_MONITORS_DIR / f"{logname}.log", {"event": "herdr_managed"})
         return
 
     # Hook-mode invocations branch out before the tmux poll loop.

@@ -149,7 +149,10 @@ def _herdr_skip() -> str:
 
     setting = os.environ.get(_SKIP_HERDR_SETTING, "1")
     verdict = "skipped (Herdr-managed)" if is_herdr_managed(os.environ) else "not skipped"
-    return f"{_SKIP_HERDR_SETTING}={setting}; this environment: {verdict}"
+    return (
+        f"{_SKIP_HERDR_SETTING}={setting}; the environment starting the monitor "
+        f"(this shell) would be: {verdict}"
+    )
 
 
 def _build_checks() -> List[Tuple[str, Callable[[], Any]]]:
