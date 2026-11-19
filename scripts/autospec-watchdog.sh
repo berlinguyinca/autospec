@@ -36,7 +36,10 @@ elif [ -f "$HOME/.autospec/scripts/autospec-timeout.sh" ]; then
     # shellcheck source=/dev/null
     . "$HOME/.autospec/scripts/autospec-timeout.sh"
 else
-    autospec_timeout() { return 127; }   # fail closed: no gh answer, nothing is removed
+    # Helper missing: run the command unbounded (and say so) rather than failing
+    # every gh call, which would silently disable the whole watchdog.
+    echo "autospec-watchdog: autospec-timeout.sh not found; running commands without a time limit" >&2
+    autospec_timeout() { shift; "$@"; }
 fi
 
 if command -v autospec_runtime_config_get >/dev/null 2>&1; then
@@ -276,8 +279,16 @@ run_state_comment_ids_for_issue() {
         2>/dev/null
 }
 
+# AUTOSPEC_WATCHDOG_DRY_RUN=1: every GitHub WRITE (run-state comment delete,
+# label edit, comment) is logged and skipped; reads and local cleanup still run.
+_wd_dry_run() {
+    [ "${AUTOSPEC_WATCHDOG_DRY_RUN:-}" = "1" ] || return 1
+    echo "$WATCHDOG_LOG_PREFIX dry-run: skipping GitHub write: $*" >&2
+}
+
 clear_run_state_comments_for_issue() {
     issue="$1"
+    _wd_dry_run "delete run-state comments of #$issue" && return 0
     ids="$(run_state_comment_ids_for_issue "$issue")" || return 1
     for comment_id in $ids; do
         # shellcheck disable=SC2086
@@ -289,6 +300,7 @@ clear_run_state_comments_for_issue() {
 reclaim_issue() {
     local issue="$1"
     local age="$2"
+    _wd_dry_run "reclaim #$issue" && return 0
 
     # Clear the stale authoritative run-state lease before making the issue
     # claimable again. Otherwise the next queue/claim cycle can briefly observe
@@ -308,6 +320,7 @@ reclaim_issue() {
 
 nudge_issue() {
     local issue="$1"
+    _wd_dry_run "nudge #$issue" && return 0
 
     # shellcheck disable=SC2086
     autospec_timeout "$WATCHDOG_GC_GH_TIMEOUT_SECS" gh issue comment "$issue" $REPO_ARGS \
@@ -558,7 +571,7 @@ _gc_candidates() {
 # and during which a worker may adopt the worktree.
 _gc_unchanged_since() {
     [ "$(git -C "$1" rev-parse HEAD 2>/dev/null)" = "$2" ] \
-        && [ -z "$(git -C "$1" status --porcelain 2>/dev/null || echo x)" ]
+        && [ -z "$(git -C "$1" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || echo x)" ]
 }
 
 gc_orphaned_worktrees() {
@@ -602,7 +615,7 @@ gc_orphaned_worktrees() {
             keep="$(bash "$DISK_HYGIENE_SH" keep-reason "$wt" 2>/dev/null || echo status_failed)"
         else
             keep=""
-            [ -z "$(git -C "$wt" status --porcelain 2>/dev/null || echo x)" ] || keep="dirty"
+            [ -z "$(git -C "$wt" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || echo x)" ] || keep="dirty"
             [ -n "$keep" ] || [ -z "$(git -C "$wt" log HEAD --not --remotes --oneline 2>/dev/null || echo x)" ] || keep="unpushed"
         fi
         if [ -n "$keep" ]; then

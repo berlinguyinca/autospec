@@ -201,6 +201,9 @@ load_issue_meta() { . "$TIMEOUT_SH"; load_watchdog_fn issue_meta; WATCHDOG_GC_GH
 @test "main loop removes the heartbeat and nudge state of a deleted issue (real gh)" {
     require_real_gh
     unset AUTOSPEC_WATCHDOG_GC_ONLY
+    # Reads from the real repo (the deleted-issue lookup); every GitHub write path
+    # (reclaim, nudge, labels, comments) is dry-run, so nothing here mutates it.
+    export AUTOSPEC_WATCHDOG_DRY_RUN=1
     HB="$AUTOSPEC_WATCHDOG_DIR/berlinguyinca__autospec/999999999.json"
     printf '{"issue":"999999999","branch":"feat/999999999-x","step":"tests_started","ts":%s,"pr":"","repo":"%s","host":"%s"}\n' \
         "$(date -u +%s)" "$REAL_REPO" "$AUTOSPEC_HOST" > "$HB"

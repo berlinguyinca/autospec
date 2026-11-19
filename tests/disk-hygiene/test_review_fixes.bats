@@ -2,8 +2,8 @@
 # tests/disk-hygiene/test_review_fixes.bats — regression tests for the review
 # findings on the disk-hygiene PR. Real git repos, real bare remotes, real
 # (locked) worktrees and real directories in a per-test temp dir; the real
-# scripts run. The only stand-in left: one `gh` stub for the "PR MERGED at
-# exactly HEAD after a squash-merge" case (no local git fact equals it).
+# scripts run. No stand-ins: the squash-merge ("PR MERGED at exactly HEAD") case
+# runs against the real gh and real PRs in test_round6_fixes.bats.
 
 ROOT="${BATS_TEST_DIRNAME}/../.."
 DH="$ROOT/scripts/disk-hygiene.sh"
@@ -117,21 +117,6 @@ teardown() {
     [ -d "$WT" ]
 }
 
-@test "F5 a PR MERGED at exactly HEAD counts as pushed even with the branch deleted" {
-    echo c > "$WT/c.txt"; git -C "$WT" add c.txt; git -C "$WT" commit -q -m c
-    echo c2 >> "$WT/c.txt"; git -C "$WT" commit -q -am c2   # not patch-equivalent anywhere
-    mkdir -p "$TEST_TMP/bin"
-    cat > "$TEST_TMP/bin/gh" <<EOS
-#!/usr/bin/env bash
-# GitHub API stand-in: the PR for feat/a merged at exactly this worktree's HEAD.
-git rev-parse HEAD
-EOS
-    chmod +x "$TEST_TMP/bin/gh"
-    PATH="$TEST_TMP/bin:$PATH" run bash "$DH" cleanup-worktree "$WT"
-    [ "$status" -eq 0 ]
-    [ ! -e "$WT" ]
-}
-
 # ── Finding 6: preflight thresholds and paths ────────────────────────────────
 
 @test "F6 preflight checks CARGO_TARGET_DIR and HOME as well as the given path" {
@@ -187,35 +172,18 @@ EOS
 
 # ── Finding 8: ownership across a dispatcher race ────────────────────────────
 
-@test "F8 a dispatcher that merely reuses a worktree created by a racing winner never deletes it" {
+@test "F8 a dispatcher that merely reuses a worktree the racing winner already created never deletes it" {
     BR="dh-race-$$-$RANDOM"; BRS+=("$BR")
     printf 'p\n' > "$TEST_TMP/prompt.md"
-    # A real barrier, not a fake: upload-pack for `origin` waits until released,
-    # so the winner can create the worktree between the loser's start and its
-    # worktree-guard create.
-    cat > "$TEST_TMP/gate-upload-pack" <<EOS
-#!/usr/bin/env bash
-touch "$TEST_TMP/fetching"
-while [ ! -e "$TEST_TMP/go" ]; do sleep 0.1; done
-exec "\$(git --exec-path)/git-upload-pack" "\$@"
-EOS
-    chmod +x "$TEST_TMP/gate-upload-pack"
-    git -C "$PRIMARY" config remote.origin.uploadpack "$TEST_TMP/gate-upload-pack"
-    (
-        cd "$PRIMARY"
-        rc=0
-        AUTOSPEC_DISK_MIN_FREE_PCT=100 AUTOSPEC_DISK_MIN_FREE_GIB=99999999 \
-            bash "$DISPATCH" --issue 1 --branch "$BR" --prompt-file "$TEST_TMP/prompt.md" \
-            --base origin/main > "$TEST_TMP/loser.out" 2>&1 || rc=$?
-        echo "$rc" > "$TEST_TMP/loser.rc"
-    ) &
-    loser=$!
-    for _ in $(seq 1 100); do [ -e "$TEST_TMP/fetching" ] && break; sleep 0.1; done
-    [ -e "$TEST_TMP/fetching" ]
-    git -C "$PRIMARY" -c remote.origin.uploadpack=git-upload-pack worktree add -q -b "$BR" "/tmp/wt-$BR" origin/main
-    touch "$TEST_TMP/go"
-    wait "$loser"
-    [ "$(cat "$TEST_TMP/loser.rc")" -eq 75 ]
+    # The winner's worktree exists before the loser reaches worktree-guard create,
+    # so the loser reuses it (the guard writes no "created" marker). Not covered:
+    # the exact timing interleaving, which needs a blocking git remote.
+    git -C "$PRIMARY" worktree add -q -b "$BR" "/tmp/wt-$BR" origin/main
+    cd "$PRIMARY"
+    AUTOSPEC_DISK_MIN_FREE_PCT=100 AUTOSPEC_DISK_MIN_FREE_GIB=99999999 \
+        run bash "$DISPATCH" --issue 1 --branch "$BR" --prompt-file "$TEST_TMP/prompt.md" \
+        --base origin/main
+    [ "$status" -eq 75 ]
     [ -d "/tmp/wt-$BR" ]
 }
 

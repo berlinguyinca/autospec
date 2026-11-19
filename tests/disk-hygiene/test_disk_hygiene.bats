@@ -138,41 +138,17 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
-@test "preflight prefers herdr-eng cleanup when it supports it, then re-checks" {
-    # A real executable (not a recorder) that implements the herdr-eng cleanup
-    # contract for this test: it removes the tmp-scope path it is given.
-    BIN="$TEST_TMP/herdr-eng-real"
-    cat > "$BIN" <<EOS
-#!/usr/bin/env bash
-case "\$1" in
-  cleanup) [ "\${2:-}" = "--help" ] && exit 0; echo "\$*" >> "$TEST_TMP/cleanup.log"; exit 0 ;;
-  build-cleanup) echo "\$*" >> "$TEST_TMP/cleanup.log"; exit 0 ;;
-esac
-exit 1
-EOS
-    chmod +x "$BIN"
-    AUTOSPEC_HERDR_ENG="$BIN" AUTOSPEC_DISK_MIN_FREE_PCT=100 AUTOSPEC_DISK_MIN_FREE_GIB=99999999 run bash "$DH" preflight --path "$TEST_TMP"
-    [ "$status" -eq 75 ]
-    grep -q "build-cleanup run" "$TEST_TMP/cleanup.log"
-}
-
-@test "cleanup-worktree prefers herdr-eng cleanup --scope worktree when supported" {
-    BIN="$TEST_TMP/herdr-eng-real"
-    cat > "$BIN" <<EOS
-#!/usr/bin/env bash
-if [ "\$1" = cleanup ]; then
-  [ "\${2:-}" = "--help" ] && exit 0
-  echo "\$*" >> "$TEST_TMP/cleanup.log"
-  git -C "$PRIMARY" worktree remove --force "$WT"
-  exit \$?
-fi
-exit 1
-EOS
-    chmod +x "$BIN"
-    AUTOSPEC_HERDR_ENG="$BIN" run bash "$DH" cleanup-worktree "$WT"
+# The installed herdr-eng has no `cleanup` subcommand today, so the "herdr-eng
+# does the removal" branch cannot be exercised without a stand-in binary (not
+# allowed). What is tested for real: the contract probe against the REAL binary
+# and the real fallback path; the herdr-eng-removes-it branch has no test.
+@test "the real herdr-eng (when installed) is probed and cleanup-worktree still removes via git" {
+    command -v herdr-eng >/dev/null 2>&1 || skip "herdr-eng not installed"
+    AUTOSPEC_HERDR_ENG="$(command -v herdr-eng)" run bash -c '. "$0"; dh_herdr_has_cleanup && echo has || echo none' "$DH" 2>/dev/null
+    [ "$status" -eq 0 ]
+    AUTOSPEC_HERDR_ENG="$(command -v herdr-eng)" run bash "$DH" cleanup-worktree "$WT"
     [ "$status" -eq 0 ]
     [ ! -e "$WT" ]
-    grep -q -- "--scope worktree --path $(cd "$TEST_TMP" && pwd -P)/wt-a" "$TEST_TMP/cleanup.log"
 }
 
 @test "dispatch-implementer --cleanup keeps dirty work and removes clean worktrees" {

@@ -204,7 +204,7 @@ cmd_assert() {
 
     # Dirty tree (untracked included) -> exit 4.
     local porcelain
-    porcelain="$(git status --porcelain 2>/dev/null || true)"
+    porcelain="$(git status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || true)"
     if [ -n "$porcelain" ]; then
         emit "code_health:dirty"
         die 4 "assert: worktree is dirty (uncommitted or untracked changes present)"
@@ -382,7 +382,7 @@ cmd_create() {
     if [ -e "$path" ]; then
         local existing_branch existing_porcelain p_git_dir p_common_dir
         existing_branch="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-        existing_porcelain="$(git -C "$path" status --porcelain 2>/dev/null || true)"
+        existing_porcelain="$(git -C "$path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || true)"
         p_git_dir="$(git -C "$path" rev-parse --git-dir 2>/dev/null || true)"
         p_common_dir="$(git -C "$path" rev-parse --git-common-dir 2>/dev/null || true)"
         # Normalise to absolute paths (git may report them relative to $path).
@@ -486,7 +486,7 @@ reset_preflight() {
         die 3 "reset: refusing the primary checkout: $path"
     fi
     # A reset discards local work — require an explicit --clean for that.
-    porcelain="$(git -C "$path" status --porcelain 2>/dev/null || true)"
+    porcelain="$(git -C "$path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || true)"
     if [ -n "$porcelain" ] && [ "$clean" -eq 0 ]; then
         emit "code_health:reset_dirty_refused"
         die 4 "reset: worktree is dirty (pass --clean to discard): $path"
@@ -538,7 +538,7 @@ cmd_reset() {
         git -C "$path" clean -qfd >/dev/null 2>&1 \
             || { emit "code_health:reset_clean_failed"; die 7 "reset: clean failed; worktree left detached at base: $path"; }
         assert_reset_state "$path" "$base_ref"
-        [ -z "$(git -C "$path" status --porcelain 2>/dev/null || true)" ] \
+        [ -z "$(git -C "$path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || true)" ] \
             || { emit "code_health:reset_tree_not_clean"; die 7 "reset: tree is not clean after clean: $path"; }
     fi
 

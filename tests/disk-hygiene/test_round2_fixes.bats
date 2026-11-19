@@ -192,30 +192,44 @@ gate_setup() {
 
 # 7 ── keep-reason computed once; fetch bounded
 @test "R2-7 cleanup-worktree --checked does not fetch but still refuses a dirty tree" {
-    printf '#!/usr/bin/env bash\necho x >> "%s/fetches.log"\nexec "$(git --exec-path)/git-upload-pack" "$@"\n' "$TEST_TMP" > "$TEST_TMP/count-upload-pack"
-    chmod +x "$TEST_TMP/count-upload-pack"
-    git -C "$PRIMARY" config remote.origin.uploadpack "$TEST_TMP/count-upload-pack"
+    # git writes FETCH_HEAD in the common dir on every fetch: its absence proves no fetch ran.
+    fh="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir)/FETCH_HEAD"
+    rm -f "$fh"
     echo dirty > "$WT/dirty.txt"
     run bash "$DH" cleanup-worktree --checked "$WT"
     [ "$status" -eq 1 ]
     [ -f "$WT/dirty.txt" ]
-    [ ! -e "$TEST_TMP/fetches.log" ]
+    [ ! -e "$fh" ]
     rm "$WT/dirty.txt"
     run bash "$DH" cleanup-worktree --checked "$WT"
     [ "$status" -eq 0 ]
     [ ! -e "$WT" ]
-    [ ! -e "$TEST_TMP/fetches.log" ]
+    [ ! -e "$fh" ]
 }
 
 @test "R2-7 a hung fetch is bounded by a timeout and the worktree is kept" {
     command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || skip "no timeout binary"
-    printf '#!/usr/bin/env bash\nsleep 25\n' > "$TEST_TMP/hang-upload-pack"
-    chmod +x "$TEST_TMP/hang-upload-pack"
-    git -C "$PRIMARY" config remote.origin.uploadpack "$TEST_TMP/hang-upload-pack"
+    command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+    # A real TCP peer that accepts the connection and never answers: the way a
+    # hung remote really behaves.
+    python3 -I -c '
+import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(5)
+print(s.getsockname()[1], flush=True)
+conns = []
+while True:
+    conns.append(s.accept()[0])
+' > "$TEST_TMP/port" &
+    srv=$!
+    for _ in $(seq 1 50); do [ -s "$TEST_TMP/port" ] && break; sleep 0.1; done
+    port="$(cat "$TEST_TMP/port")"
+    git -C "$PRIMARY" config remote.origin.url "http://127.0.0.1:$port/o/n.git"
+    git -C "$PRIMARY" config --unset-all "url.$ORIGIN.insteadOf" 2>/dev/null || true
     commit_in "$WT" local-only
     start="$(date +%s)"
     AUTOSPEC_DISK_FETCH_TIMEOUT_SECS=1 run bash "$DH" keep-reason "$WT"
     elapsed=$(( $(date +%s) - start ))
+    kill "$srv" 2>/dev/null || true
     [ "$output" = "unpushed" ]
     [ "$elapsed" -lt 15 ]
 }

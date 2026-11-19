@@ -54,7 +54,7 @@
 DH_PROG="disk-hygiene.sh"
 
 # Shared bounded-run helper (autospec_timeout): sibling of this script, else the
-# installed copy. Without it every bounded call fails closed (rc 127 = "kept").
+# installed copy. Without it commands run unbounded, with a warning.
 _dh_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 if [ -f "$_dh_dir/autospec-timeout.sh" ]; then
     # shellcheck source=scripts/autospec-timeout.sh
@@ -63,7 +63,10 @@ elif [ -f "$HOME/.autospec/scripts/autospec-timeout.sh" ]; then
     # shellcheck source=/dev/null
     . "$HOME/.autospec/scripts/autospec-timeout.sh"
 else
-    autospec_timeout() { return 127; }
+    # Missing helper: run the command unbounded rather than failing it, so the
+    # script still works (a failed gh/git call would silently disable it).
+    printf '%s\n' "disk-hygiene: autospec-timeout.sh not found; running commands without a time limit" >&2
+    autospec_timeout() { shift; "$@"; }
 fi
 
 dh_log() { printf '%s\n' "$*" >&2; }
@@ -221,13 +224,36 @@ dh_pushed() {
     return 0
 }
 
-# Why a worktree must be kept: prints a reason, or nothing when safe to remove.
-dh_dirty_reason() { # local-only check: status_failed / dirty / nothing
-    local wt="$1" porcelain
-    porcelain="$(git -C "$wt" status --porcelain 2>/dev/null)" || { echo "status_failed"; return; }
-    [ -z "$porcelain" ] || echo "dirty"
+# A linked worktree or repository nested inside $1 (often under an ignored
+# path like .claude/worktrees/, so invisible to `git status`) holds work that
+# removing $1 would delete with it. Prints "nested_worktree" or nothing.
+dh_nested_reason() {
+    local wt="$1" line p found
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*)
+                p="$(dh_abs "${line#worktree }" 2>/dev/null || true)"
+                case "$p" in "$wt"/*) echo "nested_worktree"; return ;; esac
+                ;;
+        esac
+    done < <(git -C "$wt" worktree list --porcelain 2>/dev/null)
+    # Any .git below the tree other than its own top-level one; a find failure
+    # is treated as "something is there".
+    found="$(find "$wt" -path "$wt/.git" -prune -o -name .git -print -quit 2>/dev/null)" \
+        || { echo "nested_worktree"; return; }
+    [ -z "$found" ] || echo "nested_worktree"
 }
 
+dh_dirty_reason() { # local-only check: status_failed / dirty / nested_worktree / nothing
+    local wt="$1" porcelain
+    # --untracked-files=all and --ignore-submodules=none override a repo or user
+    # status.showUntrackedFiles=no / diff.ignoreSubmodules, which would hide work.
+    porcelain="$(git -C "$wt" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || { echo "status_failed"; return; }
+    [ -z "$porcelain" ] || { echo "dirty"; return; }
+    dh_nested_reason "$wt"
+}
+
+# Why a worktree must be kept: prints a reason, or nothing when safe to remove.
 dh_keep_reason() {
     local wt="$1" r
     r="$(dh_dirty_reason "$wt")"
@@ -289,6 +315,13 @@ dh_cleanup_worktree() {
     # unvalidated work, so keep it.
     if [ -n "$expect_head" ] && [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" != "$expect_head" ]; then
         dh_log "disk_hygiene:worktree_kept path=$wt why=head_changed reason=$reason"
+        return 1
+    fi
+
+    # Never removed with its parent, even under --force.
+    keep="$(dh_nested_reason "$wt")"
+    if [ -n "$keep" ]; then
+        dh_log "disk_hygiene:worktree_kept path=$wt why=$keep reason=$reason"
         return 1
     fi
 

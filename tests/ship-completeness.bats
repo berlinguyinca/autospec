@@ -280,3 +280,44 @@ is_shipped() {
   run grep -qE "autospec-doc" "$REPO_ROOT/skills/autospec-doc/scripts/doc-orchestrator-entry.mjs"
   [ "$status" -eq 0 ]
 }
+
+# Every per-skill installer copies a fixed SHARED_SCRIPT_FILES list into
+# ~/.autospec/scripts. A script in that list that names another repo script
+# (sources it, calls it, or reads it) must find it shipped in the SAME list, or
+# the installed copy breaks (round 6: the watchdog shipped without
+# autospec-timeout.sh and disk-hygiene.sh, so every gh call failed).
+# SHIP_GAP_BASELINE lists the gaps that predate round 6 (optional or guarded
+# references); a NEW gap fails, and a baseline entry that no longer exists must
+# be deleted from it.
+SHIP_GAP_BASELINE="
+autospec-run-registry.sh needs repo-slug.sh
+autospec-watchdog.sh needs autospec-runtime-config.sh
+autospec-watchdog.sh needs autospec-runtime-worktree-cleanup.sh
+autospec-watchdog.sh needs repo-slug.sh
+autospec-watchdog.sh needs worker-liveness.sh
+claim-guard.sh needs repo-slug.sh
+gen-implementer-prompt.sh needs worktree-guard.sh
+lint-implementation.sh needs lint-path-classifiers.sh
+"
+
+@test "per-skill installers ship every sibling script a shipped script references" {
+  local missing="" f line x y
+  for f in "$REPO_ROOT"/skills/*/install.sh; do
+    line="$(grep -E '^SHARED_SCRIPT_FILES=' "$f" | sed 's/^[^=]*=//; s/"//g' || true)"
+    [ -n "$line" ] || continue
+    for x in $line; do
+      [ -f "$REPO_ROOT/scripts/$x" ] || continue
+      case "$x" in *.sh) ;; *) continue ;; esac
+      for y in $(grep -v '^[[:space:]]*#' "$REPO_ROOT/scripts/$x" | grep -oE '[A-Za-z0-9_-]+\.sh' | sort -u); do
+        [ "$y" = "$x" ] && continue
+        [ -f "$REPO_ROOT/scripts/$y" ] || continue
+        case " $line " in *" $y "*) ;; *) missing="$missing"$'\n'"$x needs $y" ;; esac
+      done
+    done
+  done
+  local new stale
+  new="$(printf '%s\n' "$missing" | sed '/^$/d' | sort -u | grep -vxF -f <(printf '%s\n' "$SHIP_GAP_BASELINE" | sed '/^$/d') || true)"
+  [ -z "$new" ] || { echo "new shipping gaps:"; echo "$new"; false; }
+  stale="$(printf '%s\n' "$SHIP_GAP_BASELINE" | sed '/^$/d' | grep -vxF -f <(printf '%s\n' "$missing" | sed '/^$/d' | sort -u) || true)"
+  [ -z "$stale" ] || { echo "baseline entries no longer needed:"; echo "$stale"; false; }
+}
