@@ -1419,16 +1419,16 @@ fn run_watchdog_worktree_gc(id: &str, required: bool, root: &Path) -> CheckResul
         .any(|line| matches!(line, "gc_orphaned_worktrees" | "    gc_orphaned_worktrees"))
     {
         Some("scripts/autospec-watchdog.sh must invoke gc_orphaned_worktrees once per cycle (issue #883)")
-    } else if !WATCHDOG_FORCE_REMOVE.is_in(&document) {
-        Some("scripts/autospec-watchdog.sh GC must prune via 'git worktree remove --force' (issue #883)")
+    } else if !WATCHDOG_KEEP_REASON_GUARD.is_in(&document) {
+        Some("scripts/autospec-watchdog.sh GC must gate every removal on 'disk-hygiene.sh keep-reason' (nested, dirty, unpushed) (issue #883)")
     } else if document
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))
         .any(contains_rm_rf)
     {
-        Some("scripts/autospec-watchdog.sh must never 'rm -rf' a worktree path; use 'git worktree remove --force' (issue #883)")
-    } else if !WATCHDOG_UNPUSHED_GUARD.is_in(&document) {
-        Some("scripts/autospec-watchdog.sh GC must gate on 'git -C <wt> log --not --remotes' for un-pushed commits (issue #883)")
+        Some("scripts/autospec-watchdog.sh must never 'rm -rf' a worktree path; removal goes through disk-hygiene.sh or 'git worktree remove' (issue #883)")
+    } else if !WATCHDOG_NESTED_GUARD.is_in(&document) {
+        Some("scripts/autospec-watchdog.sh GC must fail closed (keep the worktree) when disk-hygiene.sh is missing (issue #883)")
     } else if !root.join(SUITE).is_file() {
         Some("tests/resume/test_watchdog_gc.bats: GC bats fixture missing (issue #883)")
     } else {
@@ -6878,8 +6878,8 @@ impl TextNeedle {
 }
 
 const WATCHDOG_GC_FUNCTION: TextNeedle = TextNeedle::new("gc_orphaned_worktrees()");
-const WATCHDOG_FORCE_REMOVE: TextNeedle = TextNeedle::new("git worktree remove --force");
-const WATCHDOG_UNPUSHED_GUARD: TextNeedle = TextNeedle::new("log --not --remotes");
+const WATCHDOG_KEEP_REASON_GUARD: TextNeedle = TextNeedle::new("keep-reason \"$wt\"");
+const WATCHDOG_NESTED_GUARD: TextNeedle = TextNeedle::new("disk_hygiene_missing");
 const CLAIM_ADD_IN_PROGRESS: TextNeedle = TextNeedle::new("--add-label in-progress-by-bot");
 const CLAIM_ACQUIRE_COMMAND: TextNeedle = TextNeedle::new("autospec claim acquire");
 const SHELL_EVAL_WORD: TextNeedle = TextNeedle::new("eval");

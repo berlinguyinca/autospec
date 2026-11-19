@@ -2978,13 +2978,11 @@ fn is_palette_excluded(root: &Path, path: &Path) -> bool {
     path.strip_prefix(root)
         .map(|relative| {
             let components = relative.components().collect::<Vec<_>>();
-            components
-                .iter()
-                .any(|component| component.as_os_str() == ".git")
-                || components.windows(2).any(|components| {
-                    components[0].as_os_str() == ".claude"
-                        && components[1].as_os_str() == "worktrees"
-                })
+            components.iter().any(|component| {
+                matches!(component.as_os_str().to_str(), Some(".git" | ".test-tmp"))
+            }) || components.windows(2).any(|components| {
+                components[0].as_os_str() == ".claude" && components[1].as_os_str() == "worktrees"
+            })
         })
         .unwrap_or(false)
 }

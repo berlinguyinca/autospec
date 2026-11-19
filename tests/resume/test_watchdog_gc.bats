@@ -1,238 +1,147 @@
 #!/usr/bin/env bats
 # tests/resume/test_watchdog_gc.bats — watchdog orphaned-worktree GC pass.
 #
-# Covers (docs/specs/2026-06-03-crash-resume-design.md §Error handling "GC
-# safety", §Decomposition Child 3): a /tmp/wt-* worktree is pruned via
-# `git worktree remove --force` ONLY when ALL THREE hold:
-#   (1) no un-pushed commits   — `git -C <wt> log --not --remotes` is empty
-#   (2) issue closed/unlabeled — gh shows it not OPEN+labeled auto-implement
-#   (3) no live heartbeat      — no fresh heartbeat references the branch
+# A /tmp/wt-* worktree is pruned ONLY when it is clean, pushed, its issue is
+# closed/unlabeled (or its PR provably ended the work) and no live heartbeat
+# references it. Data-integrity contract: never remove un-pushed or dirty work,
+# never remove a worktree with a fresh heartbeat.
 #
-# Data-integrity contract (load-bearing): the GC must NEVER remove a worktree
-# with un-pushed commits, and NEVER remove an in-progress-this-host worktree
-# with a fresh heartbeat. Pruning is `git worktree remove --force` only — never
-# `rm -rf`.
-#
-# All gh / git / hostname access is via PATH-shadow mocks driven by env vars,
-# mirroring tests/resume/test_resume_scan.bats. The real watchdog script runs
-# in GC-only mode (AUTOSPEC_WATCHDOG_GC_ONLY=1).
+# Everything is real: git repos and worktrees, the real watchdog in GC-only mode,
+# the real autospec runtime-cleanup adapter, the real hostname and the real `gh`
+# (read-only) against stable closed issue/PRs of berlinguyinca/autospec (see
+# gc_helpers.bash). Only the tests that truly need GitHub's answer (an issue's
+# state, a PR) call require_real_gh and skip without it; the data-integrity
+# tests (unpushed, dirty, live heartbeat, non-issue branch) run on real local git
+# alone and assert the guard's own log line, so they cannot pass vacuously.
+# The PR decision logic is a pure function fed with gh's real output.
 
-ROOT="${BATS_TEST_DIRNAME}/../.."
-WATCHDOG="$ROOT/scripts/autospec-watchdog.sh"
+load ../disk-hygiene/gc_helpers
 
-setup() {
-    TEST_TMP="$(mktemp -d)"
-
-    export AUTOSPEC_WATCHDOG_DIR="$TEST_TMP/heartbeats"
-    export AUTOSPEC_WATCHDOG_REPO="o/n"
-    export AUTOSPEC_WATCHDOG_GC_ONLY="1"
-    export AUTOSPEC_WATCHDOG_GC_DIR="$TEST_TMP/wt"   # scan root for /tmp/wt-* analogues
-    export AUTOSPEC_HOST="host-A"
-    export AUTOSPEC_CONFIG_FILE="$TEST_TMP/missing-autospec.yml"
-
-    mkdir -p "$AUTOSPEC_WATCHDOG_DIR/o_n"
-    mkdir -p "$AUTOSPEC_WATCHDOG_GC_DIR"
-
-    # Records of git worktree remove invocations.
-    export REMOVE_LOG="$TEST_TMP/removed.log"
-    : > "$REMOVE_LOG"
-    export ACTION_LOG="$TEST_TMP/actions.log"
-    : > "$ACTION_LOG"
-    export RUNTIME_CLEANUP_LOG="$TEST_TMP/runtime-cleanup.log"
-    : > "$RUNTIME_CLEANUP_LOG"
-
-    # gh mock state.
-    export GH_ISSUE_STATE="CLOSED"   # state of the issue
-    export GH_ISSUE_LABELS=""        # comma-joined labels
-
-    # git mock state.
-    export GIT_UNPUSHED=""           # non-empty => un-pushed commits present
-    export GIT_BRANCH="feat/autospec-issue-700"
-
-    export MOCK_DIR="$TEST_TMP/bin"
-    mkdir -p "$MOCK_DIR"
-    export PATH="$MOCK_DIR:$PATH"
-
-    write_hostname_mock
-    write_gh_mock
-    write_git_mock
-    write_runtime_cleanup_mock
-}
-
-teardown() { rm -rf "$TEST_TMP"; }
-
-now_ts() { date -u +%s; }
-
-write_hostname_mock() {
-    cat > "$MOCK_DIR/hostname" <<EOF
-#!/usr/bin/env bash
-echo "${AUTOSPEC_HOST}"
-EOF
-    chmod +x "$MOCK_DIR/hostname"
-}
-
-write_gh_mock() {
-    cat > "$MOCK_DIR/gh" <<'EOF'
-#!/usr/bin/env bash
-# PATH-shadow gh mock. Only supports `gh issue view <n> --json state,labels`.
-case "$1 $2" in
-  "issue view")
-    printf '%s %s\n' "$GH_ISSUE_STATE" "$GH_ISSUE_LABELS"
-    ;;
-  "repo view")
-    echo "o/n"
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-EOF
-    chmod +x "$MOCK_DIR/gh"
-}
-
-# git mock: shadows the real git so we can observe `worktree remove` and drive
-# log/rev-parse outputs. Anything we do not special-case falls through to the
-# real git so the watchdog's own logic still works.
-write_git_mock() {
-    REAL_GIT="$(command -v git)"
-    export REAL_GIT
-    cat > "$MOCK_DIR/git" <<EOF
-#!/usr/bin/env bash
-REAL_GIT="$REAL_GIT"
-REMOVE_LOG="$REMOVE_LOG"
-ACTION_LOG="$ACTION_LOG"
-EOF
-    cat >> "$MOCK_DIR/git" <<'EOF'
-# Find a -C <dir> target if present (we ignore the dir; mock is global state).
-args=("$@")
-
-# git worktree ...
-if [ "${args[0]}" = "worktree" ] || { [ "${args[0]}" = "-C" ] && [ "${args[2]}" = "worktree" ]; }; then
-  # locate subcommand after 'worktree'
-  sub=""
-  for ((i=0;i<${#args[@]};i++)); do
-    if [ "${args[$i]}" = "worktree" ]; then sub="${args[$((i+1))]}"; fi
-  done
-  case "$sub" in
-    remove)
-      # last arg is the path
-      path="${args[$((${#args[@]}-1))]}"
-      printf '%s\n' "$path" >> "$REMOVE_LOG"
-      printf 'git-remove\t%s\n' "$path" >> "$ACTION_LOG"
-      exit 0
-      ;;
-    *)
-      exit 0
-      ;;
-  esac
-fi
-
-# git -C <dir> rev-parse --abbrev-ref HEAD  -> branch
-# git -C <dir> rev-parse --is-inside-work-tree -> true
-if printf '%s ' "${args[@]}" | grep -q 'rev-parse'; then
-  if printf '%s ' "${args[@]}" | grep -q 'is-inside-work-tree'; then
-    echo "true"; exit 0
-  fi
-  if printf '%s ' "${args[@]}" | grep -q 'abbrev-ref'; then
-    echo "$GIT_BRANCH"; exit 0
-  fi
-  exit 0
-fi
-
-# git -C <dir> log --not --remotes  -> emit un-pushed commits when GIT_UNPUSHED set
-if printf '%s ' "${args[@]}" | grep -q 'log'; then
-  if [ -n "$GIT_UNPUSHED" ]; then
-    echo "deadbeef un-pushed work"
-  fi
-  exit 0
-fi
-
-# fallthrough to real git (never reached for our cases)
-exec "$REAL_GIT" "$@"
-EOF
-    chmod +x "$MOCK_DIR/git"
-}
-
-write_runtime_cleanup_mock() {
-    export AUTOSPEC_RUNTIME_WORKTREE_CLEANUP="$MOCK_DIR/autospec-runtime-worktree-cleanup.sh"
-    cat > "$AUTOSPEC_RUNTIME_WORKTREE_CLEANUP" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$1" >> "$RUNTIME_CLEANUP_LOG"
-printf 'runtime-cleanup\t%s\n' "$1" >> "$ACTION_LOG"
-exit "${RUNTIME_CLEANUP_EXIT:-0}"
-EOF
-    chmod +x "$AUTOSPEC_RUNTIME_WORKTREE_CLEANUP"
-}
-
-# Create a fake /tmp/wt-* worktree directory under the GC scan root.
-make_worktree() {
-    local name="$1"
-    mkdir -p "$AUTOSPEC_WATCHDOG_GC_DIR/$name"
-    printf '%s' "$AUTOSPEC_WATCHDOG_GC_DIR/$name"
-}
-
-# Write a heartbeat referencing a branch with a given ts and host.
-write_heartbeat() {
-    local issue="$1" branch="$2" ts="$3" host="$4"
-    printf '{"issue":"%s","branch":"%s","step":"tests_started","ts":%s,"pr":"","repo":"o/n","host":"%s"}\n' \
-        "$issue" "$branch" "$ts" "$host" \
-        > "$AUTOSPEC_WATCHDOG_DIR/o_n/${issue}.json"
-}
-
-run_gc() { run bash "$WATCHDOG"; }
-
-was_removed() { grep -qF "$1" "$REMOVE_LOG"; }
+setup() { gc_setup; }
+teardown() { [ -z "${TEST_TMP:-}" ] || gc_teardown; }
 
 @test "gc_unpushed_not_pruned: a worktree with un-pushed commits is NOT removed" {
-    wt="$(make_worktree wt-700)"
-    export GIT_BRANCH="feat/autospec-issue-700"
-    export GIT_UNPUSHED="yes"        # un-pushed commits present
-    export GH_ISSUE_STATE="CLOSED"   # issue closed
-    # no heartbeat
-
+    wt="$(make_worktree wt-a "feat/$CLOSED_ISSUE-unpushed")"
+    commit_unpushed "$wt"
     run_gc
     [ "$status" -eq 0 ]
-    if was_removed "$wt"; then false; fi
-    [ ! -s "$RUNTIME_CLEANUP_LOG" ]
+    [ -d "$wt" ]
+    [[ "$output" == *"keeping "*"wt-a (issue #$CLOSED_ISSUE): unpushed"* ]]
 }
 
-@test "gc_in_progress_not_pruned: an in-progress-this-host worktree with a fresh heartbeat is NOT removed" {
-    wt="$(make_worktree wt-701)"
-    export GIT_BRANCH="feat/autospec-issue-701"
-    export GIT_UNPUSHED=""           # clean
-    export GH_ISSUE_STATE="OPEN"
-    export GH_ISSUE_LABELS="auto-implement,in-progress-by-bot"
-    write_heartbeat 701 "feat/autospec-issue-701" "$(now_ts)" "host-A"  # fresh, this host
-
+@test "gc_in_progress_not_pruned: a fresh heartbeat keeps the worktree" {
+    wt="$(make_worktree wt-b "feat/$CLOSED_ISSUE-live")"
+    printf '{"issue":"%s","branch":"feat/%s-live","step":"tests_started","ts":%s,"pr":"","repo":"%s","host":"%s"}\n' \
+        "$CLOSED_ISSUE" "$CLOSED_ISSUE" "$(date -u +%s)" "$REAL_REPO" "$AUTOSPEC_HOST" \
+        > "$AUTOSPEC_WATCHDOG_DIR/berlinguyinca__autospec/$CLOSED_ISSUE.json"
     run_gc
     [ "$status" -eq 0 ]
-    if was_removed "$wt"; then false; fi
-    [ ! -s "$RUNTIME_CLEANUP_LOG" ]
+    [ -d "$wt" ]
+    [[ "$output" != *"removed orphaned"* ]]
+    [[ "$output" != *"keeping "* ]]   # stopped at the heartbeat guard, before any other check
 }
 
-@test "gc_clean_closed_pruned: clean + closed/unlabeled issue + no live heartbeat IS removed via git worktree remove --force" {
-    wt="$(make_worktree wt-702)"
-    export GIT_BRANCH="feat/autospec-issue-702"
-    export GIT_UNPUSHED=""           # clean, all pushed
-    export GH_ISSUE_STATE="CLOSED"   # closed
-    export GH_ISSUE_LABELS=""        # unlabeled
-    # no heartbeat referencing the branch
-
+@test "gc_clean_closed_pruned: clean + closed issue + no heartbeat is removed (real runtime cleanup)" {
+    require_real_gh; require_real_autospec
+    wt="$(make_worktree wt-c "feat/$CLOSED_ISSUE-clean")"
+    real="$(cd "$wt" && pwd -P)"
     run_gc
     [ "$status" -eq 0 ]
-    was_removed "$wt"
-    [ "$(cat "$RUNTIME_CLEANUP_LOG")" = "$wt" ]
-    [ "$(cut -f1 "$ACTION_LOG" | paste -sd, -)" = "runtime-cleanup,git-remove" ]
+    [ ! -e "$wt" ]
+    [[ "$output" == *"garbage_collected=1"* ]]
+    run git -C "$PRIMARY" worktree list --porcelain
+    [[ "$output" != *"$real"* ]]
 }
 
-@test "gc_runtime_cleanup_failure_preserves_the_worktree" {
-    wt="$(make_worktree wt-703)"
-    export GIT_BRANCH="feat/autospec-issue-703"
-    export RUNTIME_CLEANUP_EXIT=23
-
+@test "gc_runtime_cleanup_failure_preserves_the_worktree (real adapter failure)" {
+    require_real_gh
+    export AUTOSPEC_BIN="$TEST_TMP/no-such-autospec"
+    wt="$(make_worktree wt-d "feat/$CLOSED_ISSUE-rtfail")"
     run_gc
-
     [ "$status" -eq 0 ]
-    grep -Fxq "$wt" "$RUNTIME_CLEANUP_LOG"
-    ! was_removed "$wt"
+    [ -d "$wt" ]
+    [[ "$output" == *"runtime cleanup failed"* ]]
+}
+
+@test "gc_dirty_worktree_keeps_runtime_resources (no teardown before the keep-check)" {
+    export AUTOSPEC_BIN="$TEST_TMP/no-such-autospec"   # a teardown attempt would log a failure
+    wt="$(make_worktree wt-e "feat/$CLOSED_ISSUE-dirty")"
+    echo dirty > "$wt/dirty.txt"
+    run_gc
+    [ -f "$wt/dirty.txt" ]
+    [[ "$output" == *"keeping "*"wt-e (issue #$CLOSED_ISSUE): dirty"* ]]
+    [[ "$output" != *"runtime cleanup failed"* ]]
+}
+
+@test "gc_unpushed_worktree_keeps_runtime_resources (no teardown before the keep-check)" {
+    export AUTOSPEC_BIN="$TEST_TMP/no-such-autospec"
+    wt="$(make_worktree wt-f "feat/$CLOSED_ISSUE-unp2")"
+    commit_unpushed "$wt"
+    run_gc
+    [ -d "$wt" ]
+    [[ "$output" == *"keeping "*"wt-f (issue #$CLOSED_ISSUE): unpushed"* ]]
+    [[ "$output" != *"runtime cleanup failed"* ]]
+}
+
+@test "gc_non_issue_branch_is_left_alone (explore-qa-gate-<PID>)" {
+    export AUTOSPEC_BIN="$TEST_TMP/no-such-autospec"
+    wt="$(make_worktree wt-explore-qa-gate-12345 explore-qa-gate-12345)"
+    ctl="$(make_worktree wt-ctl "feat/$CLOSED_ISSUE-ctl")"; commit_unpushed "$ctl"
+    run_gc
+    [ -d "$wt" ]
+    [[ "$output" == *"keeping "*"wt-ctl "* ]]   # control: the candidate loop ran
+    [[ "$output" != *"wt-explore-qa-gate"* ]]
+    [[ "$output" != *"runtime cleanup failed"* ]]
+}
+
+# ── PR decision for an OPEN, active issue ────────────────────────────────────
+# gh's real answers for real PRs feed the real production functions.
+
+pr_line() { # branch -> the watchdog's real PR lookup against real GitHub
+    require_real_gh
+    . "$ROOT/scripts/autospec-timeout.sh"
+    load_watchdog_fn _gc_pr_line
+    REPO_ARGS="--repo $REAL_REPO" WATCHDOG_GC_GH_TIMEOUT_SECS=60 _gc_pr_line "$PWD" "$1"
+}
+
+@test "real gh: a MERGED PR is reported with its head oid" {
+    [ "$(pr_line "$MERGED_PR_BRANCH")" = "MERGED $MERGED_PR_OID" ]
+}
+
+@test "real gh: a CLOSED PR is reported with its head oid" {
+    [ "$(pr_line "$CLOSED_PR_BRANCH")" = "CLOSED $CLOSED_PR_OID" ]
+}
+
+@test "real gh: a branch without a PR yields no PR line" {
+    [ -z "$(tr -d ' ' <<<"$(pr_line "no-such-branch-$$")")" ]
+}
+
+@test "decision: MERGED at the worktree HEAD releases an active issue" {
+    load_watchdog_fn _gc_pr_decision
+    WATCHDOG_GC_PR_CLOSED_GRACE_SECS=3600
+    _gc_pr_decision "$(pr_line "$MERGED_PR_BRANCH")" "$MERGED_PR_OID" 0
+}
+
+@test "decision: CLOSED at HEAD is kept within the grace period" {
+    load_watchdog_fn _gc_pr_decision
+    WATCHDOG_GC_PR_CLOSED_GRACE_SECS=3600
+    ! _gc_pr_decision "$(pr_line "$CLOSED_PR_BRANCH")" "$CLOSED_PR_OID" 10
+}
+
+@test "decision: CLOSED at HEAD is released after the grace period" {
+    load_watchdog_fn _gc_pr_decision
+    WATCHDOG_GC_PR_CLOSED_GRACE_SECS=3600
+    _gc_pr_decision "$(pr_line "$CLOSED_PR_BRANCH")" "$CLOSED_PR_OID" 7200
+}
+
+@test "decision: a PR for a different HEAD keeps the worktree" {
+    load_watchdog_fn _gc_pr_decision
+    WATCHDOG_GC_PR_CLOSED_GRACE_SECS=0
+    ! _gc_pr_decision "$(pr_line "$CLOSED_PR_BRANCH")" "0000000000000000000000000000000000000000" 9999
+}
+
+@test "decision: no PR keeps the worktree" {
+    load_watchdog_fn _gc_pr_decision
+    WATCHDOG_GC_PR_CLOSED_GRACE_SECS=0
+    ! _gc_pr_decision "$(pr_line "no-such-branch-$$")" "$MERGED_PR_OID" 9999
 }

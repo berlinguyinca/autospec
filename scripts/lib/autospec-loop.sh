@@ -1797,7 +1797,24 @@ fi'
         _cycle=$((_cycle + 1))
         _AUTOSPEC_CONDUCTOR_CYCLE="$_cycle"
         printf '[conductor] cycle %s starting\n' "$_cycle" >&2
-        _autospec_conductor_maybe_refresh_self_repair "$_repo_root" "$_repo" "$_dry" || true
+        # Disk pre-flight (ON by default; AUTOSPEC_DISK_PREFLIGHT=off opts out):
+        # below the free-space threshold (after herdr-eng cleanup) this cycle is
+        # PARKED, not skipped: the heartbeat, the Tier-0 control channel and the
+        # cycle cap below still run, so an operator can stop/steer a parked
+        # conductor and CONDUCTOR_MAX_CYCLES still terminates it.
+        local _disk_hygiene="${AUTOSPEC_DISK_HYGIENE_SH:-${_sdir}/disk-hygiene.sh}"
+        local _disk_parked=0
+        if [ "$_dry" != "1" ] && [ -f "$_disk_hygiene" ]; then
+            local _disk_rc=0
+            bash "$_disk_hygiene" preflight --label "conductor-cycle-${_cycle}" >&2 || _disk_rc=$?
+            if [ "$_disk_rc" -eq 75 ]; then
+                _disk_parked=1
+                printf '[conductor] cycle %s parked: disk low (code_health:disk_low_parked)\n' "$_cycle" >&2
+            fi
+        fi
+        if [ "$_disk_parked" -ne 1 ]; then
+            _autospec_conductor_maybe_refresh_self_repair "$_repo_root" "$_repo" "$_dry" || true
+        fi
         local _cycle_main_sha
         _cycle_main_sha="$(_autospec_conductor_main_sha "$_repo_root" | sed -n '1p')"
 
@@ -1805,7 +1822,7 @@ fi'
         if [ -f "$_resilience" ] && [ -n "$_repo" ]; then
             bash "$_resilience" state write \
                 --repo "$_repo" \
-                --status "running:cycle-${_cycle}" \
+                --status "$([ "$_disk_parked" -eq 1 ] && printf 'parked:disk-low:cycle-%s' "$_cycle" || printf 'running:cycle-%s' "$_cycle")" \
                 --session "$_conductor_session" \
                 2>/dev/null || true
         fi
@@ -2010,6 +2027,19 @@ fi'
                     _autospec_conductor_handle_control_refused "$_repo" "$_discard_refused_issue" "discard" || true
                     ;;
             esac
+        fi
+
+        # ── Disk-parked cycle: nothing below may start builds ─────────────────
+        if [ "$_disk_parked" -eq 1 ]; then
+            if [ "$_max" -gt 0 ] 2>/dev/null && [ "$_cycle" -ge "$_max" ]; then
+                _stop_reason="max-cycles-reached"
+                break
+            fi
+            # Never busy-loop on a full disk, whatever POLL_INTERVAL is.
+            local _park_sleep="${AUTOSPEC_DISK_PARK_SLEEP_SECS:-60}"
+            if [ "$_poll" -gt "$_park_sleep" ] 2>/dev/null; then _park_sleep="$_poll"; fi
+            sleep "$_park_sleep" || true
+            continue
         fi
 
         # ── Step 2b: Dependency-aware ready count (#1632) ─────────────────────

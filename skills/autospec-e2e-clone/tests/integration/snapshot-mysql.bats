@@ -18,7 +18,7 @@ setup_file() {
     if ! command -v docker >/dev/null 2>&1; then
         return 0
     fi
-    docker run -d \
+    docker run -d --rm --label herdr.ephemeral=1 \
         --name "$MYSQL_CONTAINER_NAME" \
         -e MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
         -e MYSQL_USER="$MYSQL_USER" \

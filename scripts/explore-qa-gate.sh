@@ -44,6 +44,7 @@ RAN_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 # scripts dir.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKTREE_GUARD="$SCRIPT_DIR/worktree-guard.sh"
+DISK_HYGIENE="$SCRIPT_DIR/disk-hygiene.sh"
 
 # ---------------------------------------------------------------------------
 # 1. No sandbox → operator error (fail-closed, exit 2).
@@ -124,9 +125,16 @@ fi
 # ---------------------------------------------------------------------------
 WT_PATH="${AUTOSPEC_QA_GATE_WORKTREE:-/tmp/wt-explore-qa-gate-$$}"
 
-# Inline cleanup (no RETURN trap): remove the worktree we created.
+# Ownership: only a worktree THIS run created is ever removed. The guard writes
+# its PID to WT_CREATED_FILE on a real creation (never on reuse or refusal), so a
+# refused dirty/foreign worktree at WT_PATH is left strictly alone.
+WT_CREATED_FILE="$(mktemp "${TMPDIR:-/tmp}/explore-qa-gate-created.XXXXXX")"
+
+# Idempotent cleanup (no RETURN trap): removes the worktree we created, once.
 cleanup_worktree() {
     local notify_pid=""
+    [ -s "$WT_CREATED_FILE" ] || return 0
+    : > "$WT_CREATED_FILE"
     if [ -n "${WT_PATH:-}" ] && [ -d "$WT_PATH" ]; then
         if [ -f "$WT_PATH/.omx/state/notify-fallback.pid" ]; then
             notify_pid="$(cat "$WT_PATH/.omx/state/notify-fallback.pid" 2>/dev/null || true)"
@@ -137,15 +145,27 @@ cleanup_worktree() {
                 kill "$notify_pid" >/dev/null 2>&1 || true
             fi
         fi
+        # Throwaway worktree THIS run created (ownership marker above): always
+        # removed, whatever the AUTOSPEC_DISK_CLEANUP / AUTOSPEC_DISK_HYGIENE
+        # opt-outs (those govern implementer worktrees, not this gate's own).
+        # Git only, on the exact registered root; never rm -rf a path git does
+        # not recognise (a refused removal leaves it in place).
         git -C "$REPO_ROOT" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
         git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
-        for _cleanup_try in 1 2 3 4 5; do
-            rm -rf "$WT_PATH" 2>/dev/null || true
-            [ ! -d "$WT_PATH" ] && break
-            sleep 0.2
-        done
     fi
 }
+
+# shellcheck disable=SC2329 # invoked via the EXIT trap
+finish() {
+    cleanup_worktree
+    rm -f "$WT_CREATED_FILE"
+}
+
+# Every exit path (including an abort by signal) runs the idempotent cleanup.
+# Safe before creation: with no ownership record it removes nothing.
+trap finish EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # Branch the worktree off the recorded sandbox HEAD sha (detached-safe via a
 # throwaway local branch name). worktree-guard create refuses the primary
@@ -153,7 +173,7 @@ cleanup_worktree() {
 WT_BRANCH="explore-qa-gate-$$"
 WT_CREATE_OK=0
 if [ -f "$WORKTREE_GUARD" ]; then
-    if bash "$WORKTREE_GUARD" create \
+    if WORKTREE_GUARD_CREATED_FILE="$WT_CREATED_FILE" bash "$WORKTREE_GUARD" create \
         --branch "$WT_BRANCH" \
         --base "$SANDBOX_HEAD_SHA" \
         --path "$WT_PATH" >/dev/null 2>&1; then
@@ -164,6 +184,7 @@ if [ "$WT_CREATE_OK" -ne 1 ]; then
     # Fallback: direct worktree add off the sandbox HEAD sha.
     if git -C "$REPO_ROOT" worktree add -b "$WT_BRANCH" "$WT_PATH" "$SANDBOX_HEAD_SHA" >/dev/null 2>&1; then
         WT_CREATE_OK=1
+        printf '%s\n' "$$" > "$WT_CREATED_FILE"
     fi
 fi
 if [ "$WT_CREATE_OK" -ne 1 ]; then
@@ -192,8 +213,15 @@ if ! command -v "$QA_BIN" >/dev/null 2>&1; then
     exit 1
 fi
 
+# CARGO_INCREMENTAL=0 for Rust repos (ON by default; AUTOSPEC_DISK_HYGIENE=off
+# opts out).
+HYGIENE_ENV=""
+if [ -f "$DISK_HYGIENE" ]; then
+    HYGIENE_ENV="$(bash "$DISK_HYGIENE" env "$WT_PATH" 2>/dev/null || true)"
+fi
+
 QA_RC=0
-( cd "$WT_PATH" && sh -c "$QA_CMD" ) >/dev/null 2>&1 || QA_RC=$?
+( cd "$WT_PATH" && eval "$HYGIENE_ENV" && sh -c "$QA_CMD" ) >/dev/null 2>&1 || QA_RC=$?
 
 if [ "$QA_RC" -ne 0 ] && [ ! -f "$QA_VERDICT_FILE" ]; then
     emit "code_health:explore_qa_gate_failed qa crash rc=$QA_RC"

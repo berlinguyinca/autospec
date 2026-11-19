@@ -38,7 +38,7 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 # Repo-root scripts/ helpers this skill needs at runtime.
-SHARED_SCRIPT_FILES="autospec-run-registry.sh heartbeat-read.sh heartbeat-write.sh autospec-stop.sh"
+SHARED_SCRIPT_FILES="autospec-run-registry.sh heartbeat-read.sh heartbeat-write.sh autospec-stop.sh repo-slug.sh"
 # Per-skill scripts/ helpers (skills/autospec-resume/scripts/).
 SKILL_SCRIPT_FILES="resume-scan.sh resume-attempts.sh"
 

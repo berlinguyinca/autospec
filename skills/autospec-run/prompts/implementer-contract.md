@@ -8,10 +8,9 @@ monitor-loop machinery is intentionally NOT here: as a single-agent
 absorbed-discipline implementer you own one issue end-to-end and do not run the
 orchestrator's monitor phases, profile machinery, or invocation flags.
 
-Treat this contract as authoritative for HOW to take one issue from "open" to
-"PR merged". When a rule here references a deeper procedure (e.g. the full
-`phase4-implementer.md` step body), follow that procedure; this file is the
-acting digest, not a replacement for the per-step prompt.
+This contract is authoritative for HOW to take one issue from "open" to
+"PR merged". When a rule references a deeper procedure (e.g. the full
+`phase4-implementer.md` step body), follow it; this file is the acting digest.
 
 ## Engineering standards
 
@@ -24,8 +23,8 @@ acting digest, not a replacement for the per-step prompt.
 - **Changelog is a fragment, not an edit.** If the target repo has a `changelog.d/`
   directory, write one new fragment named after the issue (`<issue>-<slug>.md`) and
   commit it; never hand-edit `CHANGELOG.md`. Fragments are folded in at release by
-  `scripts/build-changelog.sh`, and one new file per issue is what keeps concurrent
-  agents from conflicting on the changelog (see `changelog.d/README.md`).
+  `scripts/build-changelog.sh`; one file per issue keeps concurrent agents from
+  conflicting (see `changelog.d/README.md`).
 - **NEVER** push to `main`, force-push, bypass hooks (`--no-verify`), or `amend`
   an already-pushed commit.
 - **Small-LLM target.** Keep changes self-contained and within the context /
@@ -160,11 +159,10 @@ heartbeat-write.sh --issue <N> --step <step> [--branch <b>] [--pr <p>] --repo <o
 ## Worktree / branch rules
 
 - Branch name: `feat/<slug>` derived from the issue.
-- Create an isolated worktree off freshly-fetched `origin/main`:
+- Create an isolated worktree off `origin/main` (the guard fetches first):
 
   ```bash
-  git fetch origin
-  git worktree add -b feat/<slug> /tmp/wt-feat-<slug> origin/main
+  bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh" create --branch feat/<slug> --path /tmp/wt-feat-<slug> --base origin/main
   cd /tmp/wt-feat-<slug>
   ```
 
