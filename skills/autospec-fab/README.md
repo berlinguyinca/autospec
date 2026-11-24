@@ -217,7 +217,7 @@ docker build -f skills/autospec-fab/docker/Dockerfile -t autospec-fab .
 
 ```bash
 # Run the release gate on a model directory
-docker run --rm \
+docker run --rm --label herdr.ephemeral=1 \
   -v "$PWD/model:/work/model" \
   -v "$PWD/stls:/work/stls" \
   autospec-fab \

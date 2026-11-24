@@ -20,7 +20,7 @@ setup_file() {
     if ! command -v docker >/dev/null 2>&1; then
         return 0
     fi
-    docker run -d \
+    docker run -d --rm --label herdr.ephemeral=1 \
         --name "$MINIO_CONTAINER" \
         -p "${MINIO_PORT}:9000" \
         -p "${MINIO_CONSOLE_PORT}:9001" \

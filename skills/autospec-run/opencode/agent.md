@@ -814,9 +814,26 @@ do not fall back to an inline label-swap path.
 > 2. Pre-pend the implementer prompt with an explicit workdir directive naming
 >    `/tmp/wt-<BRANCH>` and forbidding `cd`/`git checkout` into the main checkout
 >    or sibling branches.
-> 3. On agent completion, remove the worktree via
->    `git worktree remove --force /tmp/wt-<BRANCH>` (defer cleanup until the PR
->    has merged so the worktree stays available for retries).
+> 3. On PR merge/close, or when the run fails or aborts, remove the worktree AND
+>    its target dir via `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/disk-hygiene.sh cleanup-worktree /tmp/wt-<BRANCH>`
+>    (prefers `herdr-eng cleanup --scope worktree --path <wt>`; falls back to git).
+>    A dirty or unpushed worktree is KEPT and logged, never deleted. Defer cleanup
+>    until the PR has merged so the worktree stays available for retries. Raw
+>    `rm -rf` / `git worktree remove` / `docker rm` are blocked by the permission
+>    classifier; use the sanctioned command.
+> 4. **Build output.** For Rust repos `worktree-guard.sh create` (on create AND reuse) writes a
+>    git-excluded `.autospec-env.sh` exporting `CARGO_INCREMENTAL=0`; implementers `. ./.autospec-env.sh`
+>    before `cargo`. `CARGO_TARGET_DIR` is left alone: the in-worktree `target/` goes away with the
+>    worktree, and concurrent branches never share (and overwrite) one another's test binaries.
+> 5. **Docker.** Every test container an implementer starts MUST use
+>    `--rm --label herdr.ephemeral=1`.
+> 6. **Disk pre-flight.** Before starting a build, `dispatch-implementer.sh` runs
+>    `disk-hygiene.sh preflight`. Free space below min(`AUTOSPEC_DISK_MIN_FREE_GIB` (20 GiB),
+>    `AUTOSPEC_DISK_MIN_FREE_PCT` (10) % of the volume) on the worktree, `$CARGO_TARGET_DIR` or `$HOME` volume triggers `herdr-eng cleanup`/`build-cleanup`, a
+>    re-check, and otherwise exit 75: park the issue (comment `disk_low_parked`, restore
+>    `auto-implement`) instead of starting a build that will fail. Opt-outs:
+>    `AUTOSPEC_DISK_HYGIENE=off` (all),
+>    `AUTOSPEC_DISK_CLEANUP=off`, `AUTOSPEC_DISK_PREFLIGHT=off`.
 >
 > Sequential dispatch in the main checkout is the safe default; worktree-isolated
 > parallel dispatch is the only safe parallelism. See `dispatch-implementer.sh`
@@ -972,6 +989,7 @@ do not fall back to an inline label-swap path.
 >      --issue "<ISSUE>" --branch "${BRANCH:-}" --step expand_start --repo "{repo}" \
 >      --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" --session-id "$WAIT_TARGET_SESSION_ID"
 >    ```
+> 0b. **Disk pre-flight.** Run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/disk-hygiene.sh" preflight --label "issue-<ISSUE>"`. On exit 75 (free space below threshold even after `herdr-eng cleanup`), do NOT start a build: comment `code_health:disk_low_parked` on the issue, restore the `auto-implement` label, remove the claim, and stop.
 > 1. **PR-aware recovery ladder, then worktree.** Resolve the branch state FIRST, then act on the verdict. NEVER `cd`/`git checkout`/`git commit` in the primary checkout — all work happens in a linked worktree off `origin/main`.
 >    <!-- worktree-ladder:begin -->
 >    ```bash
@@ -1021,7 +1039,7 @@ do not fall back to an inline label-swap path.
 >    fi
 >    ```
 >    <!-- worktree-ladder:end -->
->    On the `open-pr` path the verification bar EQUALS fresh work — full tests + the standard review loop, never a blind merge. Cleanup is identical for every path: after the merge is confirmed (or on terminal failure), `git worktree remove` the linked worktree and `git worktree prune`; never delete un-pushed work before merge.
+>    On the `open-pr` path the verification bar EQUALS fresh work — full tests + the standard review loop, never a blind merge. Cleanup is identical for every path: after the merge is confirmed (or on terminal failure), `git worktree remove` the linked worktree and `git worktree prune`; never delete un-pushed work before merge. Use `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/disk-hygiene.sh" cleanup-worktree /tmp/wt-<BRANCH>` for that removal (also on failure/abort paths); it keeps dirty or unpushed trees and logs why.
 <!-- autospec-block:runtime-resource-preflight -->
 > 1b. **Claim the edit surface (claim-guard), nested inside the issue claim.** After the `worktree-guard.sh assert` gate passes and BEFORE the first file edit, take a fine-grained lease on the skill(s)/paths this issue will touch so a concurrent session in another worktree cannot stomp the same trio+golden surface. This is the inner layer of the three-layer caller pattern (worktree-guard → claim-guard scan → claim-guard acquire); it composes with — and sits inside — the issue-level lease you already hold. Set `TARGETS` to the space-separated skill names and/or repo-relative paths the issue's **Files touched** lists.
 >    <!-- claim-guard-acquire:begin -->
@@ -1656,7 +1674,7 @@ do not fall back to an inline label-swap path.
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.
 >    Fire the terminal failure notification: `case "$_notify_fired" in *:failed:*) ;; *) _notify_fired="${_notify_fired}:failed:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: failed" "Implementation failed on {repo}" || true ;; esac`
 >    Cleanup single-fetch body temp file on terminal failure: `rm -f "/tmp/issue-<ISSUE>-body.md" || true`
-> 10. Cleanup: run `autospec runtime env down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" --purge-maven`; then run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-runtime-worktree-cleanup.sh" /tmp/wt-<BRANCH>`; only after both succeed, run `cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force`.
+> 10. Cleanup: run `autospec runtime env down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" --purge-maven`; then run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-runtime-worktree-cleanup.sh" /tmp/wt-<BRANCH>`; only after both succeed, run `cd / && bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/disk-hygiene.sh" cleanup-worktree /tmp/wt-<BRANCH>` (guarded: removes the worktree and its target dir when clean and fully pushed; keeps and logs dirty/unpushed work; prefers `herdr-eng cleanup --scope worktree`). Run the same cleanup on terminal failure and abort paths too.
 > 11. Report: PR number, outcome, one-paragraph summary.
 >
 > Hard rules: NEVER push to main, force-push, or bypass hooks. Only `autospec parent` may update or close an umbrella issue. gh CLI only.
@@ -1699,6 +1717,9 @@ Each session derives its own `AUTOSPEC_WORKER_ID` if not overridden; the default
 | `AUTOSPEC_CLAIM_LEASE_SECONDS` | `10800` | Cross-machine claim lease TTL written into the GitHub run-state comment and used by `autospec claim acquire` stale-reclaim decisions. |
 | `AUTOSPEC_CLAIM_SETTLE_SECONDS` | `0.2` | Short post-upsert readback delay so simultaneous comment creates converge before a worker reports claim success. |
 | `AUTOSPEC_CLAIM_CONFIRM_READS` | `5` | Number of settled lowest-lock readbacks required before `autospec claim acquire` reports claim success. |
+| `AUTOSPEC_DISK_HYGIENE` | `on` | Master switch for disk hygiene (guarded worktree cleanup, disk pre-flight). `off` disables all of it. |
+| `AUTOSPEC_DISK_CLEANUP` / `AUTOSPEC_DISK_PREFLIGHT` | `on` | Individual opt-outs (`off`) for automatic worktree cleanup and the free-space gate. |
+| `AUTOSPEC_DISK_MIN_FREE_PCT` / `AUTOSPEC_DISK_MIN_FREE_GIB` | `10` / `20` | Pre-flight parks the issue (exit 75, `code_health:disk_low_parked`) when a checked path (worktree, `$CARGO_TARGET_DIR`, `$HOME`) has less free space than min(GIB, PCT% of the volume), after trying `herdr-eng cleanup`/`build-cleanup`. |
 | `AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS` | `1800` | Minimum age before a `claimed` heartbeat triggers the GitHub cross-check. Set higher (e.g., `3600`) for hosts with slow worktree setup. |
 | `AUTOSPEC_WATCHDOG_RECLAIM_SECS` | `10800` | Legacy fallback for claim lease age when `AUTOSPEC_CLAIM_LEASE_SECONDS` is unset; also used by watchdog stale cleanup. |
 | `AUTOSPEC_WATCHDOG_STALE_SECS` | `1800` | Age at which a heartbeat is considered stale for nudging. |

@@ -786,6 +786,7 @@ scan_lang() {
     find "$REPO_DIR" -type f \( $ext_pattern \) \
         ! -path '*/node_modules/*' \
         ! -path '*/.git/*' \
+        ! -path '*/.test-tmp/*' \
         ! -path '*/dist/*' \
         2>/dev/null \
         | while read -r f; do

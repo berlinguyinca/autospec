@@ -17,6 +17,7 @@ setup() {
     REPO_ROOT="$(git rev-parse --show-toplevel)"
     HELPER="$REPO_ROOT/scripts/dispatch-implementer.sh"
     GUARD="$REPO_ROOT/scripts/worktree-guard.sh"
+    export AUTOSPEC_DISK_PREFLIGHT=off  # this suite is about worktrees, not free space
     TMPDIR_BATS="$(mktemp -d)"
     PROMPT_FILE="$TMPDIR_BATS/prompt.md"
     printf 'IMPLEMENTER_PROMPT_BODY\n' > "$PROMPT_FILE"

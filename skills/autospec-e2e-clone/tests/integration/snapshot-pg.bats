@@ -17,7 +17,7 @@ setup_file() {
     if ! command -v docker >/dev/null 2>&1; then
         return 0
     fi
-    docker run -d \
+    docker run -d --rm --label herdr.ephemeral=1 \
         --name "$PG_CONTAINER_NAME" \
         -e POSTGRES_USER="$PG_USER" \
         -e POSTGRES_PASSWORD="$PG_PASSWORD" \

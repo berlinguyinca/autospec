@@ -280,3 +280,26 @@ is_shipped() {
   run grep -qE "autospec-doc" "$REPO_ROOT/skills/autospec-doc/scripts/doc-orchestrator-entry.mjs"
   [ "$status" -eq 0 ]
 }
+
+# Every per-skill installer copies a fixed SHARED_SCRIPT_FILES list into
+# ~/.autospec/scripts. A script in that list that names another repo script
+# (sources it, calls it, or reads it) must find it shipped in the SAME list, or
+# the installed copy breaks (round 6: the watchdog shipped without
+# autospec-timeout.sh and disk-hygiene.sh, so every gh call failed).
+@test "per-skill installers ship every sibling script a shipped script references" {
+  local missing="" f line x y
+  for f in "$REPO_ROOT"/skills/*/install.sh; do
+    line="$(grep -E '^SHARED_SCRIPT_FILES=' "$f" | sed 's/^[^=]*=//; s/"//g' || true)"
+    [ -n "$line" ] || continue
+    for x in $line; do
+      [ -f "$REPO_ROOT/scripts/$x" ] || continue
+      case "$x" in *.sh) ;; *) continue ;; esac
+      for y in $(grep -v '^[[:space:]]*#' "$REPO_ROOT/scripts/$x" | grep -oE '[A-Za-z0-9_-]+\.sh' | sort -u); do
+        [ "$y" = "$x" ] && continue
+        [ -f "$REPO_ROOT/scripts/$y" ] || continue
+        case " $line " in *" $y "*) ;; *) missing="$missing"$'\n'"$x needs $y" ;; esac
+      done
+    done
+  done
+  [ -z "$missing" ] || { echo "shipping gaps:$missing"; false; }
+}

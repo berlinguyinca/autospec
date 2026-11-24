@@ -43,7 +43,7 @@ USE_SYMLINK=0
 DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
-SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
+SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-timeout.sh disk-hygiene.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh worktree-guard.sh lint-path-classifiers.sh autospec-runtime-config.sh autospec-runtime-worktree-cleanup.sh repo-slug.sh worker-liveness.sh"
 # Per-skill runtime stage scripts that harmonize.sh shells out to via
 # ${AUTOSPEC_SCRIPTS_DIR}/<name> (resolved as STAGE_DIR). They MUST ship to
 # ~/.autospec/scripts/ or /autospec-harmonize crashes on a clean install. lib/color.mjs

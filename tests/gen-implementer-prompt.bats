@@ -193,3 +193,17 @@ STUB
     --body-file "/nonexistent/phase4-body.md"
   [ "$status" -ne 0 ]
 }
+
+# Disk hygiene: the prompt must steer implementers to the shared target, the
+# sanctioned cleanup command, and ephemeral docker containers.
+@test "disk-hygiene: prompt names herdr-eng cleanup, shared target and docker flags" {
+  run bash "$BIN" \
+    --issue-body "$FIX/issue-438.md" \
+    --branch feat/example-hello
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "herdr-eng cleanup --scope worktree --path /tmp/wt-feat-example-hello"
+  echo "$output" | grep -q "disk-hygiene.sh cleanup-worktree"
+  echo "$output" | grep -q "\.autospec-env\.sh"
+  echo "$output" | grep -q -- "--rm --label herdr.ephemeral=1"
+  echo "$output" | grep -q "AUTOSPEC_DISK_HYGIENE=off"
+}

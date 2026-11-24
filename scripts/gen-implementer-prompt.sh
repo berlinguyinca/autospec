@@ -225,10 +225,30 @@ cat <<SUFFIX
 
 \`\`\`bash
 cd /path/to/autospec
-git fetch origin
-git worktree add ${WT_PATH} -b ${BRANCH} origin/main
+bash "\${AUTOSPEC_SCRIPTS_DIR:-\$HOME/.autospec/scripts}/worktree-guard.sh" create --branch ${BRANCH} --path ${WT_PATH} --base origin/main
 cd ${WT_PATH}
+[ -f .autospec-env.sh ] && . ./.autospec-env.sh   # CARGO_INCREMENTAL=0 for Rust repos
 \`\`\`
+
+### Disk hygiene (ON by default)
+
+- **Rust builds.** If \`.autospec-env.sh\` exists in the worktree, source it before any
+  \`cargo\` command; it exports \`CARGO_INCREMENTAL=0\`. Leave \`CARGO_TARGET_DIR\` alone:
+  the worktree's own \`target/\` is removed with the worktree, and concurrent branches
+  must never share (and overwrite) one another's test binaries.
+- **Clean up through the sanctioned command, not raw deletes.** When done (PR merged or
+  closed, or you abort) with a clean tree and everything pushed, run
+  \`herdr-eng cleanup --scope worktree --path ${WT_PATH}\` (or, if \`herdr-eng\` is not
+  installed, \`bash \${AUTOSPEC_SCRIPTS_DIR:-\$HOME/.autospec/scripts}/disk-hygiene.sh cleanup-worktree ${WT_PATH}\`).
+  Do NOT use raw \`rm -rf\`, \`git worktree remove\` or \`docker rm\`; the permission
+  classifier blocks them and the data stays on disk. Dirty or unpushed work is kept and logged.
+- **Docker containers you start are ephemeral.** Always pass \`--rm --label herdr.ephemeral=1\`
+  (compose: \`labels: [herdr.ephemeral=1]\`; \`docker compose run --rm\`). Stop them via
+  \`herdr-eng cleanup --scope docker --path <name>\` when done.
+- **Low disk.** If \`bash \${AUTOSPEC_SCRIPTS_DIR:-\$HOME/.autospec/scripts}/disk-hygiene.sh preflight\`
+  exits 75, stop, comment that the issue is parked for low disk, and restore the \`auto-implement\` label.
+  Opt-outs: \`AUTOSPEC_DISK_HYGIENE=off\` (all),
+  \`AUTOSPEC_DISK_CLEANUP=off\`, \`AUTOSPEC_DISK_PREFLIGHT=off\`.
 
 ### Issue body
 

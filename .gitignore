@@ -78,3 +78,6 @@ batch-donel.json
 # agent worktrees (transient) and python build artifacts
 .claude/worktrees/
 *.egg-info/
+
+# Per-test scratch dirs (never /tmp)
+.test-tmp/

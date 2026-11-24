@@ -283,6 +283,18 @@ EOF
     return 0
 }
 
+# Disk pre-flight (ON by default; AUTOSPEC_DISK_PREFLIGHT=off opts out): when
+# free space is below the threshold even after herdr-eng cleanup, park the
+# drain (exit 75) instead of launching a build that will fail.
+if [ -f "$SCRIPT_DIR/disk-hygiene.sh" ]; then
+    _drain_disk_rc=0
+    bash "$SCRIPT_DIR/disk-hygiene.sh" preflight --label autonomous-drain --path "$REPO_DIR" >&2 || _drain_disk_rc=$?
+    if [ "$_drain_disk_rc" -eq 75 ]; then
+        printf 'autospec-autonomous-run-drain: disk low; drain parked (code_health:disk_low_parked)\n' >&2
+        exit 75
+    fi
+fi
+
 # Provide a literal, shell-safe resume command so autospec-run preflight does
 # not interpolate `$autospec-run` as an unset shell variable under `set -u`.
 export AUTOSPEC_RESUME_COMMAND="${AUTOSPEC_RESUME_COMMAND:-cd $(printf '%q' "$REPO_DIR") && codex exec '\$autospec-run'}"

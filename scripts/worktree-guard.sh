@@ -204,7 +204,7 @@ cmd_assert() {
 
     # Dirty tree (untracked included) -> exit 4.
     local porcelain
-    porcelain="$(git status --porcelain 2>/dev/null || true)"
+    porcelain="$(git status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || true)"
     if [ -n "$porcelain" ]; then
         emit "code_health:dirty"
         die 4 "assert: worktree is dirty (uncommitted or untracked changes present)"
@@ -327,6 +327,27 @@ cmd_resolve_base() {
 }
 
 # ---------------------------------------------------------------------------
+# write_hygiene_env — drop a git-excluded `.autospec-env.sh` in a new worktree
+# exporting CARGO_INCREMENTAL=0 (disk-hygiene.sh env). Best-effort; silent for
+# non-Rust repos and when hygiene is disabled. Written on create AND reuse.
+# ---------------------------------------------------------------------------
+write_hygiene_env() {
+    local path="$1" hygiene env_out exclude
+    hygiene="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)/disk-hygiene.sh"
+    [ -f "$hygiene" ] || hygiene="${HOME}/.autospec/scripts/disk-hygiene.sh"
+    [ -f "$hygiene" ] || return 0
+    env_out="$(bash "$hygiene" env "$path" 2>/dev/null || true)"
+    [ -n "$env_out" ] || return 0
+    printf '%s\n' "$env_out" > "$path/.autospec-env.sh" 2>/dev/null || return 0
+    exclude="$(git -C "$path" rev-parse --path-format=absolute --git-path info/exclude 2>/dev/null || true)"
+    if [ -n "$exclude" ]; then
+        mkdir -p "$(dirname "$exclude")" 2>/dev/null || true
+        grep -qxF '.autospec-env.sh' "$exclude" 2>/dev/null || printf '.autospec-env.sh\n' >> "$exclude"
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # create
 # ---------------------------------------------------------------------------
 cmd_create() {
@@ -361,7 +382,7 @@ cmd_create() {
     if [ -e "$path" ]; then
         local existing_branch existing_porcelain p_git_dir p_common_dir
         existing_branch="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-        existing_porcelain="$(git -C "$path" status --porcelain 2>/dev/null || true)"
+        existing_porcelain="$(git -C "$path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || true)"
         p_git_dir="$(git -C "$path" rev-parse --git-dir 2>/dev/null || true)"
         p_common_dir="$(git -C "$path" rev-parse --git-common-dir 2>/dev/null || true)"
         # Normalise to absolute paths (git may report them relative to $path).
@@ -378,6 +399,9 @@ cmd_create() {
         if [ "$existing_branch" = "$branch" ] && [ -z "$existing_porcelain" ] \
                 && [ "$is_linked_worktree" -eq 1 ]; then
             # Clean, same branch, genuine linked worktree -> idempotent reuse.
+            # Not a creation: WORKTREE_GUARD_CREATED_FILE stays untouched so the
+            # caller never takes ownership of (and later deletes) a reused tree.
+            write_hygiene_env "$path"
             exit 0
         fi
         emit "code_health:worktree_dirty_reuse_refused path=$path branch=$existing_branch want=$branch linked=$is_linked_worktree"
@@ -409,6 +433,12 @@ cmd_create() {
         fi
     fi
 
+    # Ownership record: only a process that really created the worktree writes
+    # its PID here (callers pass a private file via WORKTREE_GUARD_CREATED_FILE).
+    if [ -n "${WORKTREE_GUARD_CREATED_FILE:-}" ]; then
+        printf '%s\n' "$$" > "$WORKTREE_GUARD_CREATED_FILE" 2>/dev/null || true
+    fi
+    write_hygiene_env "$path"
     exit 0
 }
 
@@ -456,7 +486,7 @@ reset_preflight() {
         die 3 "reset: refusing the primary checkout: $path"
     fi
     # A reset discards local work — require an explicit --clean for that.
-    porcelain="$(git -C "$path" status --porcelain 2>/dev/null || true)"
+    porcelain="$(git -C "$path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || true)"
     if [ -n "$porcelain" ] && [ "$clean" -eq 0 ]; then
         emit "code_health:reset_dirty_refused"
         die 4 "reset: worktree is dirty (pass --clean to discard): $path"
@@ -508,7 +538,7 @@ cmd_reset() {
         git -C "$path" clean -qfd >/dev/null 2>&1 \
             || { emit "code_health:reset_clean_failed"; die 7 "reset: clean failed; worktree left detached at base: $path"; }
         assert_reset_state "$path" "$base_ref"
-        [ -z "$(git -C "$path" status --porcelain 2>/dev/null || true)" ] \
+        [ -z "$(git -C "$path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null || true)" ] \
             || { emit "code_health:reset_tree_not_clean"; die 7 "reset: tree is not clean after clean: $path"; }
     fi
 
