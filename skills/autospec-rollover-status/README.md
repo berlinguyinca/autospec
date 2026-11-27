@@ -51,6 +51,29 @@ Current context: 51.0% used
 
 When no monitor is active it says so and exits cleanly.
 
+## Herdr-managed panes
+
+Herdr has its own automatic handoff controller, and two policies must never act on
+one session. The monitor therefore tests the environment of the process that starts
+it (`autospec-session` run from a Herdr pane): a non-empty `HERDR_PANE_ID` means it
+logs `{"event": "herdr_managed"}` and exits 0 before touching tmux, so there is no
+context percentage to report, and `autospec-session` prints a line to stderr saying so.
+
+- A monitor started from outside Herdr (cron, a daemon, a shell without the
+  variable) for a session that is displayed in a Herdr pane is **not** skipped.
+- A monitor started from a Herdr pane is skipped even if Herdr's controller does not
+  manage what runs inside tmux; that session then has no automatic policy. Set
+  `AUTOSPEC_CONTEXT_MONITOR_SKIP_HERDR=0` to keep the monitor.
+- When the Herdr controller is switched off for a pane, the monitor stays off there
+  too, so that pane has no handoff policy at all.
+- Hook mode is skipped the same way (log: `hook-<event>.log`), so the hook's desktop
+  notifications are also silent in Herdr panes.
+- `no-auto-rollover.flag` is unchanged. `python -m autospec_context_monitor.doctor`
+  shows the setting and whether the current environment would be skipped.
+
+Open point: whether Herdr's controller recognises a harness running inside tmux has
+not been verified.
+
 ## Hard rules
 
 Read-only. The skill never writes files, labels, GitHub state, or log/PID files,

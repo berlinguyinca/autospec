@@ -27,3 +27,9 @@ def _stub_subprocess_run(monkeypatch):
     fake_subprocess = MagicMock()
     fake_subprocess.run = MagicMock(return_value=MagicMock(returncode=0))
     monkeypatch.setattr(_main, "subprocess", fake_subprocess)
+
+
+@pytest.fixture(autouse=True)
+def _not_inside_herdr(monkeypatch):
+    """Run every test as if outside a Herdr pane (the monitor skips Herdr panes)."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
